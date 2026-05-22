@@ -1,7 +1,8 @@
+use anyhow::Result;
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 use std::path::PathBuf;
 
-pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool, sqlx::Error> {
+pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true);
@@ -24,7 +25,7 @@ pub struct QueryRecord {
 }
 
 /// List all saved queries ordered by creation time.
-pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>, sqlx::Error> {
+pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>> {
     let rows = sqlx::query!(
         "SELECT id, query, kind FROM queries ORDER BY created_at ASC"
     )
@@ -53,7 +54,7 @@ pub struct FilterStreamRecord {
 pub async fn list_filter_streams(
     pool: &SqlitePool,
     parent_id: i64,
-) -> Result<Vec<FilterStreamRecord>, sqlx::Error> {
+) -> Result<Vec<FilterStreamRecord>> {
     let rows = sqlx::query!(
         "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY created_at ASC",
         parent_id,
@@ -77,7 +78,7 @@ pub async fn upsert_filter_stream(
     parent_id: i64,
     name: &str,
     filter: &str,
-) -> Result<i64, sqlx::Error> {
+) -> Result<i64> {
     let row = sqlx::query!(
         r#"
         INSERT INTO filter_streams (parent_id, name, filter)
@@ -94,7 +95,7 @@ pub async fn upsert_filter_stream(
 }
 
 /// Delete a filter stream by id.
-pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
     sqlx::query!("DELETE FROM filter_streams WHERE id = ?", id)
         .execute(pool)
         .await?;
@@ -102,7 +103,7 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<(), sqlx
 }
 
 /// Delete a query and its cached items (CASCADE).
-pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<(), sqlx::Error> {
+pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
     sqlx::query!("DELETE FROM queries WHERE id = ?", query_id)
         .execute(pool)
         .await?;
@@ -114,7 +115,7 @@ pub async fn upsert_query(
     pool: &SqlitePool,
     query: &str,
     kind: &str,
-) -> Result<i64, sqlx::Error> {
+) -> Result<i64> {
     let row = sqlx::query!(
         r#"
         INSERT INTO queries (query, kind)
@@ -131,7 +132,7 @@ pub async fn upsert_query(
 }
 
 /// Mark a query as freshly fetched.
-pub async fn mark_fetched(pool: &SqlitePool, query_id: i64) -> Result<(), sqlx::Error> {
+pub async fn mark_fetched(pool: &SqlitePool, query_id: i64) -> Result<()> {
     sqlx::query!(
         "UPDATE queries SET last_fetched_at = datetime('now') WHERE id = ?",
         query_id,
@@ -157,7 +158,7 @@ pub struct CachedItem {
 }
 
 /// Insert or replace a cached item for a query.
-pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<(), sqlx::Error> {
+pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
     sqlx::query!(
         r#"
         INSERT INTO items
@@ -197,7 +198,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<(), sql
 pub async fn fetch_items(
     pool: &SqlitePool,
     query_id: i64,
-) -> Result<Vec<CachedItem>, sqlx::Error> {
+) -> Result<Vec<CachedItem>> {
     let rows = sqlx::query!(
         r#"
         SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,
@@ -235,7 +236,7 @@ pub async fn is_cache_stale(
     pool: &SqlitePool,
     query_id: i64,
     max_age_secs: i64,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool> {
     let row = sqlx::query!(
         r#"
         SELECT last_fetched_at

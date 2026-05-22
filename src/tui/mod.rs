@@ -1,3 +1,4 @@
+use anyhow::Result;
 use crate::{db, github};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
@@ -497,7 +498,7 @@ async fn sync_task(
 
 // ── Main run loop ─────────────────────────────────────────────────────────────
 
-pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
     // Set up terminal
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -521,7 +522,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     pool: SqlitePool,
     gh: Octocrab,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     // Build hierarchical left-pane entries: root queries interleaved with their filter streams.
     let query_rows = db::list_queries(&pool).await.unwrap_or_default();
     let mut entries: Vec<LeftPaneEntry> = Vec::new();

@@ -1,3 +1,4 @@
+use anyhow::Result;
 use crate::db::CachedItem;
 use octocrab::{Octocrab, models::IssueState};
 use url::Url;
@@ -8,7 +9,7 @@ use url::Url;
 ///   1. `GH_TOKEN` env var (set automatically by `gh` for extensions)
 ///   2. `GITHUB_TOKEN` env var (GitHub Actions / manual PAT)
 ///   3. Unauthenticated (rate-limited to 60 req/hour)
-pub fn build_client() -> octocrab::Result<Octocrab> {
+pub fn build_client() -> Result<Octocrab> {
     let token = std::env::var("GH_TOKEN")
         .or_else(|_| std::env::var("GITHUB_TOKEN"))
         .ok();
@@ -17,7 +18,7 @@ pub fn build_client() -> octocrab::Result<Octocrab> {
     if let Some(t) = token {
         builder = builder.personal_token(t);
     }
-    builder.build()
+    builder.build().map_err(Into::into)
 }
 
 /// Search GitHub for issues and pull requests matching `query`.
@@ -33,7 +34,7 @@ pub async fn search(
     client: &Octocrab,
     query_id: i64,
     query: &str,
-) -> octocrab::Result<Vec<CachedItem>> {
+) -> Result<Vec<CachedItem>> {
     let page = client
         .search()
         .issues_and_pull_requests(query)
