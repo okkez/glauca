@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO filter_streams (parent_id, name, filter)\n        VALUES (?, ?, ?)\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "2d2d8f18eb97ee68a8747a35a3c3b6811a2f03036f5f1045d16b12252e012e66"
+}

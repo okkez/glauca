@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (strftime('%s', 'now') - strftime('%s', ?)) > ? AS \"stale: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "stale: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c6e7d77d45ae7a623292660d632e2542f84743751e4dfda5d9e35ac76bfee358"
+}

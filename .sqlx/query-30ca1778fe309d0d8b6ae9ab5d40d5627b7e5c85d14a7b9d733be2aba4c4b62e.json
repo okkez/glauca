@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,\n               state, updated_at, labels, comment_count\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "query_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "repo_owner",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "repo_name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "number",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "url",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "author",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "state",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "labels",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "comment_count",
+        "ordinal": 11,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "30ca1778fe309d0d8b6ae9ab5d40d5627b7e5c85d14a7b9d733be2aba4c4b62e"
+}
