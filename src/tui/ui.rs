@@ -26,6 +26,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         || app.input_mode == InputMode::NewFilterStreamFilter
     {
         draw_new_filter_stream_modal(f, app, area);
+    } else if app.input_mode == InputMode::EditQuery {
+        draw_edit_query_modal(f, app, area);
+    } else if app.input_mode == InputMode::EditFilterStreamName
+        || app.input_mode == InputMode::EditFilterStreamFilter
+    {
+        draw_edit_filter_stream_modal(f, app, area);
     }
 }
 
@@ -49,7 +55,7 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
 fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::QueryList;
     let block = pane_block("Filter Streams", focused)
-        .title_bottom(Line::from(" n:new  f:stream  d:del ").right_aligned());
+        .title_bottom(Line::from(" n:new  f:stream  e:edit  d:del ").right_aligned());
 
     let items: Vec<ListItem> = app
         .entries
@@ -245,7 +251,7 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mode_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::QueryList => "QUERIES  Tab:focus  j/k:move  n:new query  f:new stream  d:delete  q:quit",
+            Focus::QueryList => "QUERIES  Tab:focus  j/k:move  n:new query  f:new stream  e:edit  d:delete  q:quit",
             Focus::ItemList => "ITEMS    Tab:focus  j/k:move  /:filter  q:quit",
             Focus::ItemDetail => "DETAIL   Tab:focus  j/k:scroll  q:quit",
         },
@@ -253,6 +259,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::NewQuery => "NEW QUERY  Enter:save  Esc:cancel",
         InputMode::NewFilterStreamName => "NEW STREAM (1/2: name)  Enter:next  Esc:cancel",
         InputMode::NewFilterStreamFilter => "NEW STREAM (2/2: filter)  Enter:save  Esc:cancel",
+        InputMode::EditQuery => "EDIT QUERY  Enter:save  Esc:cancel",
+        InputMode::EditFilterStreamName => "EDIT STREAM (1/2: name)  Enter:next  Esc:cancel",
+        InputMode::EditFilterStreamFilter => "EDIT STREAM (2/2: filter)  Enter:save  Esc:cancel",
     };
 
     let status = if let Some(msg) = &app.status {
@@ -383,7 +392,102 @@ fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn draw_edit_query_modal(f: &mut Frame, app: &App, area: Rect) {
+    let popup_area = centered_rect(60, 7, area);
+    f.render_widget(Clear, popup_area);
 
+    let block = Block::default()
+        .title(" Edit Query ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    f.render_widget(Paragraph::new("Edit GitHub search query:"), split[0]);
+    f.render_widget(
+        Paragraph::new(format!("> {}_", app.edit_input))
+            .style(Style::default().fg(Color::Cyan)),
+        split[1],
+    );
+    f.render_widget(
+        Paragraph::new("(Saving will reset cache and re-sync)")
+            .style(Style::default().fg(Color::DarkGray)),
+        split[2],
+    );
+    f.render_widget(
+        Paragraph::new("Enter:save  Esc:cancel").style(Style::default().fg(Color::DarkGray)),
+        split[3],
+    );
+}
+
+fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
+    let popup_area = centered_rect(60, 9, area);
+    f.render_widget(Clear, popup_area);
+
+    let (step, title) = if app.input_mode == InputMode::EditFilterStreamName {
+        (1, " Edit Filter Stream — Step 1/2: Name ")
+    } else {
+        (2, " Edit Filter Stream — Step 2/2: Filter ")
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    if step == 1 {
+        f.render_widget(Paragraph::new("Display name for this filter stream:"), split[0]);
+        f.render_widget(
+            Paragraph::new(format!("> {}_", app.edit_input))
+                .style(Style::default().fg(Color::Cyan)),
+            split[1],
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(format!("Name: {}", app.edit_input))
+                .style(Style::default().fg(Color::DarkGray)),
+            split[0],
+        );
+        f.render_widget(
+            Paragraph::new("Filter (e.g. state:open label:bug repo:owner/name):"),
+            split[1],
+        );
+        f.render_widget(
+            Paragraph::new(format!("> {}_", app.edit_input2))
+                .style(Style::default().fg(Color::Cyan)),
+            split[2],
+        );
+    }
+    f.render_widget(
+        Paragraph::new("Enter:confirm  Esc:cancel").style(Style::default().fg(Color::DarkGray)),
+        split[4],
+    );
+}
 
 fn pane_block(title: &str, focused: bool) -> Block<'_> {
     let border_style = if focused {

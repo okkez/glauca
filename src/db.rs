@@ -102,6 +102,37 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Update an existing query's search string.
+/// Note: also resets last_fetched_at so the cache is considered stale.
+pub async fn update_query(pool: &SqlitePool, id: i64, new_query: &str) -> Result<()> {
+    sqlx::query!(
+        "UPDATE queries SET query = ?, last_fetched_at = NULL WHERE id = ?",
+        new_query,
+        id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Update an existing filter stream's name and filter string.
+pub async fn update_filter_stream(
+    pool: &SqlitePool,
+    id: i64,
+    name: &str,
+    filter: &str,
+) -> Result<()> {
+    sqlx::query!(
+        "UPDATE filter_streams SET name = ?, filter = ? WHERE id = ?",
+        name,
+        filter,
+        id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Delete a query and its cached items (CASCADE).
 pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
     sqlx::query!("DELETE FROM queries WHERE id = ?", query_id)

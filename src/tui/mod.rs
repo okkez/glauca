@@ -118,6 +118,12 @@ pub enum InputMode {
     NewFilterStreamName,
     /// Step 2: entering filter string for a new filter stream.
     NewFilterStreamFilter,
+    /// Editing an existing root query's search string.
+    EditQuery,
+    /// Step 1: editing an existing filter stream's display name.
+    EditFilterStreamName,
+    /// Step 2: editing an existing filter stream's filter string.
+    EditFilterStreamFilter,
 }
 
 pub struct App {
@@ -136,6 +142,10 @@ pub struct App {
     pub new_query_input: String,
     pub new_filter_stream_name: String,
     pub new_filter_stream_filter: String,
+    /// Input buffer reused for edit modals (query string or filter stream name).
+    pub edit_input: String,
+    /// Second input buffer for editing filter stream filter string.
+    pub edit_input2: String,
     pub status: Option<String>,
     /// Whether a background GitHub sync is in progress.
     pub syncing: bool,
@@ -156,6 +166,8 @@ impl App {
             new_query_input: String::new(),
             new_filter_stream_name: String::new(),
             new_filter_stream_filter: String::new(),
+            edit_input: String::new(),
+            edit_input2: String::new(),
             status: None,
             syncing: false,
         }
@@ -219,6 +231,8 @@ pub enum AppMessage {
     ItemsLoaded { query_id: i64, items: Vec<ItemEntry> },
     QueryAdded(QueryEntry),
     FilterStreamAdded(FilterStreamEntry),
+    QueryUpdated { id: i64, new_query: String },
+    FilterStreamUpdated { id: i64, new_name: String, new_filter: String },
     Status(String),
     SyncDone { query_id: i64, count: usize },
     SyncError { query_id: i64, error: String },
@@ -232,6 +246,8 @@ enum Action {
     LoadEntry,
     SaveNewQuery,
     SaveNewFilterStream,
+    SaveEditQuery,
+    SaveEditFilterStream,
 }
 
 // ── Key event handler ────────────────────────────────────────────────────────
@@ -242,6 +258,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         InputMode::NewQuery => handle_key_new_query(app, key),
         InputMode::NewFilterStreamName => handle_key_new_fs_name(app, key),
         InputMode::NewFilterStreamFilter => handle_key_new_fs_filter(app, key),
+        InputMode::EditQuery => handle_key_edit_query(app, key),
+        InputMode::EditFilterStreamName => handle_key_edit_fs_name(app, key),
+        InputMode::EditFilterStreamFilter => handle_key_edit_fs_filter(app, key),
         InputMode::Normal => handle_key_normal(app, key),
     }
 }
@@ -306,6 +325,22 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                 app.input_mode = InputMode::NewFilterStreamName;
                 app.new_filter_stream_name.clear();
                 app.new_filter_stream_filter.clear();
+            }
+        }
+        // Edit selected entry (left pane)
+        KeyCode::Char('e') if app.focus == Focus::QueryList => {
+            if let Some(entry) = app.entries.get(app.entry_cursor) {
+                match entry {
+                    LeftPaneEntry::Query(q) => {
+                        app.edit_input = q.label.clone();
+                        app.input_mode = InputMode::EditQuery;
+                    }
+                    LeftPaneEntry::FilterStream(fs) => {
+                        app.edit_input = fs.name.clone();
+                        app.edit_input2 = fs.filter.clone();
+                        app.input_mode = InputMode::EditFilterStreamName;
+                    }
+                }
             }
         }
         // Delete handled in main loop
@@ -409,6 +444,76 @@ fn handle_key_new_fs_filter(app: &mut App, key: KeyEvent) -> Action {
         }
         KeyCode::Char(c) => {
             app.new_filter_stream_filter.push(c);
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_key_edit_query(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.edit_input.clear();
+        }
+        KeyCode::Enter => {
+            if !app.edit_input.trim().is_empty() {
+                return Action::SaveEditQuery;
+            }
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.edit_input.pop();
+        }
+        KeyCode::Char(c) => {
+            app.edit_input.push(c);
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_key_edit_fs_name(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.edit_input.clear();
+            app.edit_input2.clear();
+        }
+        KeyCode::Enter => {
+            if !app.edit_input.trim().is_empty() {
+                app.input_mode = InputMode::EditFilterStreamFilter;
+            }
+        }
+        KeyCode::Backspace => {
+            app.edit_input.pop();
+        }
+        KeyCode::Char(c) => {
+            app.edit_input.push(c);
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_key_edit_fs_filter(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.edit_input.clear();
+            app.edit_input2.clear();
+        }
+        KeyCode::Enter => {
+            if !app.edit_input2.trim().is_empty() {
+                return Action::SaveEditFilterStream;
+            }
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.edit_input2.pop();
+        }
+        KeyCode::Char(c) => {
+            app.edit_input2.push(c);
         }
         _ => {}
     }
@@ -730,6 +835,75 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 });
                             }
                         }
+                        Action::SaveEditFilterStream => {
+                            let name = app.edit_input.trim().to_string();
+                            let filter = app.edit_input2.trim().to_string();
+                            app.input_mode = InputMode::Normal;
+                            app.edit_input.clear();
+                            app.edit_input2.clear();
+
+                            if let Some(LeftPaneEntry::FilterStream(fs)) =
+                                app.entries.get(app.entry_cursor)
+                            {
+                                let id = fs.id;
+                                let pool_clone = pool.clone();
+                                let tx_clone = tx.clone();
+                                tokio::spawn(async move {
+                                    match db::update_filter_stream(&pool_clone, id, &name, &filter)
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            let _ = tx_clone
+                                                .send(AppMessage::FilterStreamUpdated {
+                                                    id,
+                                                    new_name: name,
+                                                    new_filter: filter,
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            let _ = tx_clone
+                                                .send(AppMessage::Status(format!(
+                                                    "edit filter stream error: {e}"
+                                                )))
+                                                .await;
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        Action::SaveEditQuery => {
+                            let new_query = app.edit_input.trim().to_string();
+                            app.input_mode = InputMode::Normal;
+                            app.edit_input.clear();
+
+                            if let Some(LeftPaneEntry::Query(q)) =
+                                app.entries.get(app.entry_cursor)
+                            {
+                                let id = q.id;
+                                let pool_clone = pool.clone();
+                                let tx_clone = tx.clone();
+                                tokio::spawn(async move {
+                                    match db::update_query(&pool_clone, id, &new_query).await {
+                                        Ok(()) => {
+                                            let _ = tx_clone
+                                                .send(AppMessage::QueryUpdated {
+                                                    id,
+                                                    new_query,
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            let _ = tx_clone
+                                                .send(AppMessage::Status(format!(
+                                                    "edit query error: {e}"
+                                                )))
+                                                .await;
+                                        }
+                                    }
+                                });
+                            }
+                        }
                         Action::None => {}
                     }
                 }
@@ -780,6 +954,52 @@ async fn run_app<B: ratatui::backend::Backend>(
                         if let Some(root_id) = app.activate_selected_entry() {
                             tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
                         }
+                    }
+                    AppMessage::QueryUpdated { id, new_query } => {
+                        // Update label in entries and trigger re-sync
+                        if let Some(LeftPaneEntry::Query(q)) = app
+                            .entries
+                            .iter_mut()
+                            .find(|e| matches!(e, LeftPaneEntry::Query(q) if q.id == id))
+                        {
+                            q.label = new_query.clone();
+                        }
+                        // Reload + sync with the new query string
+                        if app.selected_root_query_id() == Some(id) {
+                            app.items.clear();
+                            app.item_cursor = 0;
+                            app.filter.clear();
+                            spawn_load_and_sync(
+                                pool.clone(),
+                                gh.clone(),
+                                id,
+                                new_query,
+                                tx.clone(),
+                            );
+                            app.syncing = true;
+                        }
+                        app.status = Some("Query updated".into());
+                    }
+                    AppMessage::FilterStreamUpdated { id, new_name, new_filter } => {
+                        if let Some(LeftPaneEntry::FilterStream(fs)) = app
+                            .entries
+                            .iter_mut()
+                            .find(|e| matches!(e, LeftPaneEntry::FilterStream(fs) if fs.id == id))
+                        {
+                            fs.name = new_name;
+                            fs.filter = new_filter.clone();
+                        }
+                        // If this filter stream is currently selected, re-apply its filter
+                        if let Some(LeftPaneEntry::FilterStream(fs)) =
+                            app.entries.get(app.entry_cursor)
+                        {
+                            if fs.id == id {
+                                app.stream_filter = Some(new_filter);
+                                app.item_cursor = 0;
+                                app.clamp_item_cursor();
+                            }
+                        }
+                        app.status = Some("Filter stream updated".into());
                     }
                     AppMessage::Status(s) => {
                         app.status = Some(s);
