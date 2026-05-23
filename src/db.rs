@@ -196,6 +196,7 @@ pub struct CachedItem {
     pub updated_at: String,
     pub labels: String,
     pub comment_count: i64,
+    pub requested_reviewers: String,
 }
 
 /// Insert or replace a cached item for a query.
@@ -204,18 +205,19 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         r#"
         INSERT INTO items
             (query_id, kind, repo_owner, repo_name, number, title, url, author,
-             state, updated_at, labels, comment_count, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             state, updated_at, labels, comment_count, requested_reviewers, cached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
-            title         = excluded.title,
-            url           = excluded.url,
-            author        = excluded.author,
-            state         = excluded.state,
-            updated_at    = excluded.updated_at,
-            labels        = excluded.labels,
-            comment_count = excluded.comment_count,
-            cached_at     = excluded.cached_at
+            title               = excluded.title,
+            url                 = excluded.url,
+            author              = excluded.author,
+            state               = excluded.state,
+            updated_at          = excluded.updated_at,
+            labels              = excluded.labels,
+            comment_count       = excluded.comment_count,
+            requested_reviewers = excluded.requested_reviewers,
+            cached_at           = excluded.cached_at
         "#,
         item.query_id,
         item.kind,
@@ -229,6 +231,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         item.updated_at,
         item.labels,
         item.comment_count,
+        item.requested_reviewers,
     )
     .execute(pool)
     .await?;
@@ -243,7 +246,7 @@ pub async fn fetch_items(
     let rows = sqlx::query!(
         r#"
         SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,
-               state, updated_at, labels, comment_count
+               state, updated_at, labels, comment_count, requested_reviewers
         FROM items
         WHERE query_id = ?
         ORDER BY updated_at DESC
@@ -268,6 +271,7 @@ pub async fn fetch_items(
             updated_at: r.updated_at,
             labels: r.labels,
             comment_count: r.comment_count,
+            requested_reviewers: r.requested_reviewers,
         })
         .collect())
 }
@@ -331,6 +335,7 @@ mod tests {
             updated_at: "2026-05-22T00:00:00Z".into(),
             labels: "[]".into(),
             comment_count: 0,
+            requested_reviewers: "[]".into(),
         }
     }
 
@@ -413,6 +418,7 @@ mod tests {
             updated_at: "2026-05-22T00:00:00Z".into(),
             labels: "[]".into(),
             comment_count: 0,
+            requested_reviewers: "[]".into(),
         };
         upsert_item(&pool, &item).await.expect("upsert item");
 

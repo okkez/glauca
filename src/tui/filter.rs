@@ -6,6 +6,7 @@
 ///   - `author:<login>` — filter by author login
 ///   - `label:<name>` — filter by label (substring)
 ///   - `repo:<owner/name>` — filter by repository (substring)
+///   - `review-requested:<login>` — filter by requested reviewer login
 ///
 /// Multiple tokens are ANDed together.
 #[derive(Debug, Default, Clone)]
@@ -15,6 +16,7 @@ pub struct FilterQuery {
     pub authors: Vec<String>,
     pub labels: Vec<String>,
     pub repos: Vec<String>,
+    pub review_requested: Vec<String>,
 }
 
 impl FilterQuery {
@@ -32,6 +34,8 @@ impl FilterQuery {
                 q.labels.push(val.to_string());
             } else if let Some(val) = lower.strip_prefix("repo:") {
                 q.repos.push(val.to_string());
+            } else if let Some(val) = lower.strip_prefix("review-requested:") {
+                q.review_requested.push(val.to_string());
             } else {
                 q.text_tokens.push(lower);
             }
@@ -45,6 +49,7 @@ impl FilterQuery {
             && self.authors.is_empty()
             && self.labels.is_empty()
             && self.repos.is_empty()
+            && self.review_requested.is_empty()
     }
 
     /// Returns `true` if `item` matches all conditions in this query.
@@ -80,6 +85,16 @@ impl FilterQuery {
         let repo_lower = format!("{}/{}", item.repo_owner, item.repo_name).to_lowercase();
         for r in &self.repos {
             if !repo_lower.contains(r.as_str()) {
+                return false;
+            }
+        }
+        // review-requested filter
+        for rv in &self.review_requested {
+            let hit = item
+                .requested_reviewers
+                .iter()
+                .any(|login| login.to_lowercase().contains(rv.as_str()));
+            if !hit {
                 return false;
             }
         }
@@ -186,6 +201,7 @@ mod tests {
             url: String::new(),
             comment_count: 0,
             kind: "pull_request".into(),
+            requested_reviewers: vec![],
         }
     }
 
@@ -237,6 +253,26 @@ mod tests {
         assert!(q.matches(&item("Fix crash", "a", "open", &["bug"], "o/r")));
         assert!(!q.matches(&item("Fix crash", "a", "closed", &["bug"], "o/r")));
         assert!(!q.matches(&item("Fix crash", "a", "open", &["enhancement"], "o/r")));
+    }
+
+    #[test]
+    fn review_requested_filter() {
+        let mut pr = item("PR", "alice", "open", &[], "o/r");
+        pr.requested_reviewers = vec!["bob".into(), "carol".into()];
+
+        let q = FilterQuery::parse("review-requested:bob");
+        assert!(q.matches(&pr));
+
+        let q = FilterQuery::parse("review-requested:carol");
+        assert!(q.matches(&pr));
+
+        let q = FilterQuery::parse("review-requested:dave");
+        assert!(!q.matches(&pr));
+
+        // item with no reviewers
+        let no_reviewers = item("PR", "alice", "open", &[], "o/r");
+        let q = FilterQuery::parse("review-requested:bob");
+        assert!(!q.matches(&no_reviewers));
     }
 
     #[test]

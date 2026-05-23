@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,\n               state, updated_at, labels, comment_count\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
+  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,\n               state, updated_at, labels, comment_count, requested_reviewers\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -62,6 +62,11 @@
         "name": "comment_count",
         "ordinal": 11,
         "type_info": "Integer"
+      },
+      {
+        "name": "requested_reviewers",
+        "ordinal": 12,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -79,8 +84,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "30ca1778fe309d0d8b6ae9ab5d40d5627b7e5c85d14a7b9d733be2aba4c4b62e"
+  "hash": "6280840093669fd75f027ec90d246e783656fbc1cdafe6b100592802f8324d36"
 }

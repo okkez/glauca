@@ -58,6 +58,8 @@ struct SearchItem {
     user: SearchUser,
     labels: Vec<SearchLabel>,
     pull_request: Option<PrLink>,
+    #[serde(default)]
+    requested_reviewers: Vec<SearchUser>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +75,14 @@ struct SearchLabel {
 #[derive(Deserialize)]
 struct SearchPage {
     items: Vec<SearchItem>,
+}
+
+/// Serialize an iterator of strings as a compact JSON array: `["a","b"]`.
+fn json_string_array<'a>(iter: impl Iterator<Item = &'a String>) -> String {
+    let parts: Vec<String> = iter
+        .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
+        .collect();
+    format!("[{}]", parts.join(","))
 }
 
 /// Search GitHub for issues and pull requests matching `query`.
@@ -113,14 +123,11 @@ pub async fn search(
             let (repo_owner, repo_name) = extract_repo_url_str(&item.repository_url);
 
             // Serialize labels as JSON array: ["bug","enhancement"]
-            let labels = {
-                let names: Vec<String> = item
-                    .labels
-                    .iter()
-                    .map(|l| format!("\"{}\"", l.name.replace('"', "\\\"")))
-                    .collect();
-                format!("[{}]", names.join(","))
-            };
+            let labels = json_string_array(item.labels.iter().map(|l| &l.name));
+
+            // Serialize requested reviewers as JSON array: ["alice","bob"]
+            let requested_reviewers =
+                json_string_array(item.requested_reviewers.iter().map(|u| &u.login));
 
             CachedItem {
                 query_id,
@@ -135,6 +142,7 @@ pub async fn search(
                 updated_at: item.updated_at,
                 labels,
                 comment_count: item.comments as i64,
+                requested_reviewers,
             }
         })
         .collect();
