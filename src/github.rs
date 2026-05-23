@@ -22,6 +22,21 @@ pub fn build_client() -> Result<Octocrab> {
     builder.build().map_err(Into::into)
 }
 
+/// Fetch the login name of the authenticated user.
+///
+/// Returns `None` if unauthenticated or the API call fails.
+pub async fn get_current_user(client: &Octocrab) -> Option<String> {
+    #[derive(Deserialize)]
+    struct UserResponse {
+        login: String,
+    }
+    client
+        .get::<UserResponse, _, _>("https://api.github.com/user", None::<&()>)
+        .await
+        .ok()
+        .map(|u| u.login)
+}
+
 // ── Custom deserialization types for search results ──────────────────────────
 
 /// Minimal representation of the `pull_request` sub-object in search results.

@@ -161,6 +161,8 @@ pub struct App {
     pub status: Option<String>,
     /// Whether a background GitHub sync is in progress.
     pub syncing: bool,
+    /// Login name of the authenticated GitHub user (used to expand `@me` in filters).
+    pub current_user: Option<String>,
 }
 
 impl App {
@@ -183,18 +185,45 @@ impl App {
             modal_field: 0,
             status: None,
             syncing: false,
+            current_user: None,
         }
     }
 
     pub fn parsed_filter(&self) -> FilterQuery {
-        FilterQuery::parse(&self.filter)
+        FilterQuery::parse(&self.expand_me(&self.filter))
+    }
+
+    /// Replace `@me` with the authenticated user's login (case-insensitive).
+    /// Falls back to `@me` unchanged if the user is not known yet.
+    fn expand_me<'a>(&'a self, s: &'a str) -> std::borrow::Cow<'a, str> {
+        if let Some(login) = &self.current_user {
+            // Only replace the token `@me` (whole word match within tokens)
+            if s.contains("@me") {
+                return std::borrow::Cow::Owned(
+                    s.split_whitespace()
+                        .map(|tok| {
+                            if tok.to_lowercase().ends_with(":@me") {
+                                let prefix = &tok[..tok.len() - 3]; // strip "@me"
+                                format!("{}{}", prefix, login)
+                            } else if tok == "@me" {
+                                login.clone()
+                            } else {
+                                tok.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+        }
+        std::borrow::Cow::Borrowed(s)
     }
 
     pub fn filtered_items(&self) -> Vec<&ItemEntry> {
         let stream_q = self
             .stream_filter
             .as_deref()
-            .map(FilterQuery::parse);
+            .map(|s| FilterQuery::parse(&self.expand_me(s)));
         let inline_q = self.parsed_filter();
 
         self.items
@@ -685,6 +714,7 @@ async fn run_app<B: ratatui::backend::Backend>(
         .collect();
     let mut app = App::new(queries);
     app.entries = entries;
+    app.current_user = github::get_current_user(&gh).await;
 
     // Helper: spawn cache load + GitHub sync for a root query
     let spawn_load_and_sync = |pool: SqlitePool,
