@@ -1,4 +1,5 @@
 use crate::tui::{App, Focus, InputMode, LeftPaneEntry};
+use chrono::{DateTime, Local, Utc};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -134,16 +135,30 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         .map(|item| {
             let state_style = state_style(&item.state);
             let state_badge = state_badge(&item.state);
-            let author = item.author.as_deref().unwrap_or("—");
+            let kind_icon = kind_icon(&item.kind);
+            let repo = format!("{}/{}", item.repo_owner, item.repo_name);
+            let updated = format_local_datetime(&item.updated_at);
             let title_spans =
                 filter_query.highlight_spans(&item.title, match_normal, match_highlight);
-            let mut spans = vec![
+
+            // Line 1: state●  kind⎇  #number  title
+            let mut line1_spans = vec![
                 Span::styled(state_badge, state_style),
+                Span::raw(" "),
+                Span::styled(kind_icon, Style::default().fg(Color::Cyan)),
                 Span::raw(format!(" #{} ", item.number)),
             ];
-            spans.extend(title_spans);
-            spans.push(Span::raw(format!("  {author}")));
-            ListItem::new(Line::from(spans))
+            line1_spans.extend(title_spans);
+
+            // Line 2: (indent)  repo  ·  updated_at
+            let line2 = Line::from(vec![
+                Span::raw("      "),
+                Span::styled(repo, Style::default().fg(Color::Gray)),
+                Span::styled("  ·  ", Style::default().fg(Color::Gray)),
+                Span::styled(updated, Style::default().fg(Color::Gray)),
+            ]);
+
+            ListItem::new(vec![Line::from(line1_spans), line2])
         })
         .collect();
 
@@ -178,14 +193,15 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             let author = item.author.clone().unwrap_or_else(|| "—".to_string());
             let state = item.state.clone();
             let title = item.title.clone();
-            let updated_at = item.updated_at.clone();
+            let updated_at = format_local_datetime(&item.updated_at);
             let url = item.url.clone();
             let number = item.number;
             let comment_count = item.comment_count;
+            let kind_icon = kind_icon(&item.kind);
             vec![
                 Line::from(vec![
                     Span::styled(
-                        format!("#{number} "),
+                        format!("{kind_icon} #{number} "),
                         Style::default().fg(Color::Cyan),
                     ),
                     Span::styled(
@@ -204,10 +220,8 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                 ]),
                 Line::from(vec![
                     Span::styled("State:   ", Style::default().fg(Color::Gray)),
-                    Span::styled(
-                        state.clone(),
-                        state_style(&state),
-                    ),
+                    Span::styled(state_badge(&state), state_style(&state)),
+                    Span::raw(format!(" {state}")),
                 ]),
                 Line::from(vec![
                     Span::styled("Updated: ", Style::default().fg(Color::Gray)),
@@ -553,6 +567,26 @@ fn state_badge(state: &str) -> &'static str {
         "closed" => "✕",
         _ => "?",
     }
+}
+
+fn kind_icon(kind: &str) -> &'static str {
+    match kind {
+        "pull_request" => "⎇",
+        _ => "○", // issue
+    }
+}
+
+/// Parse a RFC3339 UTC string and format it as local time `YYYY-MM-DD HH:MM`.
+fn format_local_datetime(s: &str) -> String {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| {
+            let local: DateTime<Local> = dt.with_timezone(&Local);
+            local.format("%Y-%m-%d %H:%M").to_string()
+        })
+        .unwrap_or_else(|_| {
+            // Fall back: strip trailing Z/offset if present, return as-is trimmed
+            s.get(..16).unwrap_or(s).replace('T', " ")
+        })
 }
 
 /// Returns a centered `Rect` of fixed height and `percent_x` width.

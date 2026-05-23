@@ -185,6 +185,7 @@ mod tests {
             labels: labels.iter().map(|s| s.to_string()).collect(),
             url: String::new(),
             comment_count: 0,
+            kind: "pull_request".into(),
         }
     }
 

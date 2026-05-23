@@ -109,6 +109,7 @@ pub struct ItemEntry {
     pub labels: Vec<String>,
     pub url: String,
     pub comment_count: i64,
+    pub kind: String,
 }
 
 // ── Application state ────────────────────────────────────────────────────────
@@ -552,6 +553,7 @@ async fn load_items_task(pool: SqlitePool, query_id: i64, tx: mpsc::Sender<AppMe
                     labels: serde_labels(&c.labels),
                     url: c.url,
                     comment_count: c.comment_count,
+                    kind: c.kind,
                 })
                 .collect();
             let _ = tx.send(AppMessage::ItemsLoaded { query_id, items }).await;
@@ -1086,6 +1088,7 @@ mod tests {
                 labels: vec![],
                 url: String::new(),
                 comment_count: 0,
+                kind: "pull_request".into(),
             })
             .collect();
         app
@@ -1179,6 +1182,7 @@ mod tests {
                 labels: vec![],
                 url: String::new(),
                 comment_count: 0,
+                kind: "pull_request".into(),
             },
             ItemEntry {
                 number: 2,
@@ -1191,6 +1195,7 @@ mod tests {
                 labels: vec![],
                 url: String::new(),
                 comment_count: 0,
+                kind: "pull_request".into(),
             },
         ];
         app.stream_filter = Some("state:open".into());
