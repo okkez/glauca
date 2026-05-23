@@ -106,49 +106,46 @@ struct GqlPageInfo {
     end_cursor: Option<String>,
 }
 
-/// Search GitHub for issues and pull requests matching `query` using GraphQL.
+/// One page of search results returned by `search_page()`.
+pub struct SearchPageResult {
+    pub items: Vec<CachedItem>,
+    pub has_next_page: bool,
+    pub end_cursor: Option<String>,
+}
+
+/// Fetch a single page of GitHub search results using GraphQL.
 ///
-/// GraphQL gives us `reviewRequests` (requested reviewers) in a single round-trip,
-/// which the REST Search API does not include.
-pub async fn search(
+/// Pass `after: None` for the first page, then `Some(end_cursor)` for subsequent pages.
+/// GraphQL gives us `reviewRequests` in a single round-trip.
+pub async fn search_page(
     client: &Octocrab,
     query_id: i64,
     query: &str,
-) -> Result<Vec<CachedItem>> {
-    let mut all_items: Vec<CachedItem> = Vec::new();
-    let mut after: Option<String> = None;
-
-    loop {
-        let payload = serde_json::json!({
-            "query": SEARCH_QUERY,
-            "variables": {
-                "q": query,
-                "after": after,
-            }
-        });
-        let resp: GqlResponse = client
-            .graphql(&payload)
-            .await
-            .context("GraphQL search failed")?;
-
-        let conn = resp.data.search;
-
-        for node in conn.nodes {
-            if let Some(item) = node_to_cached_item(&node, query_id) {
-                all_items.push(item);
-            }
+    after: Option<&str>,
+) -> Result<SearchPageResult> {
+    let payload = serde_json::json!({
+        "query": SEARCH_QUERY,
+        "variables": {
+            "q": query,
+            "after": after,
         }
+    });
+    let resp: GqlResponse = client
+        .graphql(&payload)
+        .await
+        .context("GraphQL search failed")?;
 
-        if !conn.page_info.has_next_page {
-            break;
-        }
-        after = conn.page_info.end_cursor;
-        if after.is_none() {
-            break;
-        }
-    }
+    let conn = resp.data.search;
+    let items = conn.nodes
+        .iter()
+        .filter_map(|node| node_to_cached_item(node, query_id))
+        .collect();
 
-    Ok(all_items)
+    Ok(SearchPageResult {
+        items,
+        has_next_page: conn.page_info.has_next_page,
+        end_cursor: conn.page_info.end_cursor,
+    })
 }
 
 /// Convert a single GraphQL search node (Issue or PullRequest) to a `CachedItem`.

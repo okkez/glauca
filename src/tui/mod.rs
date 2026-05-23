@@ -602,7 +602,8 @@ fn serde_labels(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
-/// Fetch fresh results from GitHub API, upsert into SQLite, then reload into TUI.
+/// Fetch fresh results from GitHub API page by page, upserting each page immediately
+/// so the TUI can show results as they arrive rather than waiting for all pages.
 async fn sync_task(
     pool: SqlitePool,
     gh: Octocrab,
@@ -610,44 +611,68 @@ async fn sync_task(
     query_str: String,
     tx: mpsc::Sender<AppMessage>,
 ) {
-    match github::search(&gh, query_id, &query_str).await {
-        Ok(fetched) => {
-            let count = fetched.len();
-            for item in &fetched {
-                if let Err(e) = db::upsert_item(&pool, item).await {
-                    let _ = tx
-                        .send(AppMessage::SyncError {
-                            query_id,
-                            error: format!("db write error: {e}"),
-                        })
-                        .await;
-                    return;
-                }
-            }
-            if let Err(e) = db::mark_fetched(&pool, query_id).await {
+    let mut after: Option<String> = None;
+    let mut total_count = 0usize;
+    let mut page_num = 0usize;
+
+    loop {
+        let result = github::search_page(&gh, query_id, &query_str, after.as_deref()).await;
+        match result {
+            Err(e) => {
                 let _ = tx
                     .send(AppMessage::SyncError {
                         query_id,
-                        error: format!("mark fetched error: {e}"),
+                        error: format!("GitHub API error: {e}"),
                     })
                     .await;
                 return;
             }
-            // Reload from DB so the TUI shows consistent cached data.
-            let _ = tx
-                .send(AppMessage::SyncDone { query_id, count })
-                .await;
-            load_items_task(pool, query_id, tx).await;
-        }
-        Err(e) => {
-            let _ = tx
-                .send(AppMessage::SyncError {
-                    query_id,
-                    error: format!("GitHub API error: {e}"),
-                })
-                .await;
+            Ok(page) => {
+                let has_next = page.has_next_page;
+                let cursor = page.end_cursor.clone();
+
+                // Upsert this page's items into SQLite.
+                for item in &page.items {
+                    if let Err(e) = db::upsert_item(&pool, item).await {
+                        let _ = tx
+                            .send(AppMessage::SyncError {
+                                query_id,
+                                error: format!("db write error: {e}"),
+                            })
+                            .await;
+                        return;
+                    }
+                }
+                total_count += page.items.len();
+                page_num += 1;
+
+                // Reload from DB after each page so the TUI shows results immediately.
+                load_items_task(pool.clone(), query_id, tx.clone()).await;
+
+                if !has_next {
+                    break;
+                }
+                after = cursor;
+                if after.is_none() {
+                    break;
+                }
+            }
         }
     }
+
+    // Mark the query as freshly fetched only after all pages are done.
+    if let Err(e) = db::mark_fetched(&pool, query_id).await {
+        let _ = tx
+            .send(AppMessage::SyncError {
+                query_id,
+                error: format!("mark fetched error: {e}"),
+            })
+            .await;
+        return;
+    }
+    let _ = tx
+        .send(AppMessage::SyncDone { query_id, count: total_count })
+        .await;
 }
 
 // ── Main run loop ─────────────────────────────────────────────────────────────
