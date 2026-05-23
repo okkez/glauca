@@ -22,12 +22,14 @@ pub struct QueryRecord {
     pub id: i64,
     pub query: String,
     pub kind: String,
+    /// Optional display name. If None, the query string is used as the label.
+    pub name: Option<String>,
 }
 
 /// List all saved queries ordered by creation time.
 pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>> {
     let rows = sqlx::query!(
-        "SELECT id, query, kind FROM queries ORDER BY created_at ASC"
+        "SELECT id, query, kind, name FROM queries ORDER BY created_at ASC"
     )
     .fetch_all(pool)
     .await?;
@@ -37,6 +39,7 @@ pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>> {
             id: r.id,
             query: r.query,
             kind: r.kind,
+            name: r.name,
         })
         .collect())
 }
@@ -102,12 +105,19 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Update an existing query's search string.
-/// Note: also resets last_fetched_at so the cache is considered stale.
-pub async fn update_query(pool: &SqlitePool, id: i64, new_query: &str) -> Result<()> {
+/// Update an existing query's display name and/or search string.
+/// Passing `None` for `name` clears the display name (falls back to query string).
+/// Resets last_fetched_at so the cache is considered stale.
+pub async fn update_query(
+    pool: &SqlitePool,
+    id: i64,
+    name: Option<&str>,
+    query: &str,
+) -> Result<()> {
     sqlx::query!(
-        "UPDATE queries SET query = ?, last_fetched_at = NULL WHERE id = ?",
-        new_query,
+        "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL WHERE id = ?",
+        name,
+        query,
         id,
     )
     .execute(pool)

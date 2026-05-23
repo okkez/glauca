@@ -26,7 +26,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         || app.input_mode == InputMode::NewFilterStreamFilter
     {
         draw_new_filter_stream_modal(f, app, area);
-    } else if app.input_mode == InputMode::EditQuery {
+    } else if app.input_mode == InputMode::EditQueryName
+        || app.input_mode == InputMode::EditQueryString
+    {
         draw_edit_query_modal(f, app, area);
     } else if app.input_mode == InputMode::EditFilterStreamName
         || app.input_mode == InputMode::EditFilterStreamFilter
@@ -259,7 +261,8 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::NewQuery => "NEW QUERY  Enter:save  Esc:cancel",
         InputMode::NewFilterStreamName => "NEW STREAM (1/2: name)  Enter:next  Esc:cancel",
         InputMode::NewFilterStreamFilter => "NEW STREAM (2/2: filter)  Enter:save  Esc:cancel",
-        InputMode::EditQuery => "EDIT QUERY  Enter:save  Esc:cancel",
+        InputMode::EditQueryName => "EDIT QUERY (1/2: name)  Enter:next  Esc:cancel",
+        InputMode::EditQueryString => "EDIT QUERY (2/2: query)  Enter:save  Esc:cancel",
         InputMode::EditFilterStreamName => "EDIT STREAM (1/2: name)  Enter:next  Esc:cancel",
         InputMode::EditFilterStreamFilter => "EDIT STREAM (2/2: filter)  Enter:save  Esc:cancel",
     };
@@ -393,11 +396,17 @@ fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_edit_query_modal(f: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(60, 7, area);
+    let popup_area = centered_rect(60, 9, area);
     f.render_widget(Clear, popup_area);
 
+    let (step, title) = if app.input_mode == InputMode::EditQueryName {
+        (1, " Edit Query — Step 1/2: Display Name ")
+    } else {
+        (2, " Edit Query — Step 2/2: GitHub Search Query ")
+    };
+
     let block = Block::default()
-        .title(" Edit Query ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -411,23 +420,52 @@ fn draw_edit_query_modal(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(inner);
 
-    f.render_widget(Paragraph::new("Edit GitHub search query:"), split[0]);
-    f.render_widget(
-        Paragraph::new(format!("> {}_", app.edit_input))
-            .style(Style::default().fg(Color::Cyan)),
-        split[1],
-    );
-    f.render_widget(
-        Paragraph::new("(Saving will reset cache and re-sync)")
+    if step == 1 {
+        f.render_widget(
+            Paragraph::new("Display name (leave empty to use query string as label):"),
+            split[0],
+        );
+        f.render_widget(
+            Paragraph::new(format!("> {}_", app.edit_input))
+                .style(Style::default().fg(Color::Cyan)),
+            split[1],
+        );
+        f.render_widget(
+            Paragraph::new("Press Enter to continue to query string")
+                .style(Style::default().fg(Color::DarkGray)),
+            split[2],
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(format!(
+                "Name: {}",
+                if app.edit_input.is_empty() { "(use query string)" } else { &app.edit_input }
+            ))
             .style(Style::default().fg(Color::DarkGray)),
-        split[2],
-    );
+            split[0],
+        );
+        f.render_widget(
+            Paragraph::new("GitHub search query (e.g. repo:owner/name is:pr is:open):"),
+            split[1],
+        );
+        f.render_widget(
+            Paragraph::new(format!("> {}_", app.edit_input2))
+                .style(Style::default().fg(Color::Cyan)),
+            split[2],
+        );
+        f.render_widget(
+            Paragraph::new("(Saving will reset cache and re-sync)")
+                .style(Style::default().fg(Color::DarkGray)),
+            split[3],
+        );
+    }
     f.render_widget(
-        Paragraph::new("Enter:save  Esc:cancel").style(Style::default().fg(Color::DarkGray)),
-        split[3],
+        Paragraph::new("Enter:confirm  Esc:cancel").style(Style::default().fg(Color::DarkGray)),
+        split[4],
     );
 }
 

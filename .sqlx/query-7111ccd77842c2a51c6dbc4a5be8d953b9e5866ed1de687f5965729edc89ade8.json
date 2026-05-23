@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, query, kind FROM queries ORDER BY created_at ASC",
+  "query": "SELECT id, query, kind, name FROM queries ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -17,6 +17,11 @@
         "name": "kind",
         "ordinal": 2,
         "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 3,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -25,8 +30,9 @@
     "nullable": [
       false,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "38b748ebe2adb1aaa6fb269eb3bc997c322d1b0b77061dbe2148a7057b03cffc"
+  "hash": "7111ccd77842c2a51c6dbc4a5be8d953b9e5866ed1de687f5965729edc89ade8"
 }

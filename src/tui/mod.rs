@@ -18,7 +18,10 @@ use filter::FilterQuery;
 
 pub struct QueryEntry {
     pub id: i64,
+    /// Display label shown in the left pane (name if set, otherwise query_str).
     pub label: String,
+    /// Actual GitHub search query string sent to the API.
+    pub query_str: String,
     pub kind: String,
 }
 
@@ -63,6 +66,14 @@ impl LeftPaneEntry {
         match self {
             Self::Query(q) => q.id,
             Self::FilterStream(fs) => fs.parent_id,
+        }
+    }
+
+    /// The actual GitHub search query string (only meaningful for root queries).
+    pub fn root_query_str(&self) -> Option<&str> {
+        match self {
+            Self::Query(q) => Some(&q.query_str),
+            Self::FilterStream(_) => None,
         }
     }
 
@@ -118,8 +129,10 @@ pub enum InputMode {
     NewFilterStreamName,
     /// Step 2: entering filter string for a new filter stream.
     NewFilterStreamFilter,
-    /// Editing an existing root query's search string.
-    EditQuery,
+    /// Editing an existing root query's display name (step 1 of 2).
+    EditQueryName,
+    /// Editing an existing root query's GitHub search string (step 2 of 2).
+    EditQueryString,
     /// Step 1: editing an existing filter stream's display name.
     EditFilterStreamName,
     /// Step 2: editing an existing filter stream's filter string.
@@ -231,7 +244,7 @@ pub enum AppMessage {
     ItemsLoaded { query_id: i64, items: Vec<ItemEntry> },
     QueryAdded(QueryEntry),
     FilterStreamAdded(FilterStreamEntry),
-    QueryUpdated { id: i64, new_query: String },
+    QueryUpdated { id: i64, new_name: Option<String>, new_query: String },
     FilterStreamUpdated { id: i64, new_name: String, new_filter: String },
     Status(String),
     SyncDone { query_id: i64, count: usize },
@@ -258,7 +271,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         InputMode::NewQuery => handle_key_new_query(app, key),
         InputMode::NewFilterStreamName => handle_key_new_fs_name(app, key),
         InputMode::NewFilterStreamFilter => handle_key_new_fs_filter(app, key),
-        InputMode::EditQuery => handle_key_edit_query(app, key),
+        InputMode::EditQueryName => handle_key_edit_query_name(app, key),
+        InputMode::EditQueryString => handle_key_edit_query_string(app, key),
         InputMode::EditFilterStreamName => handle_key_edit_fs_name(app, key),
         InputMode::EditFilterStreamFilter => handle_key_edit_fs_filter(app, key),
         InputMode::Normal => handle_key_normal(app, key),
@@ -333,7 +347,8 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                 match entry {
                     LeftPaneEntry::Query(q) => {
                         app.edit_input = q.label.clone();
-                        app.input_mode = InputMode::EditQuery;
+                        app.edit_input2 = q.query_str.clone();
+                        app.input_mode = InputMode::EditQueryName;
                     }
                     LeftPaneEntry::FilterStream(fs) => {
                         app.edit_input = fs.name.clone();
@@ -450,23 +465,46 @@ fn handle_key_new_fs_filter(app: &mut App, key: KeyEvent) -> Action {
     Action::None
 }
 
-fn handle_key_edit_query(app: &mut App, key: KeyEvent) -> Action {
+fn handle_key_edit_query_name(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
             app.edit_input.clear();
+            app.edit_input2.clear();
         }
         KeyCode::Enter => {
-            if !app.edit_input.trim().is_empty() {
-                return Action::SaveEditQuery;
-            }
-            app.input_mode = InputMode::Normal;
+            // Name may be empty (cleared = use query as label); always advance
+            app.input_mode = InputMode::EditQueryString;
         }
         KeyCode::Backspace => {
             app.edit_input.pop();
         }
         KeyCode::Char(c) => {
             app.edit_input.push(c);
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+fn handle_key_edit_query_string(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.edit_input.clear();
+            app.edit_input2.clear();
+        }
+        KeyCode::Enter => {
+            if !app.edit_input2.trim().is_empty() {
+                return Action::SaveEditQuery;
+            }
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.edit_input2.pop();
+        }
+        KeyCode::Char(c) => {
+            app.edit_input2.push(c);
         }
         _ => {}
     }
@@ -634,9 +672,11 @@ async fn run_app<B: ratatui::backend::Backend>(
     for r in query_rows {
         let streams = db::list_filter_streams(&pool, r.id).await.unwrap_or_default();
         let kind = r.kind.clone();
+        let label = r.name.clone().unwrap_or_else(|| r.query.clone());
         entries.push(LeftPaneEntry::Query(QueryEntry {
             id: r.id,
-            label: r.query,
+            label,
+            query_str: r.query.clone(),
             kind: kind.clone(),
         }));
         for s in streams {
@@ -657,7 +697,7 @@ async fn run_app<B: ratatui::backend::Backend>(
         .iter()
         .filter_map(|e| {
             if let LeftPaneEntry::Query(q) = e {
-                Some(QueryEntry { id: q.id, label: q.label.clone(), kind: q.kind.clone() })
+                Some(QueryEntry { id: q.id, label: q.label.clone(), query_str: q.query_str.clone(), kind: q.kind.clone() })
             } else {
                 None
             }
@@ -680,7 +720,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     if let Some(root_id) = app.activate_selected_entry() {
         if let Some(entry) = app.entries.first() {
             if !entry.is_filter_stream() {
-                let query_str = entry.display_label().to_string();
+                let query_str = entry.root_query_str().unwrap_or_default().to_string();
                 spawn_load_and_sync(pool.clone(), gh.clone(), root_id, query_str, tx.clone());
                 app.syncing = true;
             } else {
@@ -721,7 +761,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         if let Some(root_id) = app.activate_selected_entry() {
                                             if let Some(e) = app.entries.get(app.entry_cursor) {
                                                 if !e.is_filter_stream() {
-                                                    let qs = e.display_label().to_string();
+                                                    let qs = e.root_query_str().unwrap_or_default().to_string();
                                                     spawn_load_and_sync(
                                                         pool.clone(), gh.clone(), root_id, qs, tx.clone(),
                                                     );
@@ -764,7 +804,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             if let Some(root_id) = app.activate_selected_entry() {
                                 if let Some(e) = app.entries.get(app.entry_cursor) {
                                     if !e.is_filter_stream() {
-                                        let qs = e.display_label().to_string();
+                                        let qs = e.root_query_str().unwrap_or_default().to_string();
                                         spawn_load_and_sync(
                                             pool.clone(), gh.clone(), root_id, qs, tx.clone(),
                                         );
@@ -787,7 +827,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         let _ = tx_clone
                                             .send(AppMessage::QueryAdded(QueryEntry {
                                                 id,
-                                                label: query_str,
+                                                label: query_str.clone(),
+                                                query_str,
                                                 kind: "pull_request".into(),
                                             }))
                                             .await;
@@ -873,22 +914,39 @@ async fn run_app<B: ratatui::backend::Backend>(
                             }
                         }
                         Action::SaveEditQuery => {
-                            let new_query = app.edit_input.trim().to_string();
+                            let name_input = app.edit_input.trim().to_string();
+                            let new_query = app.edit_input2.trim().to_string();
                             app.input_mode = InputMode::Normal;
                             app.edit_input.clear();
+                            app.edit_input2.clear();
 
                             if let Some(LeftPaneEntry::Query(q)) =
                                 app.entries.get(app.entry_cursor)
                             {
                                 let id = q.id;
+                                // Empty name means "use query string as label"
+                                let new_name: Option<String> = if name_input.is_empty() {
+                                    None
+                                } else {
+                                    Some(name_input)
+                                };
                                 let pool_clone = pool.clone();
                                 let tx_clone = tx.clone();
+                                let new_name_clone = new_name.clone();
                                 tokio::spawn(async move {
-                                    match db::update_query(&pool_clone, id, &new_query).await {
+                                    match db::update_query(
+                                        &pool_clone,
+                                        id,
+                                        new_name_clone.as_deref(),
+                                        &new_query,
+                                    )
+                                    .await
+                                    {
                                         Ok(()) => {
                                             let _ = tx_clone
                                                 .send(AppMessage::QueryUpdated {
                                                     id,
+                                                    new_name,
                                                     new_query,
                                                 })
                                                 .await;
@@ -918,11 +976,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     AppMessage::QueryAdded(q) => {
                         let load_id = q.id;
-                        let query_str = q.label.clone();
+                        let query_str = q.query_str.clone();
                         let kind = q.kind.clone();
                         app.entries.push(LeftPaneEntry::Query(QueryEntry {
                             id: q.id,
                             label: q.label,
+                            query_str: query_str.clone(),
                             kind,
                         }));
                         app.entry_cursor = app.entries.len() - 1;
@@ -955,14 +1014,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                             tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
                         }
                     }
-                    AppMessage::QueryUpdated { id, new_query } => {
-                        // Update label in entries and trigger re-sync
+                    AppMessage::QueryUpdated { id, new_name, new_query } => {
                         if let Some(LeftPaneEntry::Query(q)) = app
                             .entries
                             .iter_mut()
                             .find(|e| matches!(e, LeftPaneEntry::Query(q) if q.id == id))
                         {
-                            q.label = new_query.clone();
+                            q.label = new_name.clone().unwrap_or_else(|| new_query.clone());
+                            q.query_str = new_query.clone();
                         }
                         // Reload + sync with the new query string
                         if app.selected_root_query_id() == Some(id) {
@@ -1034,6 +1093,7 @@ mod tests {
         let mut app = App::new(vec![QueryEntry {
             id: 1,
             label: "test query".into(),
+            query_str: "test query".into(),
             kind: "pull_request".into(),
         }]);
         app.items = titles
@@ -1128,6 +1188,7 @@ mod tests {
         let mut app = App::new(vec![QueryEntry {
             id: 1,
             label: "test".into(),
+            query_str: "test".into(),
             kind: "pull_request".into(),
         }]);
         app.items = vec![
