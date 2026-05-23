@@ -65,7 +65,7 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
             LeftPaneEntry::FilterStream(fs) => {
                 // Indent with a visual tree connector
                 let label = format!("   ↳ {}", fs.name);
-                ListItem::new(label).style(Style::default().fg(Color::DarkGray))
+                ListItem::new(label).style(Style::default().fg(Color::Gray))
             }
         })
         .collect();
@@ -106,7 +106,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     } else if !app.filter.is_empty() {
         Style::default().fg(Color::Cyan)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
     let filter_block = pane_block("", filter_mode);
     let filter_para = Paragraph::new(filter_label)
@@ -195,35 +195,35 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                 ]),
                 Line::default(),
                 Line::from(vec![
-                    Span::styled("Repo:    ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("Repo:    ", Style::default().fg(Color::Gray)),
                     Span::raw(repo),
                 ]),
                 Line::from(vec![
-                    Span::styled("Author:  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("Author:  ", Style::default().fg(Color::Gray)),
                     Span::raw(author),
                 ]),
                 Line::from(vec![
-                    Span::styled("State:   ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("State:   ", Style::default().fg(Color::Gray)),
                     Span::styled(
                         state.clone(),
                         state_style(&state),
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled("Updated: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("Updated: ", Style::default().fg(Color::Gray)),
                     Span::raw(updated_at),
                 ]),
                 Line::from(vec![
-                    Span::styled("Labels:  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("Labels:  ", Style::default().fg(Color::Gray)),
                     Span::raw(labels),
                 ]),
                 Line::from(vec![
-                    Span::styled("Comments:", Style::default().fg(Color::DarkGray)),
+                    Span::styled("Comments:", Style::default().fg(Color::Gray)),
                     Span::raw(format!(" {comment_count}")),
                 ]),
                 Line::default(),
                 Line::from(vec![
-                    Span::styled("URL:     ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("URL:     ", Style::default().fg(Color::Gray)),
                     Span::styled(
                         url,
                         Style::default()
@@ -313,12 +313,12 @@ fn draw_new_query_modal(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(
         Paragraph::new("(PR kind is used by default)").style(
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ),
         split[2],
     );
     f.render_widget(
-        Paragraph::new("Enter:save  Esc:cancel").style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new("Enter:save  Esc:cancel").style(Style::default().fg(Color::Gray)),
         split[3],
     );
 }
@@ -349,12 +349,12 @@ fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
     let name_style = if app.modal_field == 0 {
         Style::default().fg(Color::Magenta)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
     let filter_style = if app.modal_field == 1 {
         Style::default().fg(Color::Magenta)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
 
     f.render_widget(Paragraph::new("Display name:"), split[0]);
@@ -379,7 +379,7 @@ fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(
         Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(Color::Gray)),
         split[4],
     );
 }
@@ -410,12 +410,12 @@ fn draw_edit_query_modal(f: &mut Frame, app: &App, area: Rect) {
     let name_style = if app.modal_field == 0 {
         Style::default().fg(Color::Cyan)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
     let query_style = if app.modal_field == 1 {
         Style::default().fg(Color::Cyan)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
 
     f.render_widget(
@@ -443,7 +443,7 @@ fn draw_edit_query_modal(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(
         Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(Color::Gray)),
         split[4],
     );
 }
@@ -474,12 +474,12 @@ fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
     let name_style = if app.modal_field == 0 {
         Style::default().fg(Color::Cyan)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
     let filter_style = if app.modal_field == 1 {
         Style::default().fg(Color::Cyan)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
 
     f.render_widget(Paragraph::new("Display name:"), split[0]);
@@ -507,7 +507,7 @@ fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(
         Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(Color::Gray)),
         split[4],
     );
 }
@@ -516,7 +516,7 @@ fn pane_block(title: &str, focused: bool) -> Block<'_> {
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
     Block::default()
         .title(format!(" {title} "))
