@@ -125,18 +125,12 @@ pub enum InputMode {
     Normal,
     Filter,
     NewQuery,
-    /// Step 1: entering display name for a new filter stream.
-    NewFilterStreamName,
-    /// Step 2: entering filter string for a new filter stream.
-    NewFilterStreamFilter,
-    /// Editing an existing root query's display name (step 1 of 2).
-    EditQueryName,
-    /// Editing an existing root query's GitHub search string (step 2 of 2).
-    EditQueryString,
-    /// Step 1: editing an existing filter stream's display name.
-    EditFilterStreamName,
-    /// Step 2: editing an existing filter stream's filter string.
-    EditFilterStreamFilter,
+    /// New filter stream modal (name + filter, Tab to switch fields).
+    NewFilterStream,
+    /// Edit root query modal (display name + GitHub search query, Tab to switch fields).
+    EditQuery,
+    /// Edit filter stream modal (name + filter, Tab to switch fields).
+    EditFilterStream,
 }
 
 pub struct App {
@@ -155,10 +149,12 @@ pub struct App {
     pub new_query_input: String,
     pub new_filter_stream_name: String,
     pub new_filter_stream_filter: String,
-    /// Input buffer reused for edit modals (query string or filter stream name).
+    /// Input buffer reused for edit modals (display name or step-1 field).
     pub edit_input: String,
-    /// Second input buffer for editing filter stream filter string.
+    /// Second input buffer for edit modals (query string or filter string).
     pub edit_input2: String,
+    /// Which field (0 or 1) is active in a 2-field modal.
+    pub modal_field: usize,
     pub status: Option<String>,
     /// Whether a background GitHub sync is in progress.
     pub syncing: bool,
@@ -181,6 +177,7 @@ impl App {
             new_filter_stream_filter: String::new(),
             edit_input: String::new(),
             edit_input2: String::new(),
+            modal_field: 0,
             status: None,
             syncing: false,
         }
@@ -269,12 +266,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     match app.input_mode {
         InputMode::Filter => handle_key_filter(app, key),
         InputMode::NewQuery => handle_key_new_query(app, key),
-        InputMode::NewFilterStreamName => handle_key_new_fs_name(app, key),
-        InputMode::NewFilterStreamFilter => handle_key_new_fs_filter(app, key),
-        InputMode::EditQueryName => handle_key_edit_query_name(app, key),
-        InputMode::EditQueryString => handle_key_edit_query_string(app, key),
-        InputMode::EditFilterStreamName => handle_key_edit_fs_name(app, key),
-        InputMode::EditFilterStreamFilter => handle_key_edit_fs_filter(app, key),
+        InputMode::NewFilterStream => handle_key_new_filter_stream(app, key),
+        InputMode::EditQuery => handle_key_edit_query(app, key),
+        InputMode::EditFilterStream => handle_key_edit_filter_stream(app, key),
         InputMode::Normal => handle_key_normal(app, key),
     }
 }
@@ -283,15 +277,15 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('q') => return Action::Quit,
 
-        // Focus cycling
-        KeyCode::Tab => {
+        // Focus cycling — h/l or left/right arrows
+        KeyCode::Char('l') | KeyCode::Right => {
             app.focus = match app.focus {
                 Focus::QueryList => Focus::ItemList,
                 Focus::ItemList => Focus::ItemDetail,
                 Focus::ItemDetail => Focus::QueryList,
             };
         }
-        KeyCode::BackTab => {
+        KeyCode::Char('h') | KeyCode::Left => {
             app.focus = match app.focus {
                 Focus::QueryList => Focus::ItemDetail,
                 Focus::ItemList => Focus::QueryList,
@@ -336,7 +330,8 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
         // New filter stream (left pane) — only when a root query or filter stream is selected
         KeyCode::Char('f') if app.focus == Focus::QueryList => {
             if !app.entries.is_empty() {
-                app.input_mode = InputMode::NewFilterStreamName;
+                app.input_mode = InputMode::NewFilterStream;
+                app.modal_field = 0;
                 app.new_filter_stream_name.clear();
                 app.new_filter_stream_filter.clear();
             }
@@ -348,12 +343,14 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                     LeftPaneEntry::Query(q) => {
                         app.edit_input = q.label.clone();
                         app.edit_input2 = q.query_str.clone();
-                        app.input_mode = InputMode::EditQueryName;
+                        app.modal_field = 0;
+                        app.input_mode = InputMode::EditQuery;
                     }
                     LeftPaneEntry::FilterStream(fs) => {
                         app.edit_input = fs.name.clone();
                         app.edit_input2 = fs.filter.clone();
-                        app.input_mode = InputMode::EditFilterStreamName;
+                        app.modal_field = 0;
+                        app.input_mode = InputMode::EditFilterStream;
                     }
                 }
             }
@@ -418,140 +415,119 @@ fn handle_key_new_query(app: &mut App, key: KeyEvent) -> Action {
     Action::None
 }
 
-fn handle_key_new_fs_name(app: &mut App, key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-            app.new_filter_stream_name.clear();
-        }
-        KeyCode::Enter => {
-            if !app.new_filter_stream_name.trim().is_empty() {
-                // Advance to step 2: enter filter string
-                app.input_mode = InputMode::NewFilterStreamFilter;
-            }
-        }
-        KeyCode::Backspace => {
-            app.new_filter_stream_name.pop();
-        }
-        KeyCode::Char(c) => {
-            app.new_filter_stream_name.push(c);
-        }
-        _ => {}
-    }
-    Action::None
-}
-
-fn handle_key_new_fs_filter(app: &mut App, key: KeyEvent) -> Action {
+fn handle_key_new_filter_stream(app: &mut App, key: KeyEvent) -> Action {
+    // field 0 = name, field 1 = filter
     match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
             app.new_filter_stream_name.clear();
             app.new_filter_stream_filter.clear();
         }
+        KeyCode::Tab => {
+            app.modal_field = 1 - app.modal_field;
+        }
         KeyCode::Enter => {
-            if !app.new_filter_stream_filter.trim().is_empty() {
+            if !app.new_filter_stream_name.trim().is_empty()
+                && !app.new_filter_stream_filter.trim().is_empty()
+            {
                 return Action::SaveNewFilterStream;
             }
-            app.input_mode = InputMode::Normal;
+            // Move to the empty field if one is missing
+            if app.new_filter_stream_name.trim().is_empty() {
+                app.modal_field = 0;
+            } else {
+                app.modal_field = 1;
+            }
         }
         KeyCode::Backspace => {
-            app.new_filter_stream_filter.pop();
+            if app.modal_field == 0 {
+                app.new_filter_stream_name.pop();
+            } else {
+                app.new_filter_stream_filter.pop();
+            }
         }
         KeyCode::Char(c) => {
-            app.new_filter_stream_filter.push(c);
+            if app.modal_field == 0 {
+                app.new_filter_stream_name.push(c);
+            } else {
+                app.new_filter_stream_filter.push(c);
+            }
         }
         _ => {}
     }
     Action::None
 }
 
-fn handle_key_edit_query_name(app: &mut App, key: KeyEvent) -> Action {
+fn handle_key_edit_query(app: &mut App, key: KeyEvent) -> Action {
+    // field 0 = display name, field 1 = GitHub search query
     match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
             app.edit_input.clear();
             app.edit_input2.clear();
         }
-        KeyCode::Enter => {
-            // Name may be empty (cleared = use query as label); always advance
-            app.input_mode = InputMode::EditQueryString;
-        }
-        KeyCode::Backspace => {
-            app.edit_input.pop();
-        }
-        KeyCode::Char(c) => {
-            app.edit_input.push(c);
-        }
-        _ => {}
-    }
-    Action::None
-}
-
-fn handle_key_edit_query_string(app: &mut App, key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-            app.edit_input.clear();
-            app.edit_input2.clear();
+        KeyCode::Tab => {
+            app.modal_field = 1 - app.modal_field;
         }
         KeyCode::Enter => {
             if !app.edit_input2.trim().is_empty() {
                 return Action::SaveEditQuery;
             }
-            app.input_mode = InputMode::Normal;
+            app.modal_field = 1; // move focus to the query field
         }
         KeyCode::Backspace => {
-            app.edit_input2.pop();
-        }
-        KeyCode::Char(c) => {
-            app.edit_input2.push(c);
-        }
-        _ => {}
-    }
-    Action::None
-}
-
-fn handle_key_edit_fs_name(app: &mut App, key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-            app.edit_input.clear();
-            app.edit_input2.clear();
-        }
-        KeyCode::Enter => {
-            if !app.edit_input.trim().is_empty() {
-                app.input_mode = InputMode::EditFilterStreamFilter;
+            if app.modal_field == 0 {
+                app.edit_input.pop();
+            } else {
+                app.edit_input2.pop();
             }
         }
-        KeyCode::Backspace => {
-            app.edit_input.pop();
-        }
         KeyCode::Char(c) => {
-            app.edit_input.push(c);
+            if app.modal_field == 0 {
+                app.edit_input.push(c);
+            } else {
+                app.edit_input2.push(c);
+            }
         }
         _ => {}
     }
     Action::None
 }
 
-fn handle_key_edit_fs_filter(app: &mut App, key: KeyEvent) -> Action {
+fn handle_key_edit_filter_stream(app: &mut App, key: KeyEvent) -> Action {
+    // field 0 = name, field 1 = filter
     match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
             app.edit_input.clear();
             app.edit_input2.clear();
         }
+        KeyCode::Tab => {
+            app.modal_field = 1 - app.modal_field;
+        }
         KeyCode::Enter => {
-            if !app.edit_input2.trim().is_empty() {
+            if !app.edit_input.trim().is_empty() && !app.edit_input2.trim().is_empty() {
                 return Action::SaveEditFilterStream;
             }
-            app.input_mode = InputMode::Normal;
+            if app.edit_input.trim().is_empty() {
+                app.modal_field = 0;
+            } else {
+                app.modal_field = 1;
+            }
         }
         KeyCode::Backspace => {
-            app.edit_input2.pop();
+            if app.modal_field == 0 {
+                app.edit_input.pop();
+            } else {
+                app.edit_input2.pop();
+            }
         }
         KeyCode::Char(c) => {
-            app.edit_input2.push(c);
+            if app.modal_field == 0 {
+                app.edit_input.push(c);
+            } else {
+                app.edit_input2.push(c);
+            }
         }
         _ => {}
     }

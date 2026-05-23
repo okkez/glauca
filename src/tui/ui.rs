@@ -22,17 +22,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Overlay modals on top if active
     if app.input_mode == InputMode::NewQuery {
         draw_new_query_modal(f, app, area);
-    } else if app.input_mode == InputMode::NewFilterStreamName
-        || app.input_mode == InputMode::NewFilterStreamFilter
-    {
+    } else if app.input_mode == InputMode::NewFilterStream {
         draw_new_filter_stream_modal(f, app, area);
-    } else if app.input_mode == InputMode::EditQueryName
-        || app.input_mode == InputMode::EditQueryString
-    {
+    } else if app.input_mode == InputMode::EditQuery {
         draw_edit_query_modal(f, app, area);
-    } else if app.input_mode == InputMode::EditFilterStreamName
-        || app.input_mode == InputMode::EditFilterStreamFilter
-    {
+    } else if app.input_mode == InputMode::EditFilterStream {
         draw_edit_filter_stream_modal(f, app, area);
     }
 }
@@ -253,18 +247,15 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mode_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::QueryList => "QUERIES  Tab:focus  j/k:move  n:new query  f:new stream  e:edit  d:delete  q:quit",
-            Focus::ItemList => "ITEMS    Tab:focus  j/k:move  /:filter  q:quit",
-            Focus::ItemDetail => "DETAIL   Tab:focus  j/k:scroll  q:quit",
+            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  n:new query  f:new stream  e:edit  d:delete  q:quit",
+            Focus::ItemList => "ITEMS    h/l:pane  j/k:move  /:filter  q:quit",
+            Focus::ItemDetail => "DETAIL   h/l:pane  j/k:scroll  q:quit",
         },
         InputMode::Filter => "FILTER   Esc:exit  C-u:clear  state:open  author:name  label:bug  repo:owner/name",
         InputMode::NewQuery => "NEW QUERY  Enter:save  Esc:cancel",
-        InputMode::NewFilterStreamName => "NEW STREAM (1/2: name)  Enter:next  Esc:cancel",
-        InputMode::NewFilterStreamFilter => "NEW STREAM (2/2: filter)  Enter:save  Esc:cancel",
-        InputMode::EditQueryName => "EDIT QUERY (1/2: name)  Enter:next  Esc:cancel",
-        InputMode::EditQueryString => "EDIT QUERY (2/2: query)  Enter:save  Esc:cancel",
-        InputMode::EditFilterStreamName => "EDIT STREAM (1/2: name)  Enter:next  Esc:cancel",
-        InputMode::EditFilterStreamFilter => "EDIT STREAM (2/2: filter)  Enter:save  Esc:cancel",
+        InputMode::NewFilterStream => "NEW STREAM  Tab:switch field  Enter:save  Esc:cancel",
+        InputMode::EditQuery => "EDIT QUERY  Tab:switch field  Enter:save  Esc:cancel",
+        InputMode::EditFilterStream => "EDIT STREAM  Tab:switch field  Enter:save  Esc:cancel",
     };
 
     let status = if let Some(msg) = &app.status {
@@ -336,14 +327,8 @@ fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
     let popup_area = centered_rect(60, 9, area);
     f.render_widget(Clear, popup_area);
 
-    let (step, title) = if app.input_mode == InputMode::NewFilterStreamName {
-        (1, " New Filter Stream — Step 1/2: Name ")
-    } else {
-        (2, " New Filter Stream — Step 2/2: Filter ")
-    };
-
     let block = Block::default()
-        .title(title)
+        .title(" New Filter Stream ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
 
@@ -361,36 +346,40 @@ fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner);
 
-    if step == 1 {
-        f.render_widget(Paragraph::new("Display name for this filter stream:"), split[0]);
-        f.render_widget(
-            Paragraph::new(format!("> {}_", app.new_filter_stream_name))
-                .style(Style::default().fg(Color::Magenta)),
-            split[1],
-        );
-        f.render_widget(
-            Paragraph::new("Previously entered name shown above. Press Enter to continue.")
-                .style(Style::default().fg(Color::DarkGray)),
-            split[2],
-        );
+    let name_style = if app.modal_field == 0 {
+        Style::default().fg(Color::Magenta)
     } else {
-        f.render_widget(
-            Paragraph::new(format!("Name: {}", app.new_filter_stream_name))
-                .style(Style::default().fg(Color::DarkGray)),
-            split[0],
-        );
-        f.render_widget(
-            Paragraph::new("Filter (e.g. state:open label:bug repo:owner/name):"),
-            split[1],
-        );
-        f.render_widget(
-            Paragraph::new(format!("> {}_", app.new_filter_stream_filter))
-                .style(Style::default().fg(Color::Magenta)),
-            split[2],
-        );
-    }
+        Style::default().fg(Color::DarkGray)
+    };
+    let filter_style = if app.modal_field == 1 {
+        Style::default().fg(Color::Magenta)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    f.render_widget(Paragraph::new("Display name:"), split[0]);
     f.render_widget(
-        Paragraph::new("Enter:confirm  Esc:cancel").style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(format!(
+            "> {}{}",
+            app.new_filter_stream_name,
+            if app.modal_field == 0 { "_" } else { "" }
+        ))
+        .style(name_style),
+        split[1],
+    );
+    f.render_widget(Paragraph::new("Filter (e.g. state:open label:bug):"), split[2]);
+    f.render_widget(
+        Paragraph::new(format!(
+            "> {}{}",
+            app.new_filter_stream_filter,
+            if app.modal_field == 1 { "_" } else { "" }
+        ))
+        .style(filter_style),
+        split[3],
+    );
+    f.render_widget(
+        Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
+            .style(Style::default().fg(Color::DarkGray)),
         split[4],
     );
 }
@@ -399,14 +388,8 @@ fn draw_edit_query_modal(f: &mut Frame, app: &App, area: Rect) {
     let popup_area = centered_rect(60, 9, area);
     f.render_widget(Clear, popup_area);
 
-    let (step, title) = if app.input_mode == InputMode::EditQueryName {
-        (1, " Edit Query — Step 1/2: Display Name ")
-    } else {
-        (2, " Edit Query — Step 2/2: GitHub Search Query ")
-    };
-
     let block = Block::default()
-        .title(title)
+        .title(" Edit Query ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -424,47 +407,43 @@ fn draw_edit_query_modal(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner);
 
-    if step == 1 {
-        f.render_widget(
-            Paragraph::new("Display name (leave empty to use query string as label):"),
-            split[0],
-        );
-        f.render_widget(
-            Paragraph::new(format!("> {}_", app.edit_input))
-                .style(Style::default().fg(Color::Cyan)),
-            split[1],
-        );
-        f.render_widget(
-            Paragraph::new("Press Enter to continue to query string")
-                .style(Style::default().fg(Color::DarkGray)),
-            split[2],
-        );
+    let name_style = if app.modal_field == 0 {
+        Style::default().fg(Color::Cyan)
     } else {
-        f.render_widget(
-            Paragraph::new(format!(
-                "Name: {}",
-                if app.edit_input.is_empty() { "(use query string)" } else { &app.edit_input }
-            ))
-            .style(Style::default().fg(Color::DarkGray)),
-            split[0],
-        );
-        f.render_widget(
-            Paragraph::new("GitHub search query (e.g. repo:owner/name is:pr is:open):"),
-            split[1],
-        );
-        f.render_widget(
-            Paragraph::new(format!("> {}_", app.edit_input2))
-                .style(Style::default().fg(Color::Cyan)),
-            split[2],
-        );
-        f.render_widget(
-            Paragraph::new("(Saving will reset cache and re-sync)")
-                .style(Style::default().fg(Color::DarkGray)),
-            split[3],
-        );
-    }
+        Style::default().fg(Color::DarkGray)
+    };
+    let query_style = if app.modal_field == 1 {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
     f.render_widget(
-        Paragraph::new("Enter:confirm  Esc:cancel").style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new("Display name (empty = use query string as label):"),
+        split[0],
+    );
+    f.render_widget(
+        Paragraph::new(format!(
+            "> {}{}",
+            app.edit_input,
+            if app.modal_field == 0 { "_" } else { "" }
+        ))
+        .style(name_style),
+        split[1],
+    );
+    f.render_widget(Paragraph::new("GitHub search query:"), split[2]);
+    f.render_widget(
+        Paragraph::new(format!(
+            "> {}{}",
+            app.edit_input2,
+            if app.modal_field == 1 { "_" } else { "" }
+        ))
+        .style(query_style),
+        split[3],
+    );
+    f.render_widget(
+        Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
+            .style(Style::default().fg(Color::DarkGray)),
         split[4],
     );
 }
@@ -473,14 +452,8 @@ fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
     let popup_area = centered_rect(60, 9, area);
     f.render_widget(Clear, popup_area);
 
-    let (step, title) = if app.input_mode == InputMode::EditFilterStreamName {
-        (1, " Edit Filter Stream — Step 1/2: Name ")
-    } else {
-        (2, " Edit Filter Stream — Step 2/2: Filter ")
-    };
-
     let block = Block::default()
-        .title(title)
+        .title(" Edit Filter Stream ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -498,31 +471,43 @@ fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner);
 
-    if step == 1 {
-        f.render_widget(Paragraph::new("Display name for this filter stream:"), split[0]);
-        f.render_widget(
-            Paragraph::new(format!("> {}_", app.edit_input))
-                .style(Style::default().fg(Color::Cyan)),
-            split[1],
-        );
+    let name_style = if app.modal_field == 0 {
+        Style::default().fg(Color::Cyan)
     } else {
-        f.render_widget(
-            Paragraph::new(format!("Name: {}", app.edit_input))
-                .style(Style::default().fg(Color::DarkGray)),
-            split[0],
-        );
-        f.render_widget(
-            Paragraph::new("Filter (e.g. state:open label:bug repo:owner/name):"),
-            split[1],
-        );
-        f.render_widget(
-            Paragraph::new(format!("> {}_", app.edit_input2))
-                .style(Style::default().fg(Color::Cyan)),
-            split[2],
-        );
-    }
+        Style::default().fg(Color::DarkGray)
+    };
+    let filter_style = if app.modal_field == 1 {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    f.render_widget(Paragraph::new("Display name:"), split[0]);
     f.render_widget(
-        Paragraph::new("Enter:confirm  Esc:cancel").style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(format!(
+            "> {}{}",
+            app.edit_input,
+            if app.modal_field == 0 { "_" } else { "" }
+        ))
+        .style(name_style),
+        split[1],
+    );
+    f.render_widget(
+        Paragraph::new("Filter (e.g. state:open label:bug repo:owner/name):"),
+        split[2],
+    );
+    f.render_widget(
+        Paragraph::new(format!(
+            "> {}{}",
+            app.edit_input2,
+            if app.modal_field == 1 { "_" } else { "" }
+        ))
+        .style(filter_style),
+        split[3],
+    );
+    f.render_widget(
+        Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
+            .style(Style::default().fg(Color::DarkGray)),
         split[4],
     );
 }
