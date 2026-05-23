@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crate::db::CachedItem;
 use octocrab::Octocrab;
 use serde::Deserialize;
@@ -37,117 +37,187 @@ pub async fn get_current_user(client: &Octocrab) -> Option<String> {
         .map(|u| u.login)
 }
 
-// ── Custom deserialization types for search results ──────────────────────────
+// ── GraphQL query ─────────────────────────────────────────────────────────────
 
-/// Minimal representation of the `pull_request` sub-object in search results.
-/// The GitHub API includes `merged_at` here; octocrab's typed model omits it.
+const SEARCH_QUERY: &str = "
+query SearchItems($q: String!, $after: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      __typename
+      ... on Issue {
+        number
+        title
+        state
+        url
+        updatedAt
+        author { login }
+        labels(first: 20) { nodes { name } }
+        repository { owner { login } name }
+        comments { totalCount }
+      }
+      ... on PullRequest {
+        number
+        title
+        state
+        url
+        updatedAt
+        author { login }
+        labels(first: 20) { nodes { name } }
+        repository { owner { login } name }
+        comments { totalCount }
+        reviewRequests(first: 20) {
+          nodes {
+            requestedReviewer {
+              ... on User { login }
+              ... on Team { slug }
+            }
+          }
+        }
+      }
+    }
+  }
+}";
+
+// ── GraphQL response types ────────────────────────────────────────────────────
+
 #[derive(Deserialize)]
-struct PrLink {
-    merged_at: Option<String>,
+struct GqlResponse {
+    data: GqlData,
 }
 
 #[derive(Deserialize)]
-struct SearchItem {
-    number: u64,
-    title: String,
-    state: String,
-    html_url: String,
-    repository_url: String,
-    updated_at: String,
-    comments: u64,
-    user: SearchUser,
-    labels: Vec<SearchLabel>,
-    pull_request: Option<PrLink>,
-    #[serde(default)]
-    requested_reviewers: Vec<SearchUser>,
+struct GqlData {
+    search: GqlSearchConnection,
 }
 
 #[derive(Deserialize)]
-struct SearchUser {
-    login: String,
+struct GqlSearchConnection {
+    #[serde(rename = "pageInfo")]
+    page_info: GqlPageInfo,
+    nodes: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
-struct SearchLabel {
-    name: String,
+struct GqlPageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct SearchPage {
-    items: Vec<SearchItem>,
-}
-
-/// Serialize an iterator of strings as a compact JSON array: `["a","b"]`.
-fn json_string_array<'a>(iter: impl Iterator<Item = &'a String>) -> String {
-    let parts: Vec<String> = iter
-        .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
-        .collect();
-    format!("[{}]", parts.join(","))
-}
-
-/// Search GitHub for issues and pull requests matching `query`.
+/// Search GitHub for issues and pull requests matching `query` using GraphQL.
 ///
-/// Returns up to 100 results (GitHub API max per page) as `CachedItem`s
-/// ready to be upserted into SQLite.
-///
-/// Uses raw JSON deserialization to capture `pull_request.merged_at`,
-/// which octocrab's typed model omits, so merged PRs are stored as
-/// `"merged"` rather than `"closed"`.
+/// GraphQL gives us `reviewRequests` (requested reviewers) in a single round-trip,
+/// which the REST Search API does not include.
 pub async fn search(
     client: &Octocrab,
     query_id: i64,
     query: &str,
 ) -> Result<Vec<CachedItem>> {
-    let url = format!(
-        "https://api.github.com/search/issues?q={}&per_page=100",
-        urlencoding::encode(query)
-    );
-    let page: SearchPage = client.get(url, None::<&()>).await?;
+    let mut all_items: Vec<CachedItem> = Vec::new();
+    let mut after: Option<String> = None;
 
-    let items = page
-        .items
-        .into_iter()
-        .map(|item| {
-            let is_pr = item.pull_request.is_some();
-            let kind = if is_pr { "pull_request" } else { "issue" };
-            let state = if item.state == "open" {
-                "open"
-            } else if is_pr && item.pull_request.as_ref().and_then(|pr| pr.merged_at.as_ref()).is_some() {
-                "merged"
-            } else {
-                "closed"
-            };
-
-            // Extract repo owner/name from repository_url:
-            //   "https://api.github.com/repos/{owner}/{name}"
-            let (repo_owner, repo_name) = extract_repo_url_str(&item.repository_url);
-
-            // Serialize labels as JSON array: ["bug","enhancement"]
-            let labels = json_string_array(item.labels.iter().map(|l| &l.name));
-
-            // Serialize requested reviewers as JSON array: ["alice","bob"]
-            let requested_reviewers =
-                json_string_array(item.requested_reviewers.iter().map(|u| &u.login));
-
-            CachedItem {
-                query_id,
-                kind: kind.to_string(),
-                repo_owner,
-                repo_name,
-                number: item.number as i64,
-                title: item.title,
-                url: item.html_url,
-                author: Some(item.user.login),
-                state: state.to_string(),
-                updated_at: item.updated_at,
-                labels,
-                comment_count: item.comments as i64,
-                requested_reviewers,
+    loop {
+        let payload = serde_json::json!({
+            "query": SEARCH_QUERY,
+            "variables": {
+                "q": query,
+                "after": after,
             }
-        })
-        .collect();
+        });
+        let resp: GqlResponse = client
+            .graphql(&payload)
+            .await
+            .context("GraphQL search failed")?;
 
-    Ok(items)
+        let conn = resp.data.search;
+
+        for node in conn.nodes {
+            if let Some(item) = node_to_cached_item(&node, query_id) {
+                all_items.push(item);
+            }
+        }
+
+        if !conn.page_info.has_next_page {
+            break;
+        }
+        after = conn.page_info.end_cursor;
+        if after.is_none() {
+            break;
+        }
+    }
+
+    Ok(all_items)
+}
+
+/// Convert a single GraphQL search node (Issue or PullRequest) to a `CachedItem`.
+fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<CachedItem> {
+    let typename = node["__typename"].as_str()?;
+    let is_pr = typename == "PullRequest";
+    let kind = if is_pr { "pull_request" } else { "issue" };
+
+    let state_raw = node["state"].as_str()?.to_lowercase();
+    // GraphQL PR states: OPEN → open, CLOSED → closed, MERGED → merged
+    // GraphQL Issue states: OPEN → open, CLOSED → closed
+    let state = state_raw.as_str();
+
+    let number = node["number"].as_u64()? as i64;
+    let title = node["title"].as_str()?.to_string();
+    let url = node["url"].as_str()?.to_string();
+    let updated_at = node["updatedAt"].as_str()?.to_string();
+    let author = node["author"]["login"].as_str().map(|s| s.to_string());
+    let comment_count = node["comments"]["totalCount"].as_u64().unwrap_or(0) as i64;
+
+    let repo_owner = node["repository"]["owner"]["login"].as_str()?.to_string();
+    let repo_name = node["repository"]["name"].as_str()?.to_string();
+
+    let labels = node["labels"]["nodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| l["name"].as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let requested_reviewers: Vec<String> = if is_pr {
+        node["reviewRequests"]["nodes"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|n| {
+                        let rv = &n["requestedReviewer"];
+                        // User has `login`, Team has `slug`
+                        rv["login"]
+                            .as_str()
+                            .or_else(|| rv["slug"].as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    Some(CachedItem {
+        query_id,
+        kind: kind.to_string(),
+        repo_owner,
+        repo_name,
+        number,
+        title,
+        url,
+        author,
+        state: state.to_string(),
+        updated_at,
+        labels: serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string()),
+        comment_count,
+        requested_reviewers: serde_json::to_string(&requested_reviewers)
+            .unwrap_or_else(|_| "[]".to_string()),
+    })
 }
 
 /// Extract `(owner, name)` from a GitHub repository URL.
@@ -161,14 +231,6 @@ pub(crate) fn extract_repo_url(url: &Url) -> (String, String) {
             (owner.to_string(), name.to_string())
         }
         _ => (String::new(), String::new()),
-    }
-}
-
-fn extract_repo_url_str(s: &str) -> (String, String) {
-    if let Ok(url) = s.parse::<Url>() {
-        extract_repo_url(&url)
-    } else {
-        (String::new(), String::new())
     }
 }
 
@@ -191,7 +253,6 @@ mod tests {
 
     #[test]
     fn extract_repo_url_nested_path() {
-        // Should always take the last two segments.
         let url: Url = "https://api.github.com/repos/org/repo".parse().unwrap();
         let (owner, name) = extract_repo_url(&url);
         assert_eq!(owner, "org");
@@ -199,49 +260,74 @@ mod tests {
     }
 
     #[test]
-    fn labels_json_no_labels() {
-        let names: Vec<String> = vec![];
-        let json = format!(
-            "[{}]",
-            names
-                .iter()
-                .map(|n| format!("\"{}\"", n.replace('"', "\\\"")))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        assert_eq!(json, "[]");
-        // Verify round-trip via serde_json.
-        let parsed: Vec<String> = serde_json::from_str(&json).unwrap();
-        assert!(parsed.is_empty());
+    fn node_to_cached_item_issue() {
+        let node = serde_json::json!({
+            "__typename": "Issue",
+            "number": 42,
+            "title": "Bug report",
+            "state": "OPEN",
+            "url": "https://github.com/owner/repo/issues/42",
+            "updatedAt": "2026-05-23T10:00:00Z",
+            "author": { "login": "alice" },
+            "labels": { "nodes": [{ "name": "bug" }] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo" },
+            "comments": { "totalCount": 3 }
+        });
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert_eq!(item.kind, "issue");
+        assert_eq!(item.state, "open");
+        assert_eq!(item.number, 42);
+        assert_eq!(item.author.as_deref(), Some("alice"));
+        assert_eq!(item.comment_count, 3);
+        let labels: Vec<String> = serde_json::from_str(&item.labels).unwrap();
+        assert_eq!(labels, vec!["bug"]);
+        let reviewers: Vec<String> = serde_json::from_str(&item.requested_reviewers).unwrap();
+        assert!(reviewers.is_empty());
     }
 
     #[test]
-    fn labels_json_with_labels() {
-        let names = vec!["bug".to_string(), "good first issue".to_string()];
-        let json = format!(
-            "[{}]",
-            names
-                .iter()
-                .map(|n| format!("\"{}\"", n.replace('"', "\\\"")))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let parsed: Vec<String> = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, names);
+    fn node_to_cached_item_pr_with_reviewers() {
+        let node = serde_json::json!({
+            "__typename": "PullRequest",
+            "number": 7,
+            "title": "Add feature",
+            "state": "OPEN",
+            "url": "https://github.com/owner/repo/pull/7",
+            "updatedAt": "2026-05-23T10:00:00Z",
+            "author": { "login": "bob" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo" },
+            "comments": { "totalCount": 0 },
+            "reviewRequests": {
+                "nodes": [
+                    { "requestedReviewer": { "login": "carol" } },
+                    { "requestedReviewer": { "slug": "my-team" } }
+                ]
+            }
+        });
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert_eq!(item.kind, "pull_request");
+        assert_eq!(item.state, "open");
+        let reviewers: Vec<String> = serde_json::from_str(&item.requested_reviewers).unwrap();
+        assert_eq!(reviewers, vec!["carol", "my-team"]);
     }
 
     #[test]
-    fn labels_json_escapes_quotes() {
-        let names = vec!["label\"with\"quotes".to_string()];
-        let json = format!(
-            "[{}]",
-            names
-                .iter()
-                .map(|n| format!("\"{}\"", n.replace('"', "\\\"")))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let parsed: Vec<String> = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed[0], "label\"with\"quotes");
+    fn node_to_cached_item_merged_pr() {
+        let node = serde_json::json!({
+            "__typename": "PullRequest",
+            "number": 99,
+            "title": "Merged PR",
+            "state": "MERGED",
+            "url": "https://github.com/owner/repo/pull/99",
+            "updatedAt": "2026-05-23T10:00:00Z",
+            "author": { "login": "dave" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo" },
+            "comments": { "totalCount": 0 },
+            "reviewRequests": { "nodes": [] }
+        });
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert_eq!(item.state, "merged");
     }
 }
