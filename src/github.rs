@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crate::db::CachedItem;
-use octocrab::{Octocrab, models::IssueState};
+use octocrab::Octocrab;
+use serde::Deserialize;
 use url::Url;
 
 /// Build an authenticated Octocrab instance.
@@ -21,26 +22,62 @@ pub fn build_client() -> Result<Octocrab> {
     builder.build().map_err(Into::into)
 }
 
+// ── Custom deserialization types for search results ──────────────────────────
+
+/// Minimal representation of the `pull_request` sub-object in search results.
+/// The GitHub API includes `merged_at` here; octocrab's typed model omits it.
+#[derive(Deserialize)]
+struct PrLink {
+    merged_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SearchItem {
+    number: u64,
+    title: String,
+    state: String,
+    html_url: String,
+    repository_url: String,
+    updated_at: String,
+    comments: u64,
+    user: SearchUser,
+    labels: Vec<SearchLabel>,
+    pull_request: Option<PrLink>,
+}
+
+#[derive(Deserialize)]
+struct SearchUser {
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct SearchLabel {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct SearchPage {
+    items: Vec<SearchItem>,
+}
+
 /// Search GitHub for issues and pull requests matching `query`.
 ///
 /// Returns up to 100 results (GitHub API max per page) as `CachedItem`s
 /// ready to be upserted into SQLite.
 ///
-/// **Note on PR state**: The search API returns `closed` for both merged and
-/// unmerged closed PRs. Distinguishing "merged" would require extra API calls,
-/// so this implementation stores `"closed"` for all closed PRs. Use
-/// `is:merged` in the search query to target merged PRs specifically.
+/// Uses raw JSON deserialization to capture `pull_request.merged_at`,
+/// which octocrab's typed model omits, so merged PRs are stored as
+/// `"merged"` rather than `"closed"`.
 pub async fn search(
     client: &Octocrab,
     query_id: i64,
     query: &str,
 ) -> Result<Vec<CachedItem>> {
-    let page = client
-        .search()
-        .issues_and_pull_requests(query)
-        .per_page(100)
-        .send()
-        .await?;
+    let url = format!(
+        "https://api.github.com/search/issues?q={}&per_page=100",
+        urlencoding::encode(query)
+    );
+    let page: SearchPage = client.get(url, None::<&()>).await?;
 
     let items = page
         .items
@@ -48,16 +85,17 @@ pub async fn search(
         .map(|item| {
             let is_pr = item.pull_request.is_some();
             let kind = if is_pr { "pull_request" } else { "issue" };
-            let state = match item.state {
-                IssueState::Open => "open",
-                IssueState::Closed => "closed",
-                // IssueState is #[non_exhaustive]; treat unknowns as open
-                _ => "open",
+            let state = if item.state == "open" {
+                "open"
+            } else if is_pr && item.pull_request.as_ref().and_then(|pr| pr.merged_at.as_ref()).is_some() {
+                "merged"
+            } else {
+                "closed"
             };
 
             // Extract repo owner/name from repository_url:
             //   "https://api.github.com/repos/{owner}/{name}"
-            let (repo_owner, repo_name) = extract_repo_url(&item.repository_url);
+            let (repo_owner, repo_name) = extract_repo_url_str(&item.repository_url);
 
             // Serialize labels as JSON array: ["bug","enhancement"]
             let labels = {
@@ -76,10 +114,10 @@ pub async fn search(
                 repo_name,
                 number: item.number as i64,
                 title: item.title,
-                url: item.html_url.to_string(),
+                url: item.html_url,
                 author: Some(item.user.login),
                 state: state.to_string(),
-                updated_at: item.updated_at.to_rfc3339(),
+                updated_at: item.updated_at,
                 labels,
                 comment_count: item.comments as i64,
             }
@@ -100,6 +138,14 @@ pub(crate) fn extract_repo_url(url: &Url) -> (String, String) {
             (owner.to_string(), name.to_string())
         }
         _ => (String::new(), String::new()),
+    }
+}
+
+fn extract_repo_url_str(s: &str) -> (String, String) {
+    if let Ok(url) = s.parse::<Url>() {
+        extract_repo_url(&url)
+    } else {
+        (String::new(), String::new())
     }
 }
 

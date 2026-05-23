@@ -47,6 +47,7 @@ impl LeftPaneEntry {
         }
     }
 
+    #[allow(dead_code)]
     pub fn display_label(&self) -> &str {
         match self {
             Self::Query(q) => &q.label,
@@ -89,6 +90,7 @@ impl LeftPaneEntry {
         matches!(self, Self::FilterStream(_))
     }
 
+    #[allow(dead_code)]
     pub fn parent_id(&self) -> Option<i64> {
         match self {
             Self::Query(_) => None,

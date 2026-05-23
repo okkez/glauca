@@ -1,5 +1,5 @@
 use crate::tui::{App, Focus, InputMode, LeftPaneEntry};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
