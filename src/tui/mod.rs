@@ -132,6 +132,14 @@ pub struct ItemEntry {
     pub milestone: Option<String>,
 }
 
+/// A single comment entry fetched from GitHub and displayed in the comments popup.
+#[derive(Clone, Debug)]
+pub struct CommentEntry {
+    pub author: String,
+    pub created_at: String,
+    pub body: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemAction {
     OpenBrowser,
@@ -218,6 +226,8 @@ pub enum InputMode {
     EditFilterStream,
     ActionMenu,
     MergeMenu,
+    /// Comments popup (fetched via API, displayed in-TUI).
+    CommentsPopup,
 }
 
 pub struct App {
@@ -245,6 +255,12 @@ pub struct App {
     pub modal_field: usize,
     pub action_cursor: usize,
     pub merge_strategy_cursor: usize,
+    /// Comments fetched for the comments popup.
+    pub comments: Vec<CommentEntry>,
+    /// True while comments are being fetched from the API.
+    pub comments_loading: bool,
+    /// Scroll offset within the comments popup.
+    pub comments_scroll: usize,
     pub status: Option<String>,
     /// Whether a manual GitHub sync is in progress for the selected query.
     pub syncing: bool,
@@ -277,6 +293,9 @@ impl App {
             modal_field: 0,
             action_cursor: 0,
             merge_strategy_cursor: 0,
+            comments: Vec::new(),
+            comments_loading: false,
+            comments_scroll: 0,
             status: None,
             syncing: false,
             bg_sync_pending: 0,
@@ -385,6 +404,8 @@ pub enum AppMessage {
     Status(String),
     ActionDone(String),
     ActionError(String),
+    CommentsLoaded(Vec<CommentEntry>),
+    CommentsFailed(String),
     SyncDone {
         query_id: i64,
         count: usize,
@@ -430,6 +451,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         InputMode::EditFilterStream => handle_key_edit_filter_stream(app, key),
         InputMode::ActionMenu => handle_key_action_menu(app, key),
         InputMode::MergeMenu => handle_key_merge_menu(app, key),
+        InputMode::CommentsPopup => handle_key_comments_popup(app, key),
         InputMode::Normal => handle_key_normal(app, key),
     }
 }
@@ -593,6 +615,31 @@ fn handle_key_merge_menu(app: &mut App, key: KeyEvent) -> Action {
         _ => {}
     }
 
+    Action::None
+}
+
+fn handle_key_comments_popup(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.input_mode = InputMode::Normal;
+            app.comments.clear();
+            app.comments_loading = false;
+            app.comments_scroll = 0;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.comments_scroll = app.comments_scroll.saturating_add(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.comments_scroll = app.comments_scroll.saturating_sub(1);
+        }
+        KeyCode::Char('g') => {
+            app.comments_scroll = 0;
+        }
+        KeyCode::Char('G') => {
+            app.comments_scroll = app.comments_scroll.saturating_add(9999);
+        }
+        _ => {}
+    }
     Action::None
 }
 
@@ -777,6 +824,32 @@ fn handle_key_edit_filter_stream(app: &mut App, key: KeyEvent) -> Action {
 }
 
 // ── Background task helpers ───────────────────────────────────────────────────
+
+/// Fetch issue/PR comments from GitHub API (up to 100 most recent).
+async fn fetch_comments_task(
+    gh: &Octocrab,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> anyhow::Result<Vec<CommentEntry>> {
+    let page = gh
+        .issues(owner, repo)
+        .list_comments(number)
+        .per_page(100)
+        .send()
+        .await?;
+
+    let comments = page
+        .items
+        .into_iter()
+        .map(|c| CommentEntry {
+            author: c.user.login,
+            created_at: c.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            body: c.body.unwrap_or_default(),
+        })
+        .collect();
+    Ok(comments)
+}
 
 /// Suspends TUI is not done here — caller must suspend/restore around this call.
 fn run_editor(initial_content: &str) -> anyhow::Result<Option<String>> {
@@ -1678,27 +1751,26 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                                             }
                                         }
                                         ItemAction::ViewComments => {
-                                            app.input_mode = InputMode::Normal;
-                                            suspend_tui(terminal)?;
-                                            let sub = if item.kind == "pull_request" { "pr" } else { "issue" };
-                                            let status = std::process::Command::new("gh")
-                                                .args([sub, "view", "--comments", &item.url])
-                                                .status();
-                                            println!("\n─── Press Enter to return to glauca ───");
-                                            let mut line = String::new();
-                                            let _ = io::stdin().read_line(&mut line);
-                                            restore_tui(terminal)?;
-
-                                            match status {
-                                                Ok(exit_status) => {
-                                                    if !exit_status.success() {
-                                                        app.status = Some("Failed to view comments".into());
+                                            // Open in-TUI comments popup: fetch via API in background
+                                            app.input_mode = InputMode::CommentsPopup;
+                                            app.comments.clear();
+                                            app.comments_loading = true;
+                                            app.comments_scroll = 0;
+                                            let owner = item.repo_owner.clone();
+                                            let repo = item.repo_name.clone();
+                                            let number = item.number as u64;
+                                            let gh_clone = gh.clone();
+                                            let tx_clone = tx.clone();
+                                            tokio::spawn(async move {
+                                                match fetch_comments_task(&gh_clone, &owner, &repo, number).await {
+                                                    Ok(comments) => {
+                                                        let _ = tx_clone.send(AppMessage::CommentsLoaded(comments)).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx_clone.send(AppMessage::CommentsFailed(e.to_string())).await;
                                                     }
                                                 }
-                                                Err(e) => {
-                                                    app.status = Some(format!("View comments error: {e}"));
-                                                }
-                                            }
+                                            });
                                         }
                                         ItemAction::ApprovePR => {
                                             app.input_mode = InputMode::Normal;
@@ -1884,6 +1956,19 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                     }
                     AppMessage::ActionError(err) => {
                         app.status = Some(format!("Error: {err}"));
+                    }
+                    AppMessage::CommentsLoaded(comments) => {
+                        app.comments = comments;
+                        app.comments_loading = false;
+                    }
+                    AppMessage::CommentsFailed(err) => {
+                        app.comments_loading = false;
+                        // Stay in CommentsPopup so the user sees the error; show it as a comment
+                        app.comments = vec![CommentEntry {
+                            author: "error".into(),
+                            created_at: String::new(),
+                            body: format!("Failed to load comments: {err}"),
+                        }];
                     }
                     AppMessage::SyncDone { query_id, count } => {
                         if app.selected_root_query_id() == Some(query_id) {

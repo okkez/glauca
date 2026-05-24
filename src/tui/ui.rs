@@ -1,4 +1,4 @@
-use crate::tui::{App, Focus, InputMode, ItemAction, LeftPaneEntry, MergeStrategy};
+use crate::tui::{App, CommentEntry, Focus, InputMode, ItemAction, LeftPaneEntry, MergeStrategy};
 use chrono::{DateTime, Local};
 use ratatui::{
     Frame,
@@ -35,6 +35,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_action_popup(f, app, area);
     } else if app.input_mode == InputMode::MergeMenu {
         draw_merge_menu_popup(f, app, area);
+    } else if app.input_mode == InputMode::CommentsPopup {
+        draw_comments_popup(f, app, area);
     }
 }
 
@@ -401,6 +403,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::EditFilterStream => "EDIT STREAM  Tab:switch field  Enter:save  Esc:cancel".to_string(),
         InputMode::ActionMenu => "ACTIONS  j/k:move  Enter:confirm  Esc:cancel".to_string(),
         InputMode::MergeMenu => "MERGE    j/k:move  Enter:confirm  Esc:back".to_string(),
+        InputMode::CommentsPopup => "COMMENTS  j/k:scroll  g/G:top/bottom  Esc/q:close".to_string(),
     };
 
     let status = if let Some(msg) = &app.status {
@@ -871,4 +874,106 @@ fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+// ── Comments popup ────────────────────────────────────────────────────────────
+
+fn draw_comments_popup(f: &mut Frame, app: &App, area: Rect) {
+    // Cover the right 60 % of the screen (overlaps the detail pane)
+    let width = (area.width * 60 / 100).max(50).min(area.width);
+    let height = (area.height * 85 / 100).max(10).min(area.height);
+    let x = area.x + area.width.saturating_sub(width);
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup_area);
+
+    let item_title = app
+        .selected_item()
+        .map(|i| format!(" Comments — #{} {} ", i.number, i.title))
+        .unwrap_or_else(|| " Comments ".into());
+
+    let block = Block::default().borders(Borders::ALL).title(item_title);
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Split inner: content + hint
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    if app.comments_loading {
+        let loading = Paragraph::new("Loading comments…")
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(Alignment::Center);
+        f.render_widget(loading, chunks[0]);
+    } else if app.comments.is_empty() {
+        let empty = Paragraph::new("No comments.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(empty, chunks[0]);
+    } else {
+        let lines = build_comment_lines(&app.comments, chunks[0].width as usize);
+        let total = lines.len();
+        // Clamp scroll
+        let max_scroll = total.saturating_sub(chunks[0].height as usize);
+        let scroll = app.comments_scroll.min(max_scroll);
+
+        let para = Paragraph::new(lines)
+            .scroll((scroll as u16, 0))
+            .wrap(Wrap { trim: false });
+        f.render_widget(para, chunks[0]);
+
+        // Scroll indicator
+        let indicator = if total > chunks[0].height as usize {
+            format!("↑↓ scroll  {}/{} lines", scroll + chunks[0].height as usize, total)
+        } else {
+            String::new()
+        };
+        let hint = Paragraph::new(
+            Line::from(vec![
+                Span::styled(
+                    "Esc/q: close  j/k: scroll  g/G: top/bottom  ",
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(indicator, Style::default().fg(Color::DarkGray)),
+            ])
+        )
+        .alignment(Alignment::Center);
+        f.render_widget(hint, chunks[1]);
+    }
+}
+
+fn build_comment_lines<'a>(comments: &'a [CommentEntry], _width: usize) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line<'a>> = Vec::new();
+    for (i, c) in comments.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(Span::styled(
+                "─".repeat(40),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        // Header: author + timestamp
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("@{}", c.author),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if c.created_at.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", c.created_at)
+                },
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        // Body (each line as a separate Line)
+        for body_line in c.body.lines() {
+            lines.push(Line::from(Span::raw(body_line.to_string())));
+        }
+        lines.push(Line::from(""));
+    }
+    lines
 }
