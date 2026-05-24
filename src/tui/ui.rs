@@ -945,17 +945,21 @@ fn draw_comments_popup(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn build_comment_lines<'a>(comments: &'a [CommentEntry], _width: usize) -> Vec<Line<'a>> {
+fn build_comment_lines<'a>(comments: &'a [CommentEntry], width: usize) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
+    let sep_width = width.max(4) - 4; // account for block padding
     for (i, c) in comments.iter().enumerate() {
         if i > 0 {
+            // Bold separator with comment number
             lines.push(Line::from(Span::styled(
-                "─".repeat(40),
-                Style::default().fg(Color::DarkGray),
+                "━".repeat(sep_width),
+                Style::default().fg(Color::Yellow),
             )));
+            lines.push(Line::from(""));
         }
-        // Header: author + timestamp
+        // Header line: ▌ @author  2026-05-24 20:15
         lines.push(Line::from(vec![
+            Span::styled("▌ ", Style::default().fg(Color::Yellow)),
             Span::styled(
                 format!("@{}", c.author),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -964,11 +968,12 @@ fn build_comment_lines<'a>(comments: &'a [CommentEntry], _width: usize) -> Vec<L
                 if c.created_at.is_empty() {
                     String::new()
                 } else {
-                    format!("  {}", c.created_at)
+                    format!("   🕐 {}", c.created_at)
                 },
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::White),
             ),
         ]));
+        lines.push(Line::from(""));
         // Body (each line as a separate Line)
         for body_line in c.body.lines() {
             lines.push(Line::from(Span::raw(body_line.to_string())));
