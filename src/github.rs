@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use crate::db::CachedItem;
+use anyhow::{Context, Result};
 use octocrab::Octocrab;
 use serde::Deserialize;
 use url::Url;
@@ -168,7 +168,8 @@ pub async fn search_page(
         .context("GraphQL search failed")?;
 
     let conn = resp.data.search;
-    let items = conn.nodes
+    let items = conn
+        .nodes
         .iter()
         .filter_map(|node| node_to_cached_item(node, query_id))
         .collect();
@@ -334,7 +335,10 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
 ///
 /// Input: `"https://api.github.com/repos/owner/name"`
 pub(crate) fn extract_repo_url(url: &Url) -> (String, String) {
-    let segments: Vec<&str> = url.path_segments().map(|s| s.collect::<Vec<_>>()).unwrap_or_default();
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|s| s.collect::<Vec<_>>())
+        .unwrap_or_default();
     // Path segments: ["repos", "owner", "name"]
     match segments.as_slice() {
         [.., owner, name] if !owner.is_empty() && !name.is_empty() => {

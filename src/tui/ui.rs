@@ -1,4 +1,4 @@
-use crate::tui::{App, Focus, InputMode, LeftPaneEntry};
+use crate::tui::{App, Focus, InputMode, ItemAction, LeftPaneEntry, MergeStrategy};
 use chrono::{DateTime, Local};
 use ratatui::{
     Frame,
@@ -30,6 +30,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else if app.input_mode == InputMode::EditFilterStream {
         draw_edit_filter_stream_modal(f, app, area);
     }
+
+    if app.input_mode == InputMode::ActionMenu {
+        draw_action_popup(f, app, area);
+    } else if app.input_mode == InputMode::MergeMenu {
+        draw_merge_menu_popup(f, app, area);
+    }
 }
 
 fn draw_main(f: &mut Frame, app: &App, area: Rect) {
@@ -59,7 +65,11 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|entry| match entry {
             LeftPaneEntry::Query(q) => {
-                let kind_badge = if q.kind == "pull_request" { " PR " } else { " IS " };
+                let kind_badge = if q.kind == "pull_request" {
+                    " PR "
+                } else {
+                    " IS "
+                };
                 let label = format!("{kind_badge} {}", q.label);
                 ListItem::new(label)
             }
@@ -117,11 +127,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
 
     // Item list
     let filtered = app.filtered_items();
-    let title = format!(
-        "Items ({}/{})",
-        filtered.len(),
-        app.items.len()
-    );
+    let title = format!("Items ({}/{})", filtered.len(), app.items.len());
     let block = pane_block(&title, focused && !filter_mode);
     let filter_query = app.parsed_filter();
     let match_highlight = Style::default()
@@ -295,10 +301,10 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                     Span::raw(format!(" {assignees}")),
                 ]),
                 Line::from({
-                    let mut spans = vec![Span::styled(
-                        "Reviewers:",
-                        Style::default().fg(Color::Gray),
-                    ), Span::raw(" ")];
+                    let mut spans = vec![
+                        Span::styled("Reviewers:", Style::default().fg(Color::Gray)),
+                        Span::raw(" "),
+                    ];
                     spans.extend(reviewer_spans);
                     spans
                 }),
@@ -319,14 +325,12 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                 if let Some(rd) = &item.review_decision {
                     let (badge, style) = match rd.as_str() {
                         "APPROVED" => ("✓ APPROVED", Style::default().fg(Color::Green)),
-                        "CHANGES_REQUESTED" => (
-                            "✗ CHANGES REQUESTED",
-                            Style::default().fg(Color::Red),
-                        ),
-                        "REVIEW_REQUIRED" => (
-                            "○ REVIEW REQUIRED",
-                            Style::default().fg(Color::Yellow),
-                        ),
+                        "CHANGES_REQUESTED" => {
+                            ("✗ CHANGES REQUESTED", Style::default().fg(Color::Red))
+                        }
+                        "REVIEW_REQUIRED" => {
+                            ("○ REVIEW REQUIRED", Style::default().fg(Color::Yellow))
+                        }
                         other => (other, Style::default()),
                     };
                     lines.push(Line::from(vec![
@@ -376,31 +380,50 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    let enter_actions_hint = if app.selected_item().is_some()
+        && matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
+    {
+        "  Enter:actions"
+    } else {
+        ""
+    };
+
     let mode_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  q:quit",
-            Focus::ItemList => "ITEMS    h/l:pane  j/k:move  /:filter  q:quit",
-            Focus::ItemDetail => "DETAIL   h/l:pane  j/k:scroll  q:quit",
+            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  q:quit".to_string(),
+            Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}  q:quit"),
+            Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}  q:quit"),
         },
-        InputMode::Filter => "FILTER   Esc:exit  C-u:clear  state:open  author:name  label:bug  repo:owner/name",
-        InputMode::NewQuery => "NEW QUERY  Tab:switch field  Enter:save  Esc:cancel",
-        InputMode::NewFilterStream => "NEW STREAM  Tab:switch field  Enter:save  Esc:cancel",
-        InputMode::EditQuery => "EDIT QUERY  Tab:switch field  Enter:save  Esc:cancel",
-        InputMode::EditFilterStream => "EDIT STREAM  Tab:switch field  Enter:save  Esc:cancel",
+        InputMode::Filter => "FILTER   Esc:exit  C-u:clear  state:open  author:name  label:bug  repo:owner/name".to_string(),
+        InputMode::NewQuery => "NEW QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
+        InputMode::NewFilterStream => "NEW STREAM  Tab:switch field  Enter:save  Esc:cancel".to_string(),
+        InputMode::EditQuery => "EDIT QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
+        InputMode::EditFilterStream => "EDIT STREAM  Tab:switch field  Enter:save  Esc:cancel".to_string(),
+        InputMode::ActionMenu => "ACTIONS  j/k:move  Enter:confirm  Esc:cancel".to_string(),
+        InputMode::MergeMenu => "MERGE    j/k:move  Enter:confirm  Esc:back".to_string(),
     };
 
     let status = if let Some(msg) = &app.status {
         if app.syncing && app.bg_sync_pending > 0 {
-            format!(" {mode_text}  │  ⟳ Syncing…  │  ⟳ Auto ({})  │  {msg}", app.bg_sync_pending)
+            format!(
+                " {mode_text}  │  ⟳ Syncing…  │  ⟳ Auto ({})  │  {msg}",
+                app.bg_sync_pending
+            )
         } else if app.syncing {
             format!(" {mode_text}  │  ⟳ Syncing…  │  {msg}")
         } else if app.bg_sync_pending > 0 {
-            format!(" {mode_text}  │  ⟳ Auto ({})  │  {msg}", app.bg_sync_pending)
+            format!(
+                " {mode_text}  │  ⟳ Auto ({})  │  {msg}",
+                app.bg_sync_pending
+            )
         } else {
             format!(" {mode_text}  │  {msg}")
         }
     } else if app.syncing && app.bg_sync_pending > 0 {
-        format!(" {mode_text}  │  ⟳ Syncing…  │  ⟳ Auto ({})", app.bg_sync_pending)
+        format!(
+            " {mode_text}  │  ⟳ Syncing…  │  ⟳ Auto ({})",
+            app.bg_sync_pending
+        )
     } else if app.syncing {
         format!(" {mode_text}  │  ⟳ Syncing…")
     } else if app.bg_sync_pending > 0 {
@@ -451,7 +474,10 @@ fn draw_new_query_modal(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::Gray)
     };
 
-    f.render_widget(Paragraph::new("Display name (optional — leave blank to use query):"), split[0]);
+    f.render_widget(
+        Paragraph::new("Display name (optional — leave blank to use query):"),
+        split[0],
+    );
     f.render_widget(
         Paragraph::new(format!(
             "> {}{}",
@@ -461,7 +487,10 @@ fn draw_new_query_modal(f: &mut Frame, app: &App, area: Rect) {
         .style(name_style),
         split[1],
     );
-    f.render_widget(Paragraph::new("GitHub search query (e.g. repo:owner/name is:pr is:open):"), split[2]);
+    f.render_widget(
+        Paragraph::new("GitHub search query (e.g. repo:owner/name is:pr is:open):"),
+        split[2],
+    );
     f.render_widget(
         Paragraph::new(format!(
             "> {}{}",
@@ -522,7 +551,10 @@ fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
         .style(name_style),
         split[1],
     );
-    f.render_widget(Paragraph::new("Filter (e.g. state:open label:bug):"), split[2]);
+    f.render_widget(
+        Paragraph::new("Filter (e.g. state:open label:bug):"),
+        split[2],
+    );
     f.render_widget(
         Paragraph::new(format!(
             "> {}{}",
@@ -667,6 +699,92 @@ fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn draw_action_popup(f: &mut Frame, app: &App, area: Rect) {
+    let item = match app.selected_item() {
+        Some(item) => item,
+        None => return,
+    };
+    let actions = ItemAction::available_for(&item.kind);
+    let popup_area = centered_rect_fixed(40, actions.len() as u16 + 3, area);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default().borders(Borders::ALL).title(" Actions ");
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = actions
+        .iter()
+        .enumerate()
+        .map(|(i, action)| {
+            if i == app.action_cursor {
+                ListItem::new(format!(" ▶ {} ", action.label())).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ListItem::new(format!("   {} ", action.label()))
+            }
+        })
+        .collect();
+
+    f.render_widget(List::new(items), chunks[0]);
+    f.render_widget(
+        Paragraph::new("j/k: move  Enter: confirm  Esc: cancel")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+}
+
+fn draw_merge_menu_popup(f: &mut Frame, app: &App, area: Rect) {
+    let strategies = MergeStrategy::all();
+    let popup_area = centered_rect_fixed(40, strategies.len() as u16 + 3, area);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Merge Strategy ");
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = strategies
+        .iter()
+        .enumerate()
+        .map(|(i, strategy)| {
+            if i == app.merge_strategy_cursor {
+                ListItem::new(format!(" ▶ {} ", strategy.label())).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ListItem::new(format!("   {} ", strategy.label()))
+            }
+        })
+        .collect();
+
+    f.render_widget(List::new(items), chunks[0]);
+    f.render_widget(
+        Paragraph::new("j/k: move  Enter: confirm  Esc: back")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+}
+
 fn pane_block(title: &str, focused: bool) -> Block<'_> {
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
@@ -747,4 +865,10 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, popup_width.min(area.width), height.min(area.height))
+}
+
+fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
 }

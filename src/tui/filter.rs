@@ -61,11 +61,7 @@ impl FilterQuery {
             }
         }
         // author filter
-        let author_lower = item
-            .author
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase();
+        let author_lower = item.author.as_deref().unwrap_or("").to_lowercase();
         for a in &self.authors {
             if !author_lower.contains(a.as_str()) {
                 return false;

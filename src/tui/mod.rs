@@ -1,12 +1,16 @@
-use anyhow::Result;
 use crate::{db, github};
+use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
 use octocrab::Octocrab;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use sqlx::SqlitePool;
-use std::io;
+use std::{
+    io,
+    process::Stdio,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::mpsc;
 
 pub mod filter;
@@ -128,6 +132,70 @@ pub struct ItemEntry {
     pub milestone: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum ItemAction {
+    OpenBrowser,
+    Comment,
+    ViewComments,
+    ApprovePR,
+    MergePR,
+}
+
+impl ItemAction {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::OpenBrowser => "Open in browser",
+            Self::Comment => "Comment",
+            Self::ViewComments => "View comments",
+            Self::ApprovePR => "Approve PR",
+            Self::MergePR => "Merge PR",
+        }
+    }
+
+    pub fn available_for(kind: &str) -> Vec<Self> {
+        match kind {
+            "pull_request" => vec![
+                Self::OpenBrowser,
+                Self::Comment,
+                Self::ViewComments,
+                Self::ApprovePR,
+                Self::MergePR,
+            ],
+            "issue" => vec![Self::OpenBrowser, Self::Comment, Self::ViewComments],
+            _ => vec![],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MergeStrategy {
+    Squash,
+    Merge,
+    Rebase,
+}
+
+impl MergeStrategy {
+    pub fn all() -> Vec<Self> {
+        vec![Self::Squash, Self::Merge, Self::Rebase]
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Squash => "Squash",
+            Self::Merge => "Merge",
+            Self::Rebase => "Rebase",
+        }
+    }
+
+    pub fn flag(&self) -> &str {
+        match self {
+            Self::Squash => "--squash",
+            Self::Merge => "--merge",
+            Self::Rebase => "--rebase",
+        }
+    }
+}
+
 // ── Application state ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -148,6 +216,8 @@ pub enum InputMode {
     EditQuery,
     /// Edit filter stream modal (name + filter, Tab to switch fields).
     EditFilterStream,
+    ActionMenu,
+    MergeMenu,
 }
 
 pub struct App {
@@ -173,6 +243,8 @@ pub struct App {
     pub edit_input2: String,
     /// Which field (0 or 1) is active in a 2-field modal.
     pub modal_field: usize,
+    pub action_cursor: usize,
+    pub merge_strategy_cursor: usize,
     pub status: Option<String>,
     /// Whether a manual GitHub sync is in progress for the selected query.
     pub syncing: bool,
@@ -203,6 +275,8 @@ impl App {
             edit_input: String::new(),
             edit_input2: String::new(),
             modal_field: 0,
+            action_cursor: 0,
+            merge_strategy_cursor: 0,
             status: None,
             syncing: false,
             bg_sync_pending: 0,
@@ -292,14 +366,33 @@ impl App {
 // ── Background messages ──────────────────────────────────────────────────────
 
 pub enum AppMessage {
-    ItemsLoaded { query_id: i64, items: Vec<ItemEntry> },
+    ItemsLoaded {
+        query_id: i64,
+        items: Vec<ItemEntry>,
+    },
     QueryAdded(QueryEntry),
     FilterStreamAdded(FilterStreamEntry),
-    QueryUpdated { id: i64, new_name: Option<String>, new_query: String },
-    FilterStreamUpdated { id: i64, new_name: String, new_filter: String },
+    QueryUpdated {
+        id: i64,
+        new_name: Option<String>,
+        new_query: String,
+    },
+    FilterStreamUpdated {
+        id: i64,
+        new_name: String,
+        new_filter: String,
+    },
     Status(String),
-    SyncDone { query_id: i64, count: usize },
-    SyncError { query_id: i64, error: String },
+    ActionDone(String),
+    ActionError(String),
+    SyncDone {
+        query_id: i64,
+        count: usize,
+    },
+    SyncError {
+        query_id: i64,
+        error: String,
+    },
     /// N background sync jobs were added to the worker queue.
     BgSyncQueued(usize),
     /// One background sync job finished (success or skip).
@@ -322,6 +415,8 @@ enum Action {
     SaveNewFilterStream,
     SaveEditQuery,
     SaveEditFilterStream,
+    ConfirmAction,
+    ConfirmMergeStrategy,
 }
 
 // ── Key event handler ────────────────────────────────────────────────────────
@@ -333,6 +428,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         InputMode::NewFilterStream => handle_key_new_filter_stream(app, key),
         InputMode::EditQuery => handle_key_edit_query(app, key),
         InputMode::EditFilterStream => handle_key_edit_filter_stream(app, key),
+        InputMode::ActionMenu => handle_key_action_menu(app, key),
+        InputMode::MergeMenu => handle_key_merge_menu(app, key),
         InputMode::Normal => handle_key_normal(app, key),
     }
 }
@@ -431,8 +528,15 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
         }
         // Delete handled in main loop
         KeyCode::Char('d')
-            if app.focus == Focus::QueryList
-                && key.modifiers.contains(KeyModifiers::NONE) => {}
+            if app.focus == Focus::QueryList && key.modifiers.contains(KeyModifiers::NONE) => {}
+
+        KeyCode::Enter
+            if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
+                && app.selected_item().is_some() =>
+        {
+            app.input_mode = InputMode::ActionMenu;
+            app.action_cursor = 0;
+        }
 
         // Enter filter mode (middle pane)
         KeyCode::Char('/') if app.focus == Focus::ItemList => {
@@ -441,6 +545,54 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
 
         _ => {}
     }
+    Action::None
+}
+
+fn handle_key_action_menu(app: &mut App, key: KeyEvent) -> Action {
+    let available_len = app
+        .selected_item()
+        .map(|item| ItemAction::available_for(&item.kind).len())
+        .unwrap_or(0);
+
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            let max = available_len.saturating_sub(1);
+            if app.action_cursor < max {
+                app.action_cursor += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.action_cursor = app.action_cursor.saturating_sub(1);
+        }
+        KeyCode::Enter => return Action::ConfirmAction,
+        _ => {}
+    }
+
+    Action::None
+}
+
+fn handle_key_merge_menu(app: &mut App, key: KeyEvent) -> Action {
+    let max = MergeStrategy::all().len().saturating_sub(1);
+
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::ActionMenu;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.merge_strategy_cursor < max {
+                app.merge_strategy_cursor += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.merge_strategy_cursor = app.merge_strategy_cursor.saturating_sub(1);
+        }
+        KeyCode::Enter => return Action::ConfirmMergeStrategy,
+        _ => {}
+    }
+
     Action::None
 }
 
@@ -626,6 +778,130 @@ fn handle_key_edit_filter_stream(app: &mut App, key: KeyEvent) -> Action {
 
 // ── Background task helpers ───────────────────────────────────────────────────
 
+/// Suspends TUI is not done here — caller must suspend/restore around this call.
+fn run_editor(initial_content: &str) -> anyhow::Result<Option<String>> {
+    let cwd = std::env::current_dir()?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let path = cwd.join(format!(".glauca-editor-{}-{nonce}.md", std::process::id()));
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    std::fs::write(&path, initial_content)?;
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi");
+    let status = std::process::Command::new(program)
+        .args(parts)
+        .arg(&path)
+        .status()?;
+
+    let result = if status.success() {
+        let content = std::fs::read_to_string(&path)?;
+        let trimmed = content.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    } else {
+        None
+    };
+
+    let _ = std::fs::remove_file(&path);
+    Ok(result)
+}
+
+fn suspend_tui<B: ratatui::backend::Backend + io::Write>(
+    terminal: &mut Terminal<B>,
+) -> anyhow::Result<()> {
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
+    Ok(())
+}
+
+fn restore_tui<B: ratatui::backend::Backend + io::Write>(
+    terminal: &mut Terminal<B>,
+) -> anyhow::Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::EnterAlternateScreen
+    )?;
+    terminal.clear()?;
+    Ok(())
+}
+
+async fn run_background_command(
+    mut cmd: tokio::process::Command,
+    failure: &str,
+) -> anyhow::Result<()> {
+    let output = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(anyhow::anyhow!(failure.to_string()))
+        } else {
+            Err(anyhow::anyhow!(format!("{failure}: {stderr}")))
+        }
+    }
+}
+
+async fn execute_open_browser(item: &ItemEntry) -> anyhow::Result<String> {
+    let sub = if item.kind == "pull_request" {
+        "pr"
+    } else {
+        "issue"
+    };
+    let repo = format!("{}/{}", item.repo_owner, item.repo_name);
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.args([sub, "view", "--web", &item.number.to_string(), "-R", &repo]);
+    run_background_command(cmd, "Failed to open in browser").await?;
+    Ok("Opened in browser".into())
+}
+
+async fn execute_comment(url: &str, kind: &str, body: &str) -> anyhow::Result<String> {
+    let sub = if kind == "pull_request" {
+        "pr"
+    } else {
+        "issue"
+    };
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.args([sub, "comment", url, "--body", body]);
+    run_background_command(cmd, &format!("gh {sub} comment failed")).await?;
+    Ok("Comment posted".into())
+}
+
+async fn execute_approve(url: &str, body: Option<&str>) -> anyhow::Result<String> {
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.args(["pr", "review", "--approve", url]);
+    if let Some(b) = body {
+        cmd.args(["-b", b]);
+    }
+    run_background_command(cmd, "gh pr review --approve failed").await?;
+    Ok("PR approved".into())
+}
+
+async fn execute_merge(url: &str, strategy: &MergeStrategy) -> anyhow::Result<String> {
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.args(["pr", "merge", strategy.flag(), url]);
+    run_background_command(cmd, "gh pr merge failed").await?;
+    Ok(format!("PR merged ({})", strategy.label()))
+}
+
 async fn load_items_task(pool: SqlitePool, query_id: i64, tx: mpsc::Sender<AppMessage>) {
     match db::fetch_items(&pool, query_id).await {
         Ok(cached) => {
@@ -658,7 +934,9 @@ async fn load_items_task(pool: SqlitePool, query_id: i64, tx: mpsc::Sender<AppMe
             let _ = tx.send(AppMessage::ItemsLoaded { query_id, items }).await;
         }
         Err(e) => {
-            let _ = tx.send(AppMessage::Status(format!("load error: {e}"))).await;
+            let _ = tx
+                .send(AppMessage::Status(format!("load error: {e}")))
+                .await;
         }
     }
 }
@@ -750,7 +1028,10 @@ async fn sync_task(
         return;
     }
     let _ = tx
-        .send(AppMessage::SyncDone { query_id, count: total_count })
+        .send(AppMessage::SyncDone {
+            query_id,
+            count: total_count,
+        })
         .await;
 }
 
@@ -774,7 +1055,14 @@ async fn sync_worker_task(
             .await
             .unwrap_or(true);
         if stale {
-            sync_task(pool.clone(), gh.clone(), job.query_id, job.query_str, tx.clone()).await;
+            sync_task(
+                pool.clone(),
+                gh.clone(),
+                job.query_id,
+                job.query_str,
+                tx.clone(),
+            )
+            .await;
         }
         let _ = tx.send(AppMessage::BgSyncJobDone).await;
     }
@@ -799,7 +1087,10 @@ async fn refresh_timer_task(
                 .unwrap_or(true)
             {
                 let _ = sync_tx
-                    .send(SyncJob { query_id: q.id, query_str: q.query })
+                    .send(SyncJob {
+                        query_id: q.id,
+                        query_str: q.query,
+                    })
                     .await;
                 count += 1;
             }
@@ -867,7 +1158,7 @@ pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
     result
 }
 
-async fn run_app<B: ratatui::backend::Backend>(
+async fn run_app<B: ratatui::backend::Backend + io::Write>(
     terminal: &mut Terminal<B>,
     pool: SqlitePool,
     gh: Octocrab,
@@ -876,7 +1167,9 @@ async fn run_app<B: ratatui::backend::Backend>(
     let query_rows = db::list_queries(&pool).await.unwrap_or_default();
     let mut entries: Vec<LeftPaneEntry> = Vec::new();
     for r in query_rows {
-        let streams = db::list_filter_streams(&pool, r.id).await.unwrap_or_default();
+        let streams = db::list_filter_streams(&pool, r.id)
+            .await
+            .unwrap_or_default();
         let kind = r.kind.clone();
         let label = r.name.clone().unwrap_or_else(|| r.query.clone());
         entries.push(LeftPaneEntry::Query(QueryEntry {
@@ -900,16 +1193,30 @@ async fn run_app<B: ratatui::backend::Backend>(
     let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
 
     // Spawn the sequential background sync worker.
-    tokio::spawn(sync_worker_task(pool.clone(), gh.clone(), sync_job_rx, tx.clone()));
+    tokio::spawn(sync_worker_task(
+        pool.clone(),
+        gh.clone(),
+        sync_job_rx,
+        tx.clone(),
+    ));
     // Spawn the periodic refresh timer (fires every BG_SYNC_INTERVAL_SECS).
-    tokio::spawn(refresh_timer_task(pool.clone(), sync_job_tx.clone(), tx.clone()));
+    tokio::spawn(refresh_timer_task(
+        pool.clone(),
+        sync_job_tx.clone(),
+        tx.clone(),
+    ));
 
     // Build App from QueryEntry list (filter streams handled via entries above)
     let queries: Vec<QueryEntry> = entries
         .iter()
         .filter_map(|e| {
             if let LeftPaneEntry::Query(q) = e {
-                Some(QueryEntry { id: q.id, label: q.label.clone(), query_str: q.query_str.clone(), kind: q.kind.clone() })
+                Some(QueryEntry {
+                    id: q.id,
+                    label: q.label.clone(),
+                    query_str: q.query_str.clone(),
+                    kind: q.kind.clone(),
+                })
             } else {
                 None
             }
@@ -940,7 +1247,13 @@ async fn run_app<B: ratatui::backend::Backend>(
                     .await
                     .unwrap_or(true)
                 {
-                    tokio::spawn(sync_task(pool.clone(), gh.clone(), root_id, query_str, tx.clone()));
+                    tokio::spawn(sync_task(
+                        pool.clone(),
+                        gh.clone(),
+                        root_id,
+                        query_str,
+                        tx.clone(),
+                    ));
                     app.syncing = true;
                 }
                 initially_synced_id = Some(root_id);
@@ -963,7 +1276,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                     .unwrap_or(true)
                 {
                     let _ = sync_job_tx
-                        .send(SyncJob { query_id: q.id, query_str: q.query_str.clone() })
+                        .send(SyncJob {
+                            query_id: q.id,
+                            query_str: q.query_str.clone(),
+                        })
                         .await;
                     bg_count += 1;
                 }
@@ -1305,6 +1621,160 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 });
                             }
                         }
+                        Action::ConfirmAction => {
+                            if let Some(item) = app.selected_item().cloned() {
+                                let actions = ItemAction::available_for(&item.kind);
+                                if let Some(action) = actions.get(app.action_cursor).cloned() {
+                                    match action {
+                                        ItemAction::OpenBrowser => {
+                                            app.input_mode = InputMode::Normal;
+                                            let tx_clone = tx.clone();
+                                            let item_clone = item.clone();
+                                            tokio::spawn(async move {
+                                                match execute_open_browser(&item_clone).await {
+                                                    Ok(msg) => {
+                                                        let _ = tx_clone.send(AppMessage::ActionDone(msg)).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx_clone
+                                                            .send(AppMessage::ActionError(e.to_string()))
+                                                            .await;
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        ItemAction::Comment => {
+                                            app.input_mode = InputMode::Normal;
+                                            suspend_tui(terminal)?;
+                                            let editor_result = run_editor("");
+                                            restore_tui(terminal)?;
+
+                                            match editor_result {
+                                                Ok(Some(body)) => {
+                                                    let url = item.url.clone();
+                                                    let kind = item.kind.clone();
+                                                    let tx_clone = tx.clone();
+                                                    tokio::spawn(async move {
+                                                        match execute_comment(&url, &kind, &body).await {
+                                                            Ok(msg) => {
+                                                                let _ = tx_clone
+                                                                    .send(AppMessage::ActionDone(msg))
+                                                                    .await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx_clone
+                                                                    .send(AppMessage::ActionError(e.to_string()))
+                                                                    .await;
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                                Ok(None) => {
+                                                    app.status = Some("Comment cancelled".into());
+                                                }
+                                                Err(e) => {
+                                                    app.status = Some(format!("Editor error: {e}"));
+                                                }
+                                            }
+                                        }
+                                        ItemAction::ViewComments => {
+                                            app.input_mode = InputMode::Normal;
+                                            suspend_tui(terminal)?;
+                                            let sub = if item.kind == "pull_request" { "pr" } else { "issue" };
+                                            let status = std::process::Command::new("gh")
+                                                .args([sub, "view", "--comments", &item.url])
+                                                .status();
+                                            println!("\n─── Press Enter to return to glauca ───");
+                                            let mut line = String::new();
+                                            let _ = io::stdin().read_line(&mut line);
+                                            restore_tui(terminal)?;
+
+                                            match status {
+                                                Ok(exit_status) => {
+                                                    if !exit_status.success() {
+                                                        app.status = Some("Failed to view comments".into());
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    app.status = Some(format!("View comments error: {e}"));
+                                                }
+                                            }
+                                        }
+                                        ItemAction::ApprovePR => {
+                                            app.input_mode = InputMode::Normal;
+                                            suspend_tui(terminal)?;
+                                            let editor_result = run_editor(
+                                                "# Optional review comment (leave empty to approve without body)\n# Lines starting with '#' are ignored.\n",
+                                            );
+                                            restore_tui(terminal)?;
+
+                                            match editor_result {
+                                                Ok(Some(body)) => {
+                                                    let body_final = body
+                                                        .lines()
+                                                        .filter(|line| !line.starts_with('#'))
+                                                        .collect::<Vec<_>>()
+                                                        .join("\n");
+                                                    let body_final = if body_final.trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(body_final)
+                                                    };
+                                                    let url = item.url.clone();
+                                                    let tx_clone = tx.clone();
+                                                    tokio::spawn(async move {
+                                                        match execute_approve(&url, body_final.as_deref()).await {
+                                                            Ok(msg) => {
+                                                                let _ = tx_clone
+                                                                    .send(AppMessage::ActionDone(msg))
+                                                                    .await;
+                                                            }
+                                                            Err(e) => {
+                                                                let _ = tx_clone
+                                                                    .send(AppMessage::ActionError(e.to_string()))
+                                                                    .await;
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                                Ok(None) => {
+                                                    app.status = Some("Approval cancelled".into());
+                                                }
+                                                Err(e) => {
+                                                    app.status = Some(format!("Editor error: {e}"));
+                                                }
+                                            }
+                                        }
+                                        ItemAction::MergePR => {
+                                            app.input_mode = InputMode::MergeMenu;
+                                            app.merge_strategy_cursor = 0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Action::ConfirmMergeStrategy => {
+                            if let Some(item) = app.selected_item().cloned() {
+                                let strategies = MergeStrategy::all();
+                                if let Some(strategy) = strategies.get(app.merge_strategy_cursor).cloned() {
+                                    app.input_mode = InputMode::Normal;
+                                    let url = item.url.clone();
+                                    let tx_clone = tx.clone();
+                                    tokio::spawn(async move {
+                                        match execute_merge(&url, &strategy).await {
+                                            Ok(msg) => {
+                                                let _ = tx_clone.send(AppMessage::ActionDone(msg)).await;
+                                            }
+                                            Err(e) => {
+                                                let _ = tx_clone
+                                                    .send(AppMessage::ActionError(e.to_string()))
+                                                    .await;
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
                         Action::None => {}
                     }
                 }
@@ -1409,6 +1879,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                     AppMessage::Status(s) => {
                         app.status = Some(s);
                     }
+                    AppMessage::ActionDone(msg) => {
+                        app.status = Some(msg);
+                    }
+                    AppMessage::ActionError(err) => {
+                        app.status = Some(format!("Error: {err}"));
+                    }
                     AppMessage::SyncDone { query_id, count } => {
                         if app.selected_root_query_id() == Some(query_id) {
                             app.syncing = false;
@@ -1503,7 +1979,11 @@ mod tests {
         app.filter = "fix".into();
         let filtered = app.filtered_items();
         assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|i| i.title.to_lowercase().contains("fix")));
+        assert!(
+            filtered
+                .iter()
+                .all(|i| i.title.to_lowercase().contains("fix"))
+        );
     }
 
     #[test]
@@ -1511,7 +1991,10 @@ mod tests {
         let app = make_app_with_items(&["First", "Second", "Third"]);
         let mut app = app;
         app.item_cursor = 1;
-        assert_eq!(app.selected_item().map(|i| i.title.as_str()), Some("Second"));
+        assert_eq!(
+            app.selected_item().map(|i| i.title.as_str()),
+            Some("Second")
+        );
     }
 
     #[test]
@@ -1638,7 +2121,10 @@ mod tests {
     fn expand_me_review_requested_at_me() {
         let mut app = App::new(vec![]);
         app.current_user = Some("octocat".into());
-        assert_eq!(app.expand_me("review-requested:@me"), "review-requested:octocat");
+        assert_eq!(
+            app.expand_me("review-requested:@me"),
+            "review-requested:octocat"
+        );
     }
 
     #[test]
@@ -1774,5 +2260,70 @@ mod tests {
         handle_key_filter(&mut app, make_key(KeyCode::Char('x')));
         assert_eq!(app.filter, "fix");
     }
-}
 
+    #[test]
+    fn app_new_initializes_action_state() {
+        let app = App::new(vec![]);
+        assert_eq!(app.action_cursor, 0);
+        assert_eq!(app.merge_strategy_cursor, 0);
+    }
+
+    #[test]
+    fn item_action_available_for_kind_is_context_aware() {
+        assert_eq!(
+            ItemAction::available_for("pull_request"),
+            vec![
+                ItemAction::OpenBrowser,
+                ItemAction::Comment,
+                ItemAction::ViewComments,
+                ItemAction::ApprovePR,
+                ItemAction::MergePR,
+            ]
+        );
+        assert_eq!(
+            ItemAction::available_for("issue"),
+            vec![
+                ItemAction::OpenBrowser,
+                ItemAction::Comment,
+                ItemAction::ViewComments,
+            ]
+        );
+    }
+
+    #[test]
+    fn enter_opens_action_menu_for_selected_item() {
+        let mut app = make_app_with_items(&["First"]);
+        app.focus = Focus::ItemList;
+
+        let action = handle_key_normal(&mut app, make_key(KeyCode::Enter));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.input_mode, InputMode::ActionMenu);
+        assert_eq!(app.action_cursor, 0);
+    }
+
+    #[test]
+    fn action_menu_navigation_and_confirm_work() {
+        let mut app = make_app_with_items(&["First"]);
+        app.input_mode = InputMode::ActionMenu;
+
+        handle_key_action_menu(&mut app, make_key(KeyCode::Down));
+        assert_eq!(app.action_cursor, 1);
+
+        let action = handle_key_action_menu(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::ConfirmAction));
+    }
+
+    #[test]
+    fn merge_menu_escape_returns_to_action_menu() {
+        let mut app = make_app_with_items(&["First"]);
+        app.input_mode = InputMode::MergeMenu;
+        app.merge_strategy_cursor = 1;
+
+        let action = handle_key_merge_menu(&mut app, make_key(KeyCode::Esc));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.input_mode, InputMode::ActionMenu);
+        assert_eq!(app.merge_strategy_cursor, 1);
+    }
+}

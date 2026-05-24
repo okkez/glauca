@@ -107,14 +107,12 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
 
 /// Swap the `position` values of two filter streams (must share the same parent).
 pub async fn swap_filter_stream_positions(pool: &SqlitePool, id1: i64, id2: i64) -> Result<()> {
-    let pos1 =
-        sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", id1)
-            .fetch_one(pool)
-            .await?;
-    let pos2 =
-        sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", id2)
-            .fetch_one(pool)
-            .await?;
+    let pos1 = sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", id1)
+        .fetch_one(pool)
+        .await?;
+    let pos2 = sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", id2)
+        .fetch_one(pool)
+        .await?;
     sqlx::query!(
         "UPDATE filter_streams SET position = ? WHERE id = ?",
         pos2,
@@ -320,10 +318,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
 }
 
 /// Fetch all cached items for a query.
-pub async fn fetch_items(
-    pool: &SqlitePool,
-    query_id: i64,
-) -> Result<Vec<CachedItem>> {
+pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedItem>> {
     let rows = sqlx::query!(
         r#"
         SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,
@@ -369,11 +364,7 @@ pub async fn fetch_items(
 }
 
 /// Check whether the cache for a query is stale (older than `max_age_secs`).
-pub async fn is_cache_stale(
-    pool: &SqlitePool,
-    query_id: i64,
-    max_age_secs: i64,
-) -> Result<bool> {
+pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64) -> Result<bool> {
     let row = sqlx::query!(
         r#"
         SELECT last_fetched_at
@@ -448,8 +439,12 @@ mod tests {
             .await
             .expect("upsert query");
 
-        upsert_item(&pool, &make_item(qid, 1, "First")).await.expect("upsert");
-        upsert_item(&pool, &make_item(qid, 2, "Second")).await.expect("upsert");
+        upsert_item(&pool, &make_item(qid, 1, "First"))
+            .await
+            .expect("upsert");
+        upsert_item(&pool, &make_item(qid, 2, "Second"))
+            .await
+            .expect("upsert");
 
         let items = fetch_items(&pool, qid).await.expect("fetch");
         assert_eq!(items.len(), 2);
@@ -465,9 +460,15 @@ mod tests {
     async fn list_queries_returns_in_creation_order() {
         let (pool, _file) = test_pool().await;
 
-        upsert_query(&pool, "query:first", "issue", None).await.expect("upsert");
-        upsert_query(&pool, "query:second", "pull_request", None).await.expect("upsert");
-        upsert_query(&pool, "query:third", "issue", None).await.expect("upsert");
+        upsert_query(&pool, "query:first", "issue", None)
+            .await
+            .expect("upsert");
+        upsert_query(&pool, "query:second", "pull_request", None)
+            .await
+            .expect("upsert");
+        upsert_query(&pool, "query:third", "issue", None)
+            .await
+            .expect("upsert");
 
         let queries = list_queries(&pool).await.expect("list");
         assert_eq!(queries.len(), 3);
@@ -557,7 +558,9 @@ mod tests {
         assert_eq!(streams[0].filter, "state:open");
 
         delete_filter_stream(&pool, fid).await.expect("delete");
-        let streams = list_filter_streams(&pool, qid).await.expect("list after delete");
+        let streams = list_filter_streams(&pool, qid)
+            .await
+            .expect("list after delete");
         assert_eq!(streams.len(), 0);
     }
 
@@ -574,8 +577,14 @@ mod tests {
 
         delete_query(&pool, qid).await.expect("delete query");
 
-        let streams = list_filter_streams(&pool, qid).await.expect("list after parent delete");
-        assert_eq!(streams.len(), 0, "filter streams should cascade with parent query");
+        let streams = list_filter_streams(&pool, qid)
+            .await
+            .expect("list after parent delete");
+        assert_eq!(
+            streams.len(),
+            0,
+            "filter streams should cascade with parent query"
+        );
     }
 
     #[tokio::test]
