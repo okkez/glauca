@@ -446,6 +446,7 @@ enum Action {
     SaveEditFilterStream,
     ConfirmAction,
     ConfirmMergeStrategy,
+    OpenBrowser,
 }
 
 // ── Key event handler ────────────────────────────────────────────────────────
@@ -566,6 +567,14 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
         {
             app.input_mode = InputMode::ActionMenu;
             app.action_cursor = 0;
+        }
+
+        // Open selected item in browser directly
+        KeyCode::Char('o')
+            if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
+                && app.selected_item().is_some() =>
+        {
+            return Action::OpenBrowser;
         }
 
         // Enter filter mode (middle pane)
@@ -1927,6 +1936,23 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                                         }
                                     });
                                 }
+                            }
+                        }
+                        Action::OpenBrowser => {
+                            if let Some(item) = app.selected_item().cloned() {
+                                let tx_clone = tx.clone();
+                                tokio::spawn(async move {
+                                    match execute_open_browser(&item).await {
+                                        Ok(msg) => {
+                                            let _ = tx_clone.send(AppMessage::ActionDone(msg)).await;
+                                        }
+                                        Err(e) => {
+                                            let _ = tx_clone
+                                                .send(AppMessage::ActionError(e.to_string()))
+                                                .await;
+                                        }
+                                    }
+                                });
                             }
                         }
                         Action::None => {}
