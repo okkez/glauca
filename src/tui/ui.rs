@@ -210,12 +210,35 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 item.assignees.join(", ")
             };
-            let reviewers = if item.requested_reviewers.is_empty() {
-                "—".to_string()
-            } else {
-                item.requested_reviewers.join(", ")
-            };
             let milestone = item.milestone.clone().unwrap_or_else(|| "—".to_string());
+
+            // Build combined reviewer list: submitted reviews + pending requests
+            let reviewed_logins: std::collections::HashSet<&str> =
+                item.reviews.iter().map(|(l, _)| l.as_str()).collect();
+            let reviewer_spans: Vec<Span> = {
+                let mut spans = Vec::new();
+                for (login, state) in &item.reviews {
+                    let (badge, style) = review_state_badge(state);
+                    if !spans.is_empty() {
+                        spans.push(Span::raw("  "));
+                    }
+                    spans.push(Span::styled(badge, style));
+                    spans.push(Span::raw(format!(" {login}")));
+                }
+                for login in &item.requested_reviewers {
+                    if !reviewed_logins.contains(login.as_str()) {
+                        if !spans.is_empty() {
+                            spans.push(Span::raw("  "));
+                        }
+                        spans.push(Span::styled("○", Style::default().fg(Color::DarkGray)));
+                        spans.push(Span::raw(format!(" {login}")));
+                    }
+                }
+                if spans.is_empty() {
+                    spans.push(Span::raw("—"));
+                }
+                spans
+            };
 
             let mut lines = vec![
                 // Title header
@@ -271,10 +294,14 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                     Span::styled("Assignees:", Style::default().fg(Color::Gray)),
                     Span::raw(format!(" {assignees}")),
                 ]),
-                Line::from(vec![
-                    Span::styled("Reviewers:", Style::default().fg(Color::Gray)),
-                    Span::raw(format!(" {reviewers}")),
-                ]),
+                Line::from({
+                    let mut spans = vec![Span::styled(
+                        "Reviewers:",
+                        Style::default().fg(Color::Gray),
+                    ), Span::raw(" ")];
+                    spans.extend(reviewer_spans);
+                    spans
+                }),
                 Line::from(vec![
                     Span::styled("Comments: ", Style::default().fg(Color::Gray)),
                     Span::raw(format!("{comment_count}")),
@@ -687,6 +714,17 @@ fn kind_icon(kind: &str) -> &'static str {
     match kind {
         "pull_request" => "⎇",
         _ => "○", // issue
+    }
+}
+
+/// Returns (badge_str, style) for a reviewer's submitted review state.
+fn review_state_badge(state: &str) -> (&'static str, Style) {
+    match state {
+        "APPROVED" => ("✅", Style::default().fg(Color::Green)),
+        "CHANGES_REQUESTED" => ("✗", Style::default().fg(Color::Red)),
+        "COMMENTED" => ("💬", Style::default().fg(Color::Blue)),
+        "DISMISSED" => ("↩", Style::default().fg(Color::DarkGray)),
+        _ => ("?", Style::default()),
     }
 }
 

@@ -248,6 +248,7 @@ pub struct CachedItem {
     pub labels: String,
     pub comment_count: i64,
     pub requested_reviewers: String,
+    pub reviews: String,
     pub body: Option<String>,
     pub assignees: String,
     pub is_draft: bool,
@@ -265,10 +266,10 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         r#"
         INSERT INTO items
             (query_id, kind, repo_owner, repo_name, number, title, url, author,
-             state, updated_at, labels, comment_count, requested_reviewers,
+             state, updated_at, labels, comment_count, requested_reviewers, reviews,
              body, assignees, is_draft, created_at_item, base_ref, head_ref,
              review_decision, milestone, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
             title               = excluded.title,
@@ -279,6 +280,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
             labels              = excluded.labels,
             comment_count       = excluded.comment_count,
             requested_reviewers = excluded.requested_reviewers,
+            reviews             = excluded.reviews,
             body                = excluded.body,
             assignees           = excluded.assignees,
             is_draft            = excluded.is_draft,
@@ -302,6 +304,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         item.labels,
         item.comment_count,
         item.requested_reviewers,
+        item.reviews,
         item.body,
         item.assignees,
         is_draft_int,
@@ -324,7 +327,7 @@ pub async fn fetch_items(
     let rows = sqlx::query!(
         r#"
         SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,
-               state, updated_at, labels, comment_count, requested_reviewers,
+               state, updated_at, labels, comment_count, requested_reviewers, reviews,
                body, assignees, is_draft, created_at_item, base_ref, head_ref,
                review_decision, milestone
         FROM items
@@ -352,6 +355,7 @@ pub async fn fetch_items(
             labels: r.labels,
             comment_count: r.comment_count,
             requested_reviewers: r.requested_reviewers,
+            reviews: r.reviews,
             body: r.body,
             assignees: r.assignees,
             is_draft: r.is_draft != 0,
@@ -424,6 +428,7 @@ mod tests {
             labels: "[]".into(),
             comment_count: 0,
             requested_reviewers: "[]".into(),
+            reviews: "[]".into(),
             body: None,
             assignees: "[]".into(),
             is_draft: false,
@@ -515,6 +520,7 @@ mod tests {
             labels: "[]".into(),
             comment_count: 0,
             requested_reviewers: "[]".into(),
+            reviews: "[]".into(),
             body: None,
             assignees: "[]".into(),
             is_draft: false,

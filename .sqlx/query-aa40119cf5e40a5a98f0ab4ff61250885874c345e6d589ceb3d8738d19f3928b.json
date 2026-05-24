@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,\n               state, updated_at, labels, comment_count, requested_reviewers,\n               body, assignees, is_draft, created_at_item, base_ref, head_ref,\n               review_decision, milestone\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
+  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,\n               state, updated_at, labels, comment_count, requested_reviewers, reviews,\n               body, assignees, is_draft, created_at_item, base_ref, head_ref,\n               review_decision, milestone\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -69,43 +69,48 @@
         "type_info": "Text"
       },
       {
-        "name": "body",
+        "name": "reviews",
         "ordinal": 13,
         "type_info": "Text"
       },
       {
-        "name": "assignees",
+        "name": "body",
         "ordinal": 14,
         "type_info": "Text"
       },
       {
-        "name": "is_draft",
+        "name": "assignees",
         "ordinal": 15,
+        "type_info": "Text"
+      },
+      {
+        "name": "is_draft",
+        "ordinal": 16,
         "type_info": "Integer"
       },
       {
         "name": "created_at_item",
-        "ordinal": 16,
-        "type_info": "Text"
-      },
-      {
-        "name": "base_ref",
         "ordinal": 17,
         "type_info": "Text"
       },
       {
-        "name": "head_ref",
+        "name": "base_ref",
         "ordinal": 18,
         "type_info": "Text"
       },
       {
-        "name": "review_decision",
+        "name": "head_ref",
         "ordinal": 19,
         "type_info": "Text"
       },
       {
-        "name": "milestone",
+        "name": "review_decision",
         "ordinal": 20,
+        "type_info": "Text"
+      },
+      {
+        "name": "milestone",
+        "ordinal": 21,
         "type_info": "Text"
       }
     ],
@@ -126,6 +131,7 @@
       false,
       false,
       false,
+      false,
       true,
       false,
       false,
@@ -136,5 +142,5 @@
       true
     ]
   },
-  "hash": "65effc70b68ae4fbfb81b4fc25f242db58b9804714ed99e85ac1c95a748e83a4"
+  "hash": "aa40119cf5e40a5a98f0ab4ff61250885874c345e6d589ceb3d8738d19f3928b"
 }

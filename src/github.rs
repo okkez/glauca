@@ -78,6 +78,12 @@ query SearchItems($q: String!, $after: String) {
         baseRefName
         headRefName
         reviewDecision
+        reviews(last: 30) {
+          nodes {
+            author { __typename login }
+            state
+          }
+        }
         reviewRequests(first: 20) {
           nodes {
             requestedReviewer {
@@ -233,6 +239,36 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         vec![]
     };
 
+    // Collect submitted reviews, keeping only the latest state per reviewer.
+    // reviews() returns nodes in chronological order so the last entry wins.
+    let reviews: Vec<serde_json::Value> = if is_pr {
+        let mut map: Vec<(String, String)> = Vec::new();
+        if let Some(nodes) = node["reviews"]["nodes"].as_array() {
+            for r in nodes {
+                if let Some(login) = r["author"]["login"].as_str() {
+                    let login = if r["author"]["__typename"].as_str() == Some("Bot") {
+                        format!("{}[bot]", login)
+                    } else {
+                        login.to_string()
+                    };
+                    if let Some(state) = r["state"].as_str() {
+                        // Update in place if already present, otherwise push
+                        if let Some(entry) = map.iter_mut().find(|(l, _)| *l == login) {
+                            entry.1 = state.to_string();
+                        } else {
+                            map.push((login, state.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        map.into_iter()
+            .map(|(login, state)| serde_json::json!({"login": login, "state": state}))
+            .collect()
+    } else {
+        vec![]
+    };
+
     let body = node["body"].as_str().map(|s| s.to_string());
     let created_at_item = node["createdAt"].as_str().map(|s| s.to_string());
     let assignees = node["assignees"]["nodes"]
@@ -282,6 +318,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         comment_count,
         requested_reviewers: serde_json::to_string(&requested_reviewers)
             .unwrap_or_else(|_| "[]".to_string()),
+        reviews: serde_json::to_string(&reviews).unwrap_or_else(|_| "[]".to_string()),
         body,
         assignees: serde_json::to_string(&assignees).unwrap_or_else(|_| "[]".to_string()),
         is_draft,

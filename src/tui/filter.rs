@@ -202,6 +202,7 @@ mod tests {
             comment_count: 0,
             kind: "pull_request".into(),
             requested_reviewers: vec![],
+            reviews: vec![],
             body: None,
             assignees: vec![],
             is_draft: false,

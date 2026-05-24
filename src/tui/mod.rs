@@ -116,6 +116,8 @@ pub struct ItemEntry {
     pub comment_count: i64,
     pub kind: String,
     pub requested_reviewers: Vec<String>,
+    /// Submitted reviews: login + state (APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED)
+    pub reviews: Vec<(String, String)>,
     pub body: Option<String>,
     pub assignees: Vec<String>,
     pub is_draft: bool,
@@ -642,6 +644,7 @@ async fn load_items_task(pool: SqlitePool, query_id: i64, tx: mpsc::Sender<AppMe
                     comment_count: c.comment_count,
                     kind: c.kind,
                     requested_reviewers: serde_labels(&c.requested_reviewers),
+                    reviews: serde_reviews(&c.reviews),
                     body: c.body,
                     assignees: serde_labels(&c.assignees),
                     is_draft: c.is_draft,
@@ -663,6 +666,19 @@ async fn load_items_task(pool: SqlitePool, query_id: i64, tx: mpsc::Sender<AppMe
 fn serde_labels(raw: &str) -> Vec<String> {
     // Labels are stored as a JSON array string, e.g. '["bug","enhancement"]'
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
+
+fn serde_reviews(raw: &str) -> Vec<(String, String)> {
+    // Reviews stored as [{"login":"alice","state":"APPROVED"}]
+    serde_json::from_str::<Vec<serde_json::Value>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| {
+            let login = v["login"].as_str()?.to_string();
+            let state = v["state"].as_str()?.to_string();
+            Some((login, state))
+        })
+        .collect()
 }
 
 /// Fetch fresh results from GitHub API page by page, upserting each page immediately
@@ -1448,6 +1464,7 @@ mod tests {
                 comment_count: 0,
                 kind: "pull_request".into(),
                 requested_reviewers: vec![],
+                reviews: vec![],
                 body: None,
                 assignees: vec![],
                 is_draft: false,
@@ -1551,6 +1568,7 @@ mod tests {
                 comment_count: 0,
                 kind: "pull_request".into(),
                 requested_reviewers: vec![],
+                reviews: vec![],
                 body: None,
                 assignees: vec![],
                 is_draft: false,
@@ -1573,6 +1591,7 @@ mod tests {
                 comment_count: 0,
                 kind: "pull_request".into(),
                 requested_reviewers: vec![],
+                reviews: vec![],
                 body: None,
                 assignees: vec![],
                 is_draft: false,
