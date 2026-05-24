@@ -123,10 +123,19 @@ pub async fn search_page(
     query: &str,
     after: Option<&str>,
 ) -> Result<SearchPageResult> {
+    // Default to sort:updated-desc so cached items stay in the same order as
+    // the TUI display (updated_at DESC).  If the caller already specified a
+    // sort: qualifier we leave it as-is so their intention is respected.
+    let effective_query = if query.contains("sort:") {
+        query.to_string()
+    } else {
+        format!("{} sort:updated-desc", query)
+    };
+
     let payload = serde_json::json!({
         "query": SEARCH_QUERY,
         "variables": {
-            "q": query,
+            "q": effective_query,
             "after": after,
         }
     });
