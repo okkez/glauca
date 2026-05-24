@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY created_at ASC",
+  "query": "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
   "describe": {
     "columns": [
       {
@@ -34,5 +34,5 @@
       false
     ]
   },
-  "hash": "864c5389161ec8d6c554b3e58b36a6b542b4f3e78416e2325564ed37efffd8bf"
+  "hash": "5379cec47d585cf5c708e8b77170dc03a795199252896169fc9b49bda71e89de"
 }

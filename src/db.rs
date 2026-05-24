@@ -53,13 +53,13 @@ pub struct FilterStreamRecord {
     pub filter: String,
 }
 
-/// List filter streams for a given parent query, ordered by creation time.
+/// List filter streams for a given parent query, ordered by position.
 pub async fn list_filter_streams(
     pool: &SqlitePool,
     parent_id: i64,
 ) -> Result<Vec<FilterStreamRecord>> {
     let rows = sqlx::query!(
-        "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY created_at ASC",
+        "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
         parent_id,
     )
     .fetch_all(pool)
@@ -102,6 +102,33 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
     sqlx::query!("DELETE FROM filter_streams WHERE id = ?", id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// Swap the `position` values of two filter streams (must share the same parent).
+pub async fn swap_filter_stream_positions(pool: &SqlitePool, id1: i64, id2: i64) -> Result<()> {
+    let pos1 =
+        sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", id1)
+            .fetch_one(pool)
+            .await?;
+    let pos2 =
+        sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", id2)
+            .fetch_one(pool)
+            .await?;
+    sqlx::query!(
+        "UPDATE filter_streams SET position = ? WHERE id = ?",
+        pos2,
+        id1
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query!(
+        "UPDATE filter_streams SET position = ? WHERE id = ?",
+        pos1,
+        id2
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

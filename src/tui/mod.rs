@@ -16,6 +16,7 @@ use filter::FilterQuery;
 
 // ── Display structs used by the TUI ─────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct QueryEntry {
     pub id: i64,
     /// Display label shown in the left pane (name if set, otherwise query_str).
@@ -25,6 +26,7 @@ pub struct QueryEntry {
     pub kind: String,
 }
 
+#[derive(Clone)]
 pub struct FilterStreamEntry {
     pub id: i64,
     pub parent_id: i64,
@@ -34,6 +36,7 @@ pub struct FilterStreamEntry {
 }
 
 /// A single row in the left pane — either a root query or a filter stream.
+#[derive(Clone)]
 pub enum LeftPaneEntry {
     Query(QueryEntry),
     FilterStream(FilterStreamEntry),
@@ -985,51 +988,96 @@ async fn run_app<B: ratatui::backend::Backend>(
                         continue;
                     }
 
-                    // J/K: move selected query up/down (only when a Query entry is selected)
+                    // J/K: move selected entry up/down within its group
                     if (key.code == KeyCode::Char('J') || key.code == KeyCode::Char('K'))
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
                     {
-                        if let Some(LeftPaneEntry::Query(q)) = app.entries.get(app.entry_cursor) {
-                            let current_id = q.id;
-                            let query_idx = app.entry_cursor;
-
-                            if key.code == KeyCode::Char('J') {
-                                // Move current group down: find next query's id and swap positions.
-                                let next_query_idx = group_range(&app.entries, query_idx).end;
-                                if let Some(LeftPaneEntry::Query(nq)) =
-                                    app.entries.get(next_query_idx)
-                                {
-                                    let next_id = nq.id;
-                                    if db::swap_query_positions(&pool, current_id, next_id)
-                                        .await
-                                        .is_ok()
+                        let cursor = app.entry_cursor;
+                        match app.entries.get(cursor).cloned() {
+                            Some(LeftPaneEntry::Query(q)) => {
+                                let current_id = q.id;
+                                if key.code == KeyCode::Char('J') {
+                                    let next_query_idx = group_range(&app.entries, cursor).end;
+                                    if let Some(LeftPaneEntry::Query(nq)) =
+                                        app.entries.get(next_query_idx)
                                     {
-                                        if let Some(new_cursor) =
-                                            move_group_down(&mut app.entries, query_idx)
-                                        {
-                                            app.entry_cursor = new_cursor;
-                                        }
-                                    }
-                                }
-                            } else {
-                                // K: move current group up by moving the previous group down.
-                                if let Some(prev_query_idx) = app.entries[..query_idx]
-                                    .iter()
-                                    .rposition(|e| matches!(e, LeftPaneEntry::Query(_)))
-                                {
-                                    if let LeftPaneEntry::Query(pq) = &app.entries[prev_query_idx] {
-                                        let prev_id = pq.id;
-                                        if db::swap_query_positions(&pool, prev_id, current_id)
+                                        let next_id = nq.id;
+                                        if db::swap_query_positions(&pool, current_id, next_id)
                                             .await
                                             .is_ok()
                                         {
-                                            move_group_down(&mut app.entries, prev_query_idx);
-                                            app.entry_cursor = prev_query_idx;
+                                            if let Some(new_cursor) =
+                                                move_group_down(&mut app.entries, cursor)
+                                            {
+                                                app.entry_cursor = new_cursor;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    if let Some(prev_query_idx) = app.entries[..cursor]
+                                        .iter()
+                                        .rposition(|e| matches!(e, LeftPaneEntry::Query(_)))
+                                    {
+                                        if let LeftPaneEntry::Query(pq) =
+                                            &app.entries[prev_query_idx]
+                                        {
+                                            let prev_id = pq.id;
+                                            if db::swap_query_positions(
+                                                &pool, prev_id, current_id,
+                                            )
+                                            .await
+                                            .is_ok()
+                                            {
+                                                move_group_down(&mut app.entries, prev_query_idx);
+                                                app.entry_cursor = prev_query_idx;
+                                            }
                                         }
                                     }
                                 }
                             }
+                            Some(LeftPaneEntry::FilterStream(fs)) => {
+                                let fs_id = fs.id;
+                                let parent_id = fs.parent_id;
+                                if key.code == KeyCode::Char('J') {
+                                    // Swap with next sibling (same parent, immediately after).
+                                    if let Some(LeftPaneEntry::FilterStream(next)) =
+                                        app.entries.get(cursor + 1)
+                                    {
+                                        if next.parent_id == parent_id {
+                                            let next_id = next.id;
+                                            if db::swap_filter_stream_positions(
+                                                &pool, fs_id, next_id,
+                                            )
+                                            .await
+                                            .is_ok()
+                                            {
+                                                app.entries.swap(cursor, cursor + 1);
+                                                app.entry_cursor += 1;
+                                            }
+                                        }
+                                    }
+                                } else if cursor > 0 {
+                                    // Swap with previous sibling (same parent, immediately before).
+                                    if let Some(LeftPaneEntry::FilterStream(prev)) =
+                                        app.entries.get(cursor - 1)
+                                    {
+                                        if prev.parent_id == parent_id {
+                                            let prev_id = prev.id;
+                                            if db::swap_filter_stream_positions(
+                                                &pool, prev_id, fs_id,
+                                            )
+                                            .await
+                                            .is_ok()
+                                            {
+                                                app.entries.swap(cursor - 1, cursor);
+                                                app.entry_cursor -= 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                         continue;
                     }
