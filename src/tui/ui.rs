@@ -230,7 +230,7 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                         if !spans.is_empty() {
                             spans.push(Span::raw("  "));
                         }
-                        spans.push(Span::styled("○", Style::default().fg(Color::DarkGray)));
+                        spans.push(Span::styled("○", Style::default().fg(Color::Yellow)));
                         spans.push(Span::raw(format!(" {login}")));
                     }
                 }
@@ -723,7 +723,7 @@ fn review_state_badge(state: &str) -> (&'static str, Style) {
         "APPROVED" => ("✅", Style::default().fg(Color::Green)),
         "CHANGES_REQUESTED" => ("✗", Style::default().fg(Color::Red)),
         "COMMENTED" => ("💬", Style::default().fg(Color::Blue)),
-        "DISMISSED" => ("↩", Style::default().fg(Color::DarkGray)),
+        "DISMISSED" => ("↩", Style::default().fg(Color::Cyan)),
         _ => ("?", Style::default()),
     }
 }
