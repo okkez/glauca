@@ -493,4 +493,117 @@ mod tests {
         let stale = is_cache_stale(&pool, qid, 300).await.expect("stale check");
         assert!(!stale);
     }
+
+    #[tokio::test]
+    async fn upsert_query_stores_and_returns_name() {
+        let (pool, _file) = test_pool().await;
+
+        // With a name
+        let id = upsert_query(&pool, "is:pr is:open", "pull_request", Some("My PRs"))
+            .await
+            .expect("upsert");
+        let rows = list_queries(&pool).await.expect("list");
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.name.as_deref(), Some("My PRs"));
+        assert_eq!(row.query, "is:pr is:open");
+    }
+
+    #[tokio::test]
+    async fn upsert_query_none_name_is_null() {
+        let (pool, _file) = test_pool().await;
+
+        let id = upsert_query(&pool, "is:issue is:open", "issue", None)
+            .await
+            .expect("upsert");
+        let rows = list_queries(&pool).await.expect("list");
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert!(row.name.is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_query_empty_string_name_treated_as_null() {
+        let (pool, _file) = test_pool().await;
+
+        let id = upsert_query(&pool, "is:issue is:closed", "issue", Some(""))
+            .await
+            .expect("upsert");
+        let rows = list_queries(&pool).await.expect("list");
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        // Empty string name is normalised to None.
+        assert!(row.name.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_query_changes_fields_and_resets_fetched() {
+        let (pool, _file) = test_pool().await;
+
+        let id = upsert_query(&pool, "is:pr is:open", "pull_request", None)
+            .await
+            .expect("upsert");
+        mark_fetched(&pool, id).await.expect("mark fetched");
+
+        // Confirm not stale right after fetch.
+        assert!(!is_cache_stale(&pool, id, 300).await.unwrap());
+
+        update_query(&pool, id, Some("Updated name"), "is:pr is:merged")
+            .await
+            .expect("update");
+
+        let rows = list_queries(&pool).await.expect("list");
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.query, "is:pr is:merged");
+        assert_eq!(row.name.as_deref(), Some("Updated name"));
+
+        // last_fetched_at should have been reset → stale again.
+        assert!(is_cache_stale(&pool, id, 300).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn update_filter_stream_changes_fields() {
+        let (pool, _file) = test_pool().await;
+
+        let qid = upsert_query(&pool, "is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+        let fid = upsert_filter_stream(&pool, qid, "Old name", "state:open")
+            .await
+            .expect("upsert stream");
+
+        update_filter_stream(&pool, fid, "New name", "state:merged")
+            .await
+            .expect("update");
+
+        let streams = list_filter_streams(&pool, qid).await.expect("list");
+        let stream = streams.iter().find(|s| s.id == fid).unwrap();
+        assert_eq!(stream.name, "New name");
+        assert_eq!(stream.filter, "state:merged");
+    }
+
+    #[tokio::test]
+    async fn fetch_items_ordered_by_updated_at_desc() {
+        let (pool, _file) = test_pool().await;
+
+        let qid = upsert_query(&pool, "is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        // Insert items with different updated_at values.
+        let mut old = make_item(qid, 1, "Old PR");
+        old.updated_at = "2026-01-01T00:00:00Z".into();
+        let mut mid = make_item(qid, 2, "Mid PR");
+        mid.updated_at = "2026-03-01T00:00:00Z".into();
+        let mut new = make_item(qid, 3, "New PR");
+        new.updated_at = "2026-05-01T00:00:00Z".into();
+
+        upsert_item(&pool, &old).await.expect("upsert old");
+        upsert_item(&pool, &mid).await.expect("upsert mid");
+        upsert_item(&pool, &new).await.expect("upsert new");
+
+        let items = fetch_items(&pool, qid).await.expect("fetch");
+        assert_eq!(items.len(), 3);
+        // Should be in descending order by updated_at.
+        assert_eq!(items[0].number, 3); // newest
+        assert_eq!(items[1].number, 2);
+        assert_eq!(items[2].number, 1); // oldest
+    }
 }

@@ -113,6 +113,18 @@ pub struct SearchPageResult {
     pub end_cursor: Option<String>,
 }
 
+/// Append `sort:updated-desc` to `query` if no `sort:` qualifier is already present.
+///
+/// This ensures the fetch order matches the TUI display order (`updated_at DESC`).
+/// If the caller already included a `sort:` qualifier their choice is preserved.
+pub(crate) fn apply_default_sort(query: &str) -> std::borrow::Cow<'_, str> {
+    if query.contains("sort:") {
+        std::borrow::Cow::Borrowed(query)
+    } else {
+        std::borrow::Cow::Owned(format!("{} sort:updated-desc", query))
+    }
+}
+
 /// Fetch a single page of GitHub search results using GraphQL.
 ///
 /// Pass `after: None` for the first page, then `Some(end_cursor)` for subsequent pages.
@@ -123,14 +135,7 @@ pub async fn search_page(
     query: &str,
     after: Option<&str>,
 ) -> Result<SearchPageResult> {
-    // Default to sort:updated-desc so cached items stay in the same order as
-    // the TUI display (updated_at DESC).  If the caller already specified a
-    // sort: qualifier we leave it as-is so their intention is respected.
-    let effective_query = if query.contains("sort:") {
-        query.to_string()
-    } else {
-        format!("{} sort:updated-desc", query)
-    };
+    let effective_query = apply_default_sort(query);
 
     let payload = serde_json::json!({
         "query": SEARCH_QUERY,
@@ -363,5 +368,105 @@ mod tests {
         });
         let item = node_to_cached_item(&node, 1).unwrap();
         assert_eq!(item.state, "merged");
+    }
+
+    // ── apply_default_sort ───────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_default_sort_appends_when_absent() {
+        let result = apply_default_sort("is:pr is:open review-requested:@me");
+        assert!(result.ends_with("sort:updated-desc"));
+        assert!(result.contains("is:pr"));
+    }
+
+    #[test]
+    fn apply_default_sort_preserves_explicit_sort() {
+        let q = "is:pr sort:created-desc";
+        let result = apply_default_sort(q);
+        assert_eq!(result, q);
+        assert!(!result.contains("sort:updated-desc"));
+    }
+
+    #[test]
+    fn apply_default_sort_preserves_sort_updated_asc() {
+        let q = "is:issue sort:updated-asc";
+        let result = apply_default_sort(q);
+        assert_eq!(result, q);
+    }
+
+    // ── node_to_cached_item: None cases ──────────────────────────────────────────
+
+    #[test]
+    fn node_to_cached_item_missing_typename_returns_none() {
+        // Missing __typename → can't determine kind → None.
+        let node = serde_json::json!({
+            "number": 1,
+            "title": "test",
+            "state": "OPEN",
+            "url": "https://github.com/o/r/issues/1",
+            "updatedAt": "2026-05-24T00:00:00Z",
+            "author": { "__typename": "User", "login": "alice" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "o" }, "name": "r" },
+            "comments": { "totalCount": 0 }
+        });
+        assert!(node_to_cached_item(&node, 1).is_none());
+    }
+
+    #[test]
+    fn node_to_cached_item_missing_state_returns_none() {
+        let node = serde_json::json!({
+            "__typename": "Issue",
+            "number": 1,
+            "title": "test",
+            // "state" intentionally omitted
+            "url": "https://github.com/o/r/issues/1",
+            "updatedAt": "2026-05-24T00:00:00Z",
+            "author": { "__typename": "User", "login": "alice" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "o" }, "name": "r" },
+            "comments": { "totalCount": 0 }
+        });
+        assert!(node_to_cached_item(&node, 1).is_none());
+    }
+
+    #[test]
+    fn node_to_cached_item_pr_missing_review_requests_is_empty() {
+        // A PR node without the reviewRequests field should yield an empty list.
+        let node = serde_json::json!({
+            "__typename": "PullRequest",
+            "number": 5,
+            "title": "PR without reviewRequests field",
+            "state": "OPEN",
+            "url": "https://github.com/o/r/pull/5",
+            "updatedAt": "2026-05-24T00:00:00Z",
+            "author": { "__typename": "User", "login": "alice" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "o" }, "name": "r" },
+            "comments": { "totalCount": 0 }
+            // "reviewRequests" intentionally omitted
+        });
+        let item = node_to_cached_item(&node, 1).unwrap();
+        let reviewers: Vec<String> = serde_json::from_str(&item.requested_reviewers).unwrap();
+        assert!(reviewers.is_empty());
+    }
+
+    #[test]
+    fn node_to_cached_item_null_author_is_none() {
+        // GitHub sometimes returns null for author (e.g. deleted accounts).
+        let node = serde_json::json!({
+            "__typename": "Issue",
+            "number": 7,
+            "title": "ghost issue",
+            "state": "OPEN",
+            "url": "https://github.com/o/r/issues/7",
+            "updatedAt": "2026-05-24T00:00:00Z",
+            "author": null,
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "o" }, "name": "r" },
+            "comments": { "totalCount": 0 }
+        });
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert!(item.author.is_none());
     }
 }

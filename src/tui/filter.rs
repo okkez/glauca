@@ -353,4 +353,108 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].style, normal);
     }
+
+    // ── parse edge cases ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_case_insensitive_structured_token() {
+        // Tokens are lowercased before parsing, so State:Open should work.
+        let q = FilterQuery::parse("State:Open");
+        assert_eq!(q.states, vec!["open"]);
+        assert!(q.text_tokens.is_empty());
+    }
+
+    #[test]
+    fn parse_repeated_state_tokens() {
+        // Both values are collected; matches() ANDs them, so both must hold.
+        let q = FilterQuery::parse("state:open state:closed");
+        assert_eq!(q.states.len(), 2);
+        assert!(q.states.contains(&"open".to_string()));
+        assert!(q.states.contains(&"closed".to_string()));
+    }
+
+    #[test]
+    fn parse_multiple_structured_types() {
+        let q = FilterQuery::parse("author:alice label:bug state:open");
+        assert_eq!(q.authors, vec!["alice"]);
+        assert_eq!(q.labels, vec!["bug"]);
+        assert_eq!(q.states, vec!["open"]);
+        assert!(q.text_tokens.is_empty());
+    }
+
+    // ── matches edge cases ───────────────────────────────────────────────────────
+
+    #[test]
+    fn plain_text_matches_author() {
+        let q = FilterQuery::parse("alice");
+        // Plain text should also match against author login.
+        assert!(q.matches(&item("some PR", "alice", "open", &[], "o/r")));
+        assert!(!q.matches(&item("some PR", "bob", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn plain_text_matches_label() {
+        let q = FilterQuery::parse("bug");
+        // Plain text should also match against labels.
+        assert!(q.matches(&item("some PR", "a", "open", &["bug"], "o/r")));
+        assert!(!q.matches(&item("some PR", "a", "open", &["enhancement"], "o/r")));
+    }
+
+    #[test]
+    fn author_filter_none_author_does_not_match() {
+        let q = FilterQuery::parse("author:alice");
+        let mut i = item("PR", "placeholder", "open", &[], "o/r");
+        i.author = None;
+        assert!(!q.matches(&i));
+    }
+
+    #[test]
+    fn state_filter_case_insensitive() {
+        // Item state is compared case-insensitively.
+        let q = FilterQuery::parse("state:open");
+        let mut i = item("PR", "a", "open", &[], "o/r");
+        i.state = "Open".to_string(); // stored with capital O
+        assert!(q.matches(&i));
+    }
+
+    #[test]
+    fn is_and_state_are_equivalent() {
+        // `is:merged` and `state:merged` should behave the same way.
+        let q_is = FilterQuery::parse("is:merged");
+        let q_state = FilterQuery::parse("state:merged");
+        let merged = item("PR", "a", "merged", &[], "o/r");
+        let open = item("PR", "a", "open", &[], "o/r");
+        assert_eq!(q_is.matches(&merged), q_state.matches(&merged));
+        assert_eq!(q_is.matches(&open), q_state.matches(&open));
+    }
+
+    #[test]
+    fn author_filter_case_insensitive() {
+        let q = FilterQuery::parse("author:Alice");
+        // parse lowercases the token; item author compared via to_lowercase()
+        assert!(q.matches(&item("PR", "alice", "open", &[], "o/r")));
+    }
+
+    // ── highlight_spans edge cases ───────────────────────────────────────────────
+
+    #[test]
+    fn highlight_spans_case_insensitive_match() {
+        let q = FilterQuery::parse("fix");
+        let normal = ratatui::style::Style::default();
+        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
+        // "Fix" should still be highlighted even though the token is lowercase "fix".
+        let spans = q.highlight_spans("Fix the bug", normal, highlight);
+        assert!(spans.iter().any(|s| s.style == highlight));
+    }
+
+    #[test]
+    fn highlight_spans_multibyte_text_no_panic() {
+        // Ensure we don't panic on multibyte (non-ASCII) text.
+        let q = FilterQuery::parse("bug");
+        let normal = ratatui::style::Style::default();
+        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
+        // Should not panic regardless of whether there's a match.
+        let _ = q.highlight_spans("バグ修正 bug fix", normal, highlight);
+        let _ = q.highlight_spans("日本語テスト", normal, highlight);
+    }
 }

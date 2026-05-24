@@ -117,14 +117,14 @@ pub struct ItemEntry {
 
 // ── Application state ────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
     QueryList,
     ItemList,
     ItemDetail,
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum InputMode {
     Normal,
     Filter,
@@ -1289,6 +1289,173 @@ mod tests {
         let filtered = app.filtered_items();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title, "Open PR");
+    }
+
+    // ── App::new defaults ────────────────────────────────────────────────────────
+
+    #[test]
+    fn app_new_default_state() {
+        let app = App::new(vec![]);
+        assert_eq!(app.focus, Focus::QueryList);
+        assert!(matches!(app.input_mode, InputMode::Normal));
+        assert!(app.entries.is_empty());
+        assert!(app.items.is_empty());
+        assert_eq!(app.item_cursor, 0);
+        assert_eq!(app.entry_cursor, 0);
+        assert!(app.filter.is_empty());
+        assert!(app.stream_filter.is_none());
+        assert!(!app.syncing);
+        assert!(app.current_user.is_none());
+    }
+
+    // ── expand_me ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn expand_me_author_at_me() {
+        let mut app = App::new(vec![]);
+        app.current_user = Some("octocat".into());
+        assert_eq!(app.expand_me("author:@me"), "author:octocat");
+    }
+
+    #[test]
+    fn expand_me_review_requested_at_me() {
+        let mut app = App::new(vec![]);
+        app.current_user = Some("octocat".into());
+        assert_eq!(app.expand_me("review-requested:@me"), "review-requested:octocat");
+    }
+
+    #[test]
+    fn expand_me_standalone_at_me() {
+        let mut app = App::new(vec![]);
+        app.current_user = Some("octocat".into());
+        assert_eq!(app.expand_me("@me"), "octocat");
+    }
+
+    #[test]
+    fn expand_me_multiple_tokens() {
+        let mut app = App::new(vec![]);
+        app.current_user = Some("octocat".into());
+        assert_eq!(
+            app.expand_me("author:@me review-requested:@me"),
+            "author:octocat review-requested:octocat"
+        );
+    }
+
+    #[test]
+    fn expand_me_no_current_user_leaves_unchanged() {
+        let app = App::new(vec![]);
+        // current_user is None → @me is preserved.
+        assert_eq!(app.expand_me("author:@me"), "author:@me");
+    }
+
+    #[test]
+    fn expand_me_no_at_me_unchanged() {
+        let mut app = App::new(vec![]);
+        app.current_user = Some("octocat".into());
+        let q = "is:pr is:open label:bug";
+        assert_eq!(app.expand_me(q), q);
+    }
+
+    // ── handle_key_new_query ─────────────────────────────────────────────────────
+
+    fn make_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn make_ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn new_query_enter_on_field0_moves_to_field1() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewQuery;
+        app.modal_field = 0;
+        let action = handle_key_new_query(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.modal_field, 1);
+        assert!(matches!(app.input_mode, InputMode::NewQuery));
+    }
+
+    #[test]
+    fn new_query_enter_on_field1_empty_query_no_save() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewQuery;
+        app.modal_field = 1;
+        app.new_query_input.clear();
+        let action = handle_key_new_query(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    fn new_query_enter_on_field1_with_query_saves() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewQuery;
+        app.modal_field = 1;
+        app.new_query_input = "is:pr is:open".into();
+        let action = handle_key_new_query(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::SaveNewQuery));
+    }
+
+    #[test]
+    fn new_query_esc_clears_and_exits() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewQuery;
+        app.modal_field = 1;
+        app.new_query_name = "My name".into();
+        app.new_query_input = "is:pr".into();
+        handle_key_new_query(&mut app, make_key(KeyCode::Esc));
+        assert!(matches!(app.input_mode, InputMode::Normal));
+        assert!(app.new_query_name.is_empty());
+        assert!(app.new_query_input.is_empty());
+        assert_eq!(app.modal_field, 0);
+    }
+
+    #[test]
+    fn new_query_tab_toggles_field() {
+        let mut app = App::new(vec![]);
+        app.modal_field = 0;
+        handle_key_new_query(&mut app, make_key(KeyCode::Tab));
+        assert_eq!(app.modal_field, 1);
+        handle_key_new_query(&mut app, make_key(KeyCode::Tab));
+        assert_eq!(app.modal_field, 0);
+    }
+
+    // ── handle_key_filter ────────────────────────────────────────────────────────
+
+    #[test]
+    fn filter_esc_exits_mode() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        handle_key_filter(&mut app, make_key(KeyCode::Esc));
+        assert!(matches!(app.input_mode, InputMode::Normal));
+    }
+
+    #[test]
+    fn filter_backspace_removes_last_char() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = "fix".into();
+        handle_key_filter(&mut app, make_key(KeyCode::Backspace));
+        assert_eq!(app.filter, "fi");
+    }
+
+    #[test]
+    fn filter_ctrl_u_clears_filter() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = "some filter text".into();
+        handle_key_filter(&mut app, make_ctrl_key(KeyCode::Char('u')));
+        assert!(app.filter.is_empty());
+    }
+
+    #[test]
+    fn filter_char_appends() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = "fi".into();
+        handle_key_filter(&mut app, make_key(KeyCode::Char('x')));
+        assert_eq!(app.filter, "fix");
     }
 }
 
