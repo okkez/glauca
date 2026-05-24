@@ -2303,6 +2303,47 @@ mod tests {
         assert!(app.current_user.is_none());
     }
 
+    #[test]
+    fn app_new_creates_one_entry_per_query() {
+        let queries = vec![
+            QueryEntry {
+                id: 1,
+                label: "Open PRs".into(),
+                query_str: "is:pr is:open".into(),
+                kind: "pull_request".into(),
+            },
+            QueryEntry {
+                id: 2,
+                label: "Open issues".into(),
+                query_str: "is:issue is:open".into(),
+                kind: "issue".into(),
+            },
+        ];
+
+        let app = App::new(queries);
+
+        assert!(app.items.is_empty());
+        assert_eq!(app.entry_cursor, 0);
+        assert_eq!(app.item_cursor, 0);
+        assert_eq!(app.entries.len(), 2);
+        match &app.entries[0] {
+            LeftPaneEntry::Query(query) => {
+                assert_eq!(query.id, 1);
+                assert_eq!(query.label, "Open PRs");
+                assert_eq!(query.query_str, "is:pr is:open");
+            }
+            LeftPaneEntry::FilterStream(_) => panic!("expected query entry"),
+        }
+        match &app.entries[1] {
+            LeftPaneEntry::Query(query) => {
+                assert_eq!(query.id, 2);
+                assert_eq!(query.label, "Open issues");
+                assert_eq!(query.query_str, "is:issue is:open");
+            }
+            LeftPaneEntry::FilterStream(_) => panic!("expected query entry"),
+        }
+    }
+
     // ── expand_me ────────────────────────────────────────────────────────────────
 
     #[test]
