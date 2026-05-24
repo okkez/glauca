@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, query, kind, name FROM queries ORDER BY created_at ASC",
+  "query": "SELECT id, query, kind, name FROM queries ORDER BY position ASC, created_at ASC",
   "describe": {
     "columns": [
       {
@@ -34,5 +34,5 @@
       true
     ]
   },
-  "hash": "7111ccd77842c2a51c6dbc4a5be8d953b9e5866ed1de687f5965729edc89ade8"
+  "hash": "0f0ad1cc7b035ddeab1656d3138aef34e895daca1e9c5fcf8a1906a6f8693e77"
 }

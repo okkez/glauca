@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT position FROM queries WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "position",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5338131ffbc8a53ec8c1e14834bc8f356a153fae33fc9d880c695477af8d14ca"
+}

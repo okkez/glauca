@@ -261,7 +261,7 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mode_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  n:new query  f:new stream  e:edit  d:delete  q:quit",
+            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  q:quit",
             Focus::ItemList => "ITEMS    h/l:pane  j/k:move  /:filter  q:quit",
             Focus::ItemDetail => "DETAIL   h/l:pane  j/k:scroll  q:quit",
         },

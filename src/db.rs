@@ -26,10 +26,10 @@ pub struct QueryRecord {
     pub name: Option<String>,
 }
 
-/// List all saved queries ordered by creation time.
+/// List all saved queries ordered by position.
 pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>> {
     let rows = sqlx::query!(
-        "SELECT id, query, kind, name FROM queries ORDER BY created_at ASC"
+        "SELECT id, query, kind, name FROM queries ORDER BY position ASC, created_at ASC"
     )
     .fetch_all(pool)
     .await?;
@@ -146,6 +146,23 @@ pub async fn update_filter_stream(
 /// Delete a query and its cached items (CASCADE).
 pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
     sqlx::query!("DELETE FROM queries WHERE id = ?", query_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Swap the `position` values of two queries so that one moves past the other.
+pub async fn swap_query_positions(pool: &SqlitePool, id1: i64, id2: i64) -> Result<()> {
+    let pos1 = sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", id1)
+        .fetch_one(pool)
+        .await?;
+    let pos2 = sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", id2)
+        .fetch_one(pool)
+        .await?;
+    sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", pos2, id1)
+        .execute(pool)
+        .await?;
+    sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", pos1, id2)
         .execute(pool)
         .await?;
     Ok(())

@@ -764,6 +764,41 @@ async fn refresh_timer_task(
     }
 }
 
+// ── Query group reordering helpers ───────────────────────────────────────────
+
+/// Returns the contiguous range `[query_idx, next_query_idx)` for the group
+/// starting at `query_idx` (the query entry plus all following filter streams).
+fn group_range(entries: &[LeftPaneEntry], query_idx: usize) -> std::ops::Range<usize> {
+    let end = entries[query_idx + 1..]
+        .iter()
+        .position(|e| matches!(e, LeftPaneEntry::Query(_)))
+        .map(|i| query_idx + 1 + i)
+        .unwrap_or(entries.len());
+    query_idx..end
+}
+
+/// Moves the query group at `query_idx` one position down (past the next query
+/// group). Returns the new index of the moved group, or `None` if it was
+/// already at the bottom.
+fn move_group_down(entries: &mut Vec<LeftPaneEntry>, query_idx: usize) -> Option<usize> {
+    let range_a = group_range(entries, query_idx);
+    let next_query_idx = range_a.end;
+    if next_query_idx >= entries.len() {
+        return None; // already at the bottom
+    }
+    let range_b = group_range(entries, next_query_idx);
+
+    // Drain higher indices first to keep lower indices valid.
+    let group_b: Vec<_> = entries.drain(range_b.clone()).collect();
+    let group_a: Vec<_> = entries.drain(range_a.clone()).collect();
+    let insert_at = range_a.start;
+    let b_len = group_b.len();
+    for (i, item) in group_b.into_iter().chain(group_a).enumerate() {
+        entries.insert(insert_at + i, item);
+    }
+    Some(insert_at + b_len) // new start index of the moved group
+}
+
 // ── Main run loop ─────────────────────────────────────────────────────────────
 
 pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
@@ -942,6 +977,55 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         app.stream_filter = None;
                                         if let Some(root_id) = app.activate_selected_entry() {
                                             tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // J/K: move selected query up/down (only when a Query entry is selected)
+                    if (key.code == KeyCode::Char('J') || key.code == KeyCode::Char('K'))
+                        && app.focus == Focus::QueryList
+                        && app.input_mode == InputMode::Normal
+                    {
+                        if let Some(LeftPaneEntry::Query(q)) = app.entries.get(app.entry_cursor) {
+                            let current_id = q.id;
+                            let query_idx = app.entry_cursor;
+
+                            if key.code == KeyCode::Char('J') {
+                                // Move current group down: find next query's id and swap positions.
+                                let next_query_idx = group_range(&app.entries, query_idx).end;
+                                if let Some(LeftPaneEntry::Query(nq)) =
+                                    app.entries.get(next_query_idx)
+                                {
+                                    let next_id = nq.id;
+                                    if db::swap_query_positions(&pool, current_id, next_id)
+                                        .await
+                                        .is_ok()
+                                    {
+                                        if let Some(new_cursor) =
+                                            move_group_down(&mut app.entries, query_idx)
+                                        {
+                                            app.entry_cursor = new_cursor;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // K: move current group up by moving the previous group down.
+                                if let Some(prev_query_idx) = app.entries[..query_idx]
+                                    .iter()
+                                    .rposition(|e| matches!(e, LeftPaneEntry::Query(_)))
+                                {
+                                    if let LeftPaneEntry::Query(pq) = &app.entries[prev_query_idx] {
+                                        let prev_id = pq.id;
+                                        if db::swap_query_positions(&pool, prev_id, current_id)
+                                            .await
+                                            .is_ok()
+                                        {
+                                            move_group_down(&mut app.entries, prev_query_idx);
+                                            app.entry_cursor = prev_query_idx;
                                         }
                                     }
                                 }
