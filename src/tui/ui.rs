@@ -273,13 +273,21 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let status = if let Some(msg) = &app.status {
-        if app.syncing {
+        if app.syncing && app.bg_sync_pending > 0 {
+            format!(" {mode_text}  │  ⟳ Syncing…  │  ⟳ Auto ({})  │  {msg}", app.bg_sync_pending)
+        } else if app.syncing {
             format!(" {mode_text}  │  ⟳ Syncing…  │  {msg}")
+        } else if app.bg_sync_pending > 0 {
+            format!(" {mode_text}  │  ⟳ Auto ({})  │  {msg}", app.bg_sync_pending)
         } else {
             format!(" {mode_text}  │  {msg}")
         }
+    } else if app.syncing && app.bg_sync_pending > 0 {
+        format!(" {mode_text}  │  ⟳ Syncing…  │  ⟳ Auto ({})", app.bg_sync_pending)
     } else if app.syncing {
         format!(" {mode_text}  │  ⟳ Syncing…")
+    } else if app.bg_sync_pending > 0 {
+        format!(" {mode_text}  │  ⟳ Auto ({})", app.bg_sync_pending)
     } else {
         format!(" {mode_text}")
     };

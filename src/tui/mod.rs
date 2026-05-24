@@ -161,8 +161,10 @@ pub struct App {
     /// Which field (0 or 1) is active in a 2-field modal.
     pub modal_field: usize,
     pub status: Option<String>,
-    /// Whether a background GitHub sync is in progress.
+    /// Whether a manual GitHub sync is in progress for the selected query.
     pub syncing: bool,
+    /// Number of pending background auto-refresh jobs (queued + in-progress).
+    pub bg_sync_pending: usize,
     /// Login name of the authenticated GitHub user (used to expand `@me` in filters).
     pub current_user: Option<String>,
 }
@@ -188,6 +190,7 @@ impl App {
             modal_field: 0,
             status: None,
             syncing: false,
+            bg_sync_pending: 0,
             current_user: None,
         }
     }
@@ -281,6 +284,16 @@ pub enum AppMessage {
     Status(String),
     SyncDone { query_id: i64, count: usize },
     SyncError { query_id: i64, error: String },
+    /// N background sync jobs were added to the worker queue.
+    BgSyncQueued(usize),
+    /// One background sync job finished (success or skip).
+    BgSyncJobDone,
+}
+
+/// A job request sent to the background sync worker.
+pub struct SyncJob {
+    pub query_id: i64,
+    pub query_str: String,
 }
 
 // ── Actions returned from key handling ───────────────────────────────────────
@@ -695,6 +708,62 @@ async fn sync_task(
         .await;
 }
 
+// ── Background sync worker & refresh timer ────────────────────────────────────
+
+/// Auto-refresh interval and cache staleness threshold (seconds).
+const BG_SYNC_INTERVAL_SECS: u64 = 300;
+const CACHE_STALE_SECS: i64 = 300;
+
+/// Processes `SyncJob`s sequentially, skipping jobs whose cache is already fresh.
+/// Sends `BgSyncJobDone` after each job (regardless of outcome) so the UI counter
+/// stays accurate.
+async fn sync_worker_task(
+    pool: SqlitePool,
+    gh: Octocrab,
+    mut rx: mpsc::Receiver<SyncJob>,
+    tx: mpsc::Sender<AppMessage>,
+) {
+    while let Some(job) = rx.recv().await {
+        let stale = db::is_cache_stale(&pool, job.query_id, CACHE_STALE_SECS)
+            .await
+            .unwrap_or(true);
+        if stale {
+            sync_task(pool.clone(), gh.clone(), job.query_id, job.query_str, tx.clone()).await;
+        }
+        let _ = tx.send(AppMessage::BgSyncJobDone).await;
+    }
+}
+
+/// Every `BG_SYNC_INTERVAL_SECS`, enqueues all stale queries to the worker.
+async fn refresh_timer_task(
+    pool: SqlitePool,
+    sync_tx: mpsc::Sender<SyncJob>,
+    app_tx: mpsc::Sender<AppMessage>,
+) {
+    let mut interval =
+        tokio::time::interval(tokio::time::Duration::from_secs(BG_SYNC_INTERVAL_SECS));
+    interval.tick().await; // skip the immediate first tick
+    loop {
+        interval.tick().await;
+        let queries = db::list_queries(&pool).await.unwrap_or_default();
+        let mut count = 0usize;
+        for q in queries {
+            if db::is_cache_stale(&pool, q.id, CACHE_STALE_SECS)
+                .await
+                .unwrap_or(true)
+            {
+                let _ = sync_tx
+                    .send(SyncJob { query_id: q.id, query_str: q.query })
+                    .await;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            let _ = app_tx.send(AppMessage::BgSyncQueued(count)).await;
+        }
+    }
+}
+
 // ── Main run loop ─────────────────────────────────────────────────────────────
 
 pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
@@ -747,6 +816,12 @@ async fn run_app<B: ratatui::backend::Backend>(
     }
 
     let (tx, mut rx) = mpsc::channel::<AppMessage>(32);
+    let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
+
+    // Spawn the sequential background sync worker.
+    tokio::spawn(sync_worker_task(pool.clone(), gh.clone(), sync_job_rx, tx.clone()));
+    // Spawn the periodic refresh timer (fires every BG_SYNC_INTERVAL_SECS).
+    tokio::spawn(refresh_timer_task(pool.clone(), sync_job_tx.clone(), tx.clone()));
 
     // Build App from QueryEntry list (filter streams handled via entries above)
     let queries: Vec<QueryEntry> = entries
@@ -773,17 +848,41 @@ async fn run_app<B: ratatui::backend::Backend>(
         tokio::spawn(sync_task(pool, gh, query_id, query_str, tx));
     };
 
-    // Load items for the initially selected entry
+    // Load items for the initially selected entry; track which query we sync manually.
+    let mut initially_synced_id: Option<i64> = None;
     if let Some(root_id) = app.activate_selected_entry() {
         if let Some(entry) = app.entries.first() {
             if !entry.is_filter_stream() {
                 let query_str = entry.root_query_str().unwrap_or_default().to_string();
                 spawn_load_and_sync(pool.clone(), gh.clone(), root_id, query_str, tx.clone());
                 app.syncing = true;
+                initially_synced_id = Some(root_id);
             } else {
                 tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
             }
         }
+    }
+
+    // Enqueue all other stale queries for immediate background refresh.
+    {
+        let mut bg_count = 0usize;
+        for entry in &app.entries {
+            if let LeftPaneEntry::Query(q) = entry {
+                if Some(q.id) == initially_synced_id {
+                    continue; // already being synced manually
+                }
+                if db::is_cache_stale(&pool, q.id, CACHE_STALE_SECS)
+                    .await
+                    .unwrap_or(true)
+                {
+                    let _ = sync_job_tx
+                        .send(SyncJob { query_id: q.id, query_str: q.query_str.clone() })
+                        .await;
+                    bg_count += 1;
+                }
+            }
+        }
+        app.bg_sync_pending = bg_count;
     }
 
     let mut events = EventStream::new();
@@ -1136,6 +1235,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.syncing = false;
                         }
                         app.status = Some(format!("Sync error: {error}"));
+                    }
+                    AppMessage::BgSyncQueued(n) => {
+                        app.bg_sync_pending += n;
+                    }
+                    AppMessage::BgSyncJobDone => {
+                        app.bg_sync_pending = app.bg_sync_pending.saturating_sub(1);
                     }
                 }
             }
