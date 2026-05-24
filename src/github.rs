@@ -51,7 +51,7 @@ query SearchItems($q: String!, $after: String) {
         state
         url
         updatedAt
-        author { login }
+        author { __typename login }
         labels(first: 20) { nodes { name } }
         repository { owner { login } name }
         comments { totalCount }
@@ -62,7 +62,7 @@ query SearchItems($q: String!, $after: String) {
         state
         url
         updatedAt
-        author { login }
+        author { __typename login }
         labels(first: 20) { nodes { name } }
         repository { owner { login } name }
         comments { totalCount }
@@ -163,7 +163,15 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
     let title = node["title"].as_str()?.to_string();
     let url = node["url"].as_str()?.to_string();
     let updated_at = node["updatedAt"].as_str()?.to_string();
-    let author = node["author"]["login"].as_str().map(|s| s.to_string());
+    let author = node["author"]["login"].as_str().map(|login| {
+        // GraphQL returns "Bot" as __typename for GitHub Apps (e.g. renovate).
+        // REST API uses "renovate[bot]" convention — replicate that here.
+        if node["author"]["__typename"].as_str() == Some("Bot") {
+            format!("{}[bot]", login)
+        } else {
+            login.to_string()
+        }
+    });
     let comment_count = node["comments"]["totalCount"].as_u64().unwrap_or(0) as i64;
 
     let repo_owner = node["repository"]["owner"]["login"].as_str()?.to_string();
@@ -265,7 +273,7 @@ mod tests {
             "state": "OPEN",
             "url": "https://github.com/owner/repo/issues/42",
             "updatedAt": "2026-05-23T10:00:00Z",
-            "author": { "login": "alice" },
+            "author": { "__typename": "User", "login": "alice" },
             "labels": { "nodes": [{ "name": "bug" }] },
             "repository": { "owner": { "login": "owner" }, "name": "repo" },
             "comments": { "totalCount": 3 }
@@ -283,6 +291,26 @@ mod tests {
     }
 
     #[test]
+    fn node_to_cached_item_bot_author() {
+        let node = serde_json::json!({
+            "__typename": "PullRequest",
+            "number": 1,
+            "title": "Update deps",
+            "state": "OPEN",
+            "url": "https://github.com/owner/repo/pull/1",
+            "updatedAt": "2026-05-24T10:00:00Z",
+            "author": { "__typename": "Bot", "login": "renovate" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo" },
+            "comments": { "totalCount": 0 },
+            "reviewRequests": { "nodes": [] }
+        });
+        let item = node_to_cached_item(&node, 1).unwrap();
+        // Bot authors should have "[bot]" suffix to match REST API convention.
+        assert_eq!(item.author.as_deref(), Some("renovate[bot]"));
+    }
+
+    #[test]
     fn node_to_cached_item_pr_with_reviewers() {
         let node = serde_json::json!({
             "__typename": "PullRequest",
@@ -291,7 +319,7 @@ mod tests {
             "state": "OPEN",
             "url": "https://github.com/owner/repo/pull/7",
             "updatedAt": "2026-05-23T10:00:00Z",
-            "author": { "login": "bob" },
+            "author": { "__typename": "User", "login": "bob" },
             "labels": { "nodes": [] },
             "repository": { "owner": { "login": "owner" }, "name": "repo" },
             "comments": { "totalCount": 0 },
@@ -318,7 +346,7 @@ mod tests {
             "state": "MERGED",
             "url": "https://github.com/owner/repo/pull/99",
             "updatedAt": "2026-05-23T10:00:00Z",
-            "author": { "login": "dave" },
+            "author": { "__typename": "User", "login": "dave" },
             "labels": { "nodes": [] },
             "repository": { "owner": { "login": "owner" }, "name": "repo" },
             "comments": { "totalCount": 0 },
