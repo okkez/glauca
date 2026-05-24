@@ -248,16 +248,27 @@ pub struct CachedItem {
     pub labels: String,
     pub comment_count: i64,
     pub requested_reviewers: String,
+    pub body: Option<String>,
+    pub assignees: String,
+    pub is_draft: bool,
+    pub created_at_item: Option<String>,
+    pub base_ref: Option<String>,
+    pub head_ref: Option<String>,
+    pub review_decision: Option<String>,
+    pub milestone: Option<String>,
 }
 
 /// Insert or replace a cached item for a query.
 pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
+    let is_draft_int = item.is_draft as i64;
     sqlx::query!(
         r#"
         INSERT INTO items
             (query_id, kind, repo_owner, repo_name, number, title, url, author,
-             state, updated_at, labels, comment_count, requested_reviewers, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             state, updated_at, labels, comment_count, requested_reviewers,
+             body, assignees, is_draft, created_at_item, base_ref, head_ref,
+             review_decision, milestone, cached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
             title               = excluded.title,
@@ -268,6 +279,14 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
             labels              = excluded.labels,
             comment_count       = excluded.comment_count,
             requested_reviewers = excluded.requested_reviewers,
+            body                = excluded.body,
+            assignees           = excluded.assignees,
+            is_draft            = excluded.is_draft,
+            created_at_item     = excluded.created_at_item,
+            base_ref            = excluded.base_ref,
+            head_ref            = excluded.head_ref,
+            review_decision     = excluded.review_decision,
+            milestone           = excluded.milestone,
             cached_at           = excluded.cached_at
         "#,
         item.query_id,
@@ -283,6 +302,14 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         item.labels,
         item.comment_count,
         item.requested_reviewers,
+        item.body,
+        item.assignees,
+        is_draft_int,
+        item.created_at_item,
+        item.base_ref,
+        item.head_ref,
+        item.review_decision,
+        item.milestone,
     )
     .execute(pool)
     .await?;
@@ -297,7 +324,9 @@ pub async fn fetch_items(
     let rows = sqlx::query!(
         r#"
         SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,
-               state, updated_at, labels, comment_count, requested_reviewers
+               state, updated_at, labels, comment_count, requested_reviewers,
+               body, assignees, is_draft, created_at_item, base_ref, head_ref,
+               review_decision, milestone
         FROM items
         WHERE query_id = ?
         ORDER BY updated_at DESC
@@ -323,6 +352,14 @@ pub async fn fetch_items(
             labels: r.labels,
             comment_count: r.comment_count,
             requested_reviewers: r.requested_reviewers,
+            body: r.body,
+            assignees: r.assignees,
+            is_draft: r.is_draft != 0,
+            created_at_item: r.created_at_item,
+            base_ref: r.base_ref,
+            head_ref: r.head_ref,
+            review_decision: r.review_decision,
+            milestone: r.milestone,
         })
         .collect())
 }
@@ -387,6 +424,14 @@ mod tests {
             labels: "[]".into(),
             comment_count: 0,
             requested_reviewers: "[]".into(),
+            body: None,
+            assignees: "[]".into(),
+            is_draft: false,
+            created_at_item: None,
+            base_ref: None,
+            head_ref: None,
+            review_decision: None,
+            milestone: None,
         }
     }
 
@@ -470,6 +515,14 @@ mod tests {
             labels: "[]".into(),
             comment_count: 0,
             requested_reviewers: "[]".into(),
+            body: None,
+            assignees: "[]".into(),
+            is_draft: false,
+            created_at_item: None,
+            base_ref: None,
+            head_ref: None,
+            review_decision: None,
+            milestone: None,
         };
         upsert_item(&pool, &item).await.expect("upsert item");
 

@@ -116,6 +116,14 @@ pub struct ItemEntry {
     pub comment_count: i64,
     pub kind: String,
     pub requested_reviewers: Vec<String>,
+    pub body: Option<String>,
+    pub assignees: Vec<String>,
+    pub is_draft: bool,
+    pub created_at_item: Option<String>,
+    pub base_ref: Option<String>,
+    pub head_ref: Option<String>,
+    pub review_decision: Option<String>,
+    pub milestone: Option<String>,
 }
 
 // ── Application state ────────────────────────────────────────────────────────
@@ -168,6 +176,8 @@ pub struct App {
     pub syncing: bool,
     /// Number of pending background auto-refresh jobs (queued + in-progress).
     pub bg_sync_pending: usize,
+    /// Scroll offset for the detail pane (right column).
+    pub detail_scroll: u16,
     /// Login name of the authenticated GitHub user (used to expand `@me` in filters).
     pub current_user: Option<String>,
 }
@@ -194,6 +204,7 @@ impl App {
             status: None,
             syncing: false,
             bg_sync_pending: 0,
+            detail_scroll: 0,
             current_user: None,
         }
     }
@@ -352,11 +363,15 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                     return Action::LoadEntry;
                 }
             }
-            Focus::ItemList | Focus::ItemDetail => {
+            Focus::ItemList => {
                 let max = app.filtered_items().len().saturating_sub(1);
                 if app.item_cursor < max {
                     app.item_cursor += 1;
+                    app.detail_scroll = 0;
                 }
+            }
+            Focus::ItemDetail => {
+                app.detail_scroll = app.detail_scroll.saturating_add(1);
             }
         },
         KeyCode::Char('k') | KeyCode::Up => match app.focus {
@@ -366,10 +381,14 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                     return Action::LoadEntry;
                 }
             }
-            Focus::ItemList | Focus::ItemDetail => {
+            Focus::ItemList => {
                 if app.item_cursor > 0 {
                     app.item_cursor -= 1;
+                    app.detail_scroll = 0;
                 }
+            }
+            Focus::ItemDetail => {
+                app.detail_scroll = app.detail_scroll.saturating_sub(1);
             }
         },
 
@@ -623,6 +642,14 @@ async fn load_items_task(pool: SqlitePool, query_id: i64, tx: mpsc::Sender<AppMe
                     comment_count: c.comment_count,
                     kind: c.kind,
                     requested_reviewers: serde_labels(&c.requested_reviewers),
+                    body: c.body,
+                    assignees: serde_labels(&c.assignees),
+                    is_draft: c.is_draft,
+                    created_at_item: c.created_at_item,
+                    base_ref: c.base_ref,
+                    head_ref: c.head_ref,
+                    review_decision: c.review_decision,
+                    milestone: c.milestone,
                 })
                 .collect();
             let _ = tx.send(AppMessage::ItemsLoaded { query_id, items }).await;
@@ -1094,6 +1121,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         Action::LoadEntry => {
                             app.filter.clear();
                             app.item_cursor = 0;
+                            app.detail_scroll = 0;
                             app.items.clear();
                             if let Some(root_id) = app.activate_selected_entry() {
                                 if let Some(e) = app.entries.get(app.entry_cursor) {
@@ -1309,6 +1337,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.entry_cursor = insert_pos;
                         app.filter.clear();
                         app.item_cursor = 0;
+                        app.detail_scroll = 0;
                         if let Some(root_id) = app.activate_selected_entry() {
                             tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
                         }
@@ -1326,6 +1355,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         if app.selected_root_query_id() == Some(id) {
                             app.items.clear();
                             app.item_cursor = 0;
+                            app.detail_scroll = 0;
                             app.filter.clear();
                             spawn_load_and_sync(
                                 pool.clone(),
@@ -1354,6 +1384,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             if fs.id == id {
                                 app.stream_filter = Some(new_filter);
                                 app.item_cursor = 0;
+                                app.detail_scroll = 0;
                                 app.clamp_item_cursor();
                             }
                         }
@@ -1417,6 +1448,14 @@ mod tests {
                 comment_count: 0,
                 kind: "pull_request".into(),
                 requested_reviewers: vec![],
+                body: None,
+                assignees: vec![],
+                is_draft: false,
+                created_at_item: None,
+                base_ref: None,
+                head_ref: None,
+                review_decision: None,
+                milestone: None,
             })
             .collect();
         app
@@ -1512,6 +1551,14 @@ mod tests {
                 comment_count: 0,
                 kind: "pull_request".into(),
                 requested_reviewers: vec![],
+                body: None,
+                assignees: vec![],
+                is_draft: false,
+                created_at_item: None,
+                base_ref: None,
+                head_ref: None,
+                review_decision: None,
+                milestone: None,
             },
             ItemEntry {
                 number: 2,
@@ -1526,6 +1573,14 @@ mod tests {
                 comment_count: 0,
                 kind: "pull_request".into(),
                 requested_reviewers: vec![],
+                body: None,
+                assignees: vec![],
+                is_draft: false,
+                created_at_item: None,
+                base_ref: None,
+                head_ref: None,
+                review_decision: None,
+                milestone: None,
             },
         ];
         app.stream_filter = Some("state:open".into());

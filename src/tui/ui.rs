@@ -185,73 +185,163 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
         None => vec![Line::from(Span::raw("No item selected"))],
         Some(item) => {
             let repo = format!("{}/{}", item.repo_owner, item.repo_name);
+            let author = item.author.clone().unwrap_or_else(|| "—".to_string());
+            let state = item.state.clone();
+            let title = item.title.clone();
+            let updated_at = format_local_datetime(&item.updated_at);
+            let created_at = item
+                .created_at_item
+                .as_deref()
+                .map(format_local_datetime)
+                .unwrap_or_else(|| "—".to_string());
+            let url = item.url.clone();
+            let number = item.number;
+            let comment_count = item.comment_count;
+            let kind_icon = kind_icon(&item.kind);
+            let is_pr = item.kind == "pull_request";
+
             let labels = if item.labels.is_empty() {
                 "—".to_string()
             } else {
                 item.labels.join(", ")
             };
-            let author = item.author.clone().unwrap_or_else(|| "—".to_string());
-            let state = item.state.clone();
-            let title = item.title.clone();
-            let updated_at = format_local_datetime(&item.updated_at);
-            let url = item.url.clone();
-            let number = item.number;
-            let comment_count = item.comment_count;
-            let kind_icon = kind_icon(&item.kind);
-            vec![
+            let assignees = if item.assignees.is_empty() {
+                "—".to_string()
+            } else {
+                item.assignees.join(", ")
+            };
+            let reviewers = if item.requested_reviewers.is_empty() {
+                "—".to_string()
+            } else {
+                item.requested_reviewers.join(", ")
+            };
+            let milestone = item.milestone.clone().unwrap_or_else(|| "—".to_string());
+
+            let mut lines = vec![
+                // Title header
                 Line::from(vec![
                     Span::styled(
                         format!("{kind_icon} #{number} "),
                         Style::default().fg(Color::Cyan),
                     ),
-                    Span::styled(
-                        title,
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
                 ]),
                 Line::default(),
+                // Metadata block
                 Line::from(vec![
-                    Span::styled("Repo:    ", Style::default().fg(Color::Gray)),
+                    Span::styled("Repo:     ", Style::default().fg(Color::Gray)),
                     Span::raw(repo),
                 ]),
                 Line::from(vec![
-                    Span::styled("Author:  ", Style::default().fg(Color::Gray)),
+                    Span::styled("Author:   ", Style::default().fg(Color::Gray)),
                     Span::raw(author),
                 ]),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled("State:    ", Style::default().fg(Color::Gray)),
+                        Span::styled(state_badge(&state), state_style(&state)),
+                        Span::raw(format!(" {state}")),
+                    ];
+                    if is_pr && item.is_draft {
+                        spans.push(Span::styled(
+                            "  [Draft]",
+                            Style::default().fg(Color::Yellow),
+                        ));
+                    }
+                    spans
+                }),
                 Line::from(vec![
-                    Span::styled("State:   ", Style::default().fg(Color::Gray)),
-                    Span::styled(state_badge(&state), state_style(&state)),
-                    Span::raw(format!(" {state}")),
+                    Span::styled("Created:  ", Style::default().fg(Color::Gray)),
+                    Span::raw(created_at),
                 ]),
                 Line::from(vec![
-                    Span::styled("Updated: ", Style::default().fg(Color::Gray)),
+                    Span::styled("Updated:  ", Style::default().fg(Color::Gray)),
                     Span::raw(updated_at),
-                ]),
-                Line::from(vec![
-                    Span::styled("Labels:  ", Style::default().fg(Color::Gray)),
-                    Span::raw(labels),
-                ]),
-                Line::from(vec![
-                    Span::styled("Comments:", Style::default().fg(Color::Gray)),
-                    Span::raw(format!(" {comment_count}")),
                 ]),
                 Line::default(),
                 Line::from(vec![
-                    Span::styled("URL:     ", Style::default().fg(Color::Gray)),
-                    Span::styled(
-                        url,
-                        Style::default()
-                            .fg(Color::Blue)
-                            .add_modifier(Modifier::UNDERLINED),
-                    ),
+                    Span::styled("Labels:   ", Style::default().fg(Color::Gray)),
+                    Span::raw(labels),
                 ]),
-            ]
+                Line::from(vec![
+                    Span::styled("Milestone:", Style::default().fg(Color::Gray)),
+                    Span::raw(format!(" {milestone}")),
+                ]),
+                Line::from(vec![
+                    Span::styled("Assignees:", Style::default().fg(Color::Gray)),
+                    Span::raw(format!(" {assignees}")),
+                ]),
+                Line::from(vec![
+                    Span::styled("Reviewers:", Style::default().fg(Color::Gray)),
+                    Span::raw(format!(" {reviewers}")),
+                ]),
+                Line::from(vec![
+                    Span::styled("Comments: ", Style::default().fg(Color::Gray)),
+                    Span::raw(format!("{comment_count}")),
+                ]),
+            ];
+
+            // PR-only fields
+            if is_pr {
+                if let (Some(base), Some(head)) = (&item.base_ref, &item.head_ref) {
+                    lines.push(Line::from(vec![
+                        Span::styled("Branch:   ", Style::default().fg(Color::Gray)),
+                        Span::raw(format!("{head} → {base}")),
+                    ]));
+                }
+                if let Some(rd) = &item.review_decision {
+                    let (badge, style) = match rd.as_str() {
+                        "APPROVED" => ("✓ APPROVED", Style::default().fg(Color::Green)),
+                        "CHANGES_REQUESTED" => (
+                            "✗ CHANGES REQUESTED",
+                            Style::default().fg(Color::Red),
+                        ),
+                        "REVIEW_REQUIRED" => (
+                            "○ REVIEW REQUIRED",
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        other => (other, Style::default()),
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled("Review:   ", Style::default().fg(Color::Gray)),
+                        Span::styled(badge, style),
+                    ]));
+                }
+            }
+
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::styled("URL:      ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    url,
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+            ]));
+
+            // Description body
+            if let Some(body) = &item.body {
+                if !body.is_empty() {
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        "─── Description ────────────────────────────────",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    for body_line in body.lines() {
+                        lines.push(Line::from(Span::raw(body_line.to_string())));
+                    }
+                }
+            }
+
+            lines
         }
     };
 
     let para = Paragraph::new(text)
         .block(block)
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((app.detail_scroll, 0));
 
     f.render_widget(para, area);
 }

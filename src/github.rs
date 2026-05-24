@@ -50,22 +50,34 @@ query SearchItems($q: String!, $after: String) {
         title
         state
         url
+        createdAt
         updatedAt
         author { __typename login }
         labels(first: 20) { nodes { name } }
         repository { owner { login } name }
         comments { totalCount }
+        body
+        assignees(first: 10) { nodes { login } }
+        milestone { title }
       }
       ... on PullRequest {
         number
         title
         state
         url
+        createdAt
         updatedAt
         author { __typename login }
         labels(first: 20) { nodes { name } }
         repository { owner { login } name }
         comments { totalCount }
+        body
+        assignees(first: 10) { nodes { login } }
+        milestone { title }
+        isDraft
+        baseRefName
+        headRefName
+        reviewDecision
         reviewRequests(first: 20) {
           nodes {
             requestedReviewer {
@@ -221,6 +233,40 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         vec![]
     };
 
+    let body = node["body"].as_str().map(|s| s.to_string());
+    let created_at_item = node["createdAt"].as_str().map(|s| s.to_string());
+    let assignees = node["assignees"]["nodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| a["login"].as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let milestone = node["milestone"]["title"].as_str().map(|s| s.to_string());
+
+    let is_draft = if is_pr {
+        node["isDraft"].as_bool().unwrap_or(false)
+    } else {
+        false
+    };
+    let base_ref = if is_pr {
+        node["baseRefName"].as_str().map(|s| s.to_string())
+    } else {
+        None
+    };
+    let head_ref = if is_pr {
+        node["headRefName"].as_str().map(|s| s.to_string())
+    } else {
+        None
+    };
+    let review_decision = if is_pr {
+        node["reviewDecision"].as_str().map(|s| s.to_string())
+    } else {
+        None
+    };
+
     Some(CachedItem {
         query_id,
         kind: kind.to_string(),
@@ -236,6 +282,14 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         comment_count,
         requested_reviewers: serde_json::to_string(&requested_reviewers)
             .unwrap_or_else(|_| "[]".to_string()),
+        body,
+        assignees: serde_json::to_string(&assignees).unwrap_or_else(|_| "[]".to_string()),
+        is_draft,
+        created_at_item,
+        base_ref,
+        head_ref,
+        review_decision,
+        milestone,
     })
 }
 

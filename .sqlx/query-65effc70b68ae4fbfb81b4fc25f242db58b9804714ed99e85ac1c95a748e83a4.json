@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,\n               state, updated_at, labels, comment_count, requested_reviewers\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
+  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,\n               state, updated_at, labels, comment_count, requested_reviewers,\n               body, assignees, is_draft, created_at_item, base_ref, head_ref,\n               review_decision, milestone\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -67,6 +67,46 @@
         "name": "requested_reviewers",
         "ordinal": 12,
         "type_info": "Text"
+      },
+      {
+        "name": "body",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "assignees",
+        "ordinal": 14,
+        "type_info": "Text"
+      },
+      {
+        "name": "is_draft",
+        "ordinal": 15,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at_item",
+        "ordinal": 16,
+        "type_info": "Text"
+      },
+      {
+        "name": "base_ref",
+        "ordinal": 17,
+        "type_info": "Text"
+      },
+      {
+        "name": "head_ref",
+        "ordinal": 18,
+        "type_info": "Text"
+      },
+      {
+        "name": "review_decision",
+        "ordinal": 19,
+        "type_info": "Text"
+      },
+      {
+        "name": "milestone",
+        "ordinal": 20,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -85,8 +125,16 @@
       false,
       false,
       false,
-      false
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
     ]
   },
-  "hash": "6280840093669fd75f027ec90d246e783656fbc1cdafe6b100592802f8324d36"
+  "hash": "65effc70b68ae4fbfb81b4fc25f242db58b9804714ed99e85ac1c95a748e83a4"
 }
