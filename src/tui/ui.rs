@@ -266,7 +266,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Focus::ItemDetail => "DETAIL   h/l:pane  j/k:scroll  q:quit",
         },
         InputMode::Filter => "FILTER   Esc:exit  C-u:clear  state:open  author:name  label:bug  repo:owner/name",
-        InputMode::NewQuery => "NEW QUERY  Enter:save  Esc:cancel",
+        InputMode::NewQuery => "NEW QUERY  Tab:switch field  Enter:save  Esc:cancel",
         InputMode::NewFilterStream => "NEW STREAM  Tab:switch field  Enter:save  Esc:cancel",
         InputMode::EditQuery => "EDIT QUERY  Tab:switch field  Enter:save  Esc:cancel",
         InputMode::EditFilterStream => "EDIT STREAM  Tab:switch field  Enter:save  Esc:cancel",
@@ -293,9 +293,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 // ── New query modal ───────────────────────────────────────────────────────────
 
 fn draw_new_query_modal(f: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(60, 7, area);
-
-    // Clear the background
+    let popup_area = centered_rect(60, 9, area);
     f.render_widget(Clear, popup_area);
 
     let block = Block::default()
@@ -313,27 +311,45 @@ fn draw_new_query_modal(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(inner);
 
+    let name_style = if app.modal_field == 0 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let query_style = if app.modal_field == 1 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+
+    f.render_widget(Paragraph::new("Display name (optional — leave blank to use query):"), split[0]);
     f.render_widget(
-        Paragraph::new("GitHub search query (e.g. repo:owner/name is:pr is:open)"),
-        split[0],
-    );
-    f.render_widget(
-        Paragraph::new(format!("> {}_", app.new_query_input))
-            .style(Style::default().fg(Color::Yellow)),
+        Paragraph::new(format!(
+            "> {}{}",
+            app.new_query_name,
+            if app.modal_field == 0 { "_" } else { "" }
+        ))
+        .style(name_style),
         split[1],
     );
+    f.render_widget(Paragraph::new("GitHub search query (e.g. repo:owner/name is:pr is:open):"), split[2]);
     f.render_widget(
-        Paragraph::new("(PR kind is used by default)").style(
-            Style::default().fg(Color::Gray),
-        ),
-        split[2],
+        Paragraph::new(format!(
+            "> {}{}",
+            app.new_query_input,
+            if app.modal_field == 1 { "_" } else { "" }
+        ))
+        .style(query_style),
+        split[3],
     );
     f.render_widget(
-        Paragraph::new("Enter:save  Esc:cancel").style(Style::default().fg(Color::Gray)),
-        split[3],
+        Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
+            .style(Style::default().fg(Color::Gray)),
+        split[4],
     );
 }
 

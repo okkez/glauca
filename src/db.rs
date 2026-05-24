@@ -152,20 +152,27 @@ pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
 }
 
 /// Upsert a query record and return its id.
+///
+/// `name` is the optional display name shown in the left pane.
+/// If `None` (or empty string), the query string itself is used as the label.
 pub async fn upsert_query(
     pool: &SqlitePool,
     query: &str,
     kind: &str,
+    name: Option<&str>,
 ) -> Result<i64> {
+    // Treat empty string the same as None.
+    let name = name.filter(|s| !s.trim().is_empty());
     let row = sqlx::query!(
         r#"
-        INSERT INTO queries (query, kind)
-        VALUES (?, ?)
-        ON CONFLICT (query) DO UPDATE SET query = excluded.query
+        INSERT INTO queries (query, kind, name)
+        VALUES (?, ?, ?)
+        ON CONFLICT (query) DO UPDATE SET query = excluded.query, name = excluded.name
         RETURNING id
         "#,
         query,
         kind,
+        name,
     )
     .fetch_one(pool)
     .await?;
@@ -343,7 +350,7 @@ mod tests {
     async fn delete_query_cascades_items() {
         let (pool, _file) = test_pool().await;
 
-        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request")
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await
             .expect("upsert query");
 
@@ -364,9 +371,9 @@ mod tests {
     async fn list_queries_returns_in_creation_order() {
         let (pool, _file) = test_pool().await;
 
-        upsert_query(&pool, "query:first", "issue").await.expect("upsert");
-        upsert_query(&pool, "query:second", "pull_request").await.expect("upsert");
-        upsert_query(&pool, "query:third", "issue").await.expect("upsert");
+        upsert_query(&pool, "query:first", "issue", None).await.expect("upsert");
+        upsert_query(&pool, "query:second", "pull_request", None).await.expect("upsert");
+        upsert_query(&pool, "query:third", "issue", None).await.expect("upsert");
 
         let queries = list_queries(&pool).await.expect("list");
         assert_eq!(queries.len(), 3);
@@ -379,7 +386,7 @@ mod tests {
     async fn upsert_item_updates_on_conflict() {
         let (pool, _file) = test_pool().await;
 
-        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request")
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await
             .expect("upsert query");
 
@@ -401,7 +408,7 @@ mod tests {
     async fn upsert_and_fetch_items() {
         let (pool, _file) = test_pool().await;
 
-        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request")
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await
             .expect("upsert query");
 
@@ -432,7 +439,7 @@ mod tests {
     async fn filter_stream_crud() {
         let (pool, _file) = test_pool().await;
 
-        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request")
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await
             .expect("upsert query");
 
@@ -455,7 +462,7 @@ mod tests {
     async fn filter_stream_cascades_on_parent_delete() {
         let (pool, _file) = test_pool().await;
 
-        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request")
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await
             .expect("upsert query");
         upsert_filter_stream(&pool, qid, "Open", "state:open")
@@ -472,7 +479,7 @@ mod tests {
     async fn cache_staleness() {
         let (pool, _file) = test_pool().await;
 
-        let qid = upsert_query(&pool, "repo:owner/r is:open", "issue")
+        let qid = upsert_query(&pool, "repo:owner/r is:open", "issue", None)
             .await
             .expect("upsert query");
 

@@ -151,6 +151,7 @@ pub struct App {
     pub stream_filter: Option<String>,
 
     pub new_query_input: String,
+    pub new_query_name: String,
     pub new_filter_stream_name: String,
     pub new_filter_stream_filter: String,
     /// Input buffer reused for edit modals (display name or step-1 field).
@@ -179,6 +180,7 @@ impl App {
             filter: String::new(),
             stream_filter: None,
             new_query_input: String::new(),
+            new_query_name: String::new(),
             new_filter_stream_name: String::new(),
             new_filter_stream_filter: String::new(),
             edit_input: String::new(),
@@ -358,6 +360,8 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
         // New root query (left pane)
         KeyCode::Char('n') if app.focus == Focus::QueryList => {
             app.input_mode = InputMode::NewQuery;
+            app.modal_field = 0;
+            app.new_query_name.clear();
             app.new_query_input.clear();
         }
         // New filter stream (left pane) — only when a root query or filter stream is selected
@@ -426,22 +430,38 @@ fn handle_key_filter(app: &mut App, key: KeyEvent) -> Action {
 }
 
 fn handle_key_new_query(app: &mut App, key: KeyEvent) -> Action {
+    // field 0 = display name (optional), field 1 = GitHub search query
     match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
+            app.new_query_name.clear();
             app.new_query_input.clear();
+            app.modal_field = 0;
+        }
+        KeyCode::Tab => {
+            app.modal_field = 1 - app.modal_field;
         }
         KeyCode::Enter => {
-            if !app.new_query_input.trim().is_empty() {
+            if app.modal_field == 0 {
+                // Move focus to the query field
+                app.modal_field = 1;
+            } else if !app.new_query_input.trim().is_empty() {
                 return Action::SaveNewQuery;
             }
-            app.input_mode = InputMode::Normal;
         }
         KeyCode::Backspace => {
-            app.new_query_input.pop();
+            if app.modal_field == 0 {
+                app.new_query_name.pop();
+            } else {
+                app.new_query_input.pop();
+            }
         }
         KeyCode::Char(c) => {
-            app.new_query_input.push(c);
+            if app.modal_field == 0 {
+                app.new_query_name.push(c);
+            } else {
+                app.new_query_input.push(c);
+            }
         }
         _ => {}
     }
@@ -854,17 +874,22 @@ async fn run_app<B: ratatui::backend::Backend>(
                         }
                         Action::SaveNewQuery => {
                             let query_str = app.new_query_input.trim().to_string();
+                            let name_str = app.new_query_name.trim().to_string();
                             app.input_mode = InputMode::Normal;
+                            app.modal_field = 0;
                             app.new_query_input.clear();
+                            app.new_query_name.clear();
                             let pool_clone = pool.clone();
                             let tx_clone = tx.clone();
                             tokio::spawn(async move {
-                                match db::upsert_query(&pool_clone, &query_str, "pull_request").await {
+                                let name_opt = if name_str.is_empty() { None } else { Some(name_str.as_str()) };
+                                let label = if name_str.is_empty() { query_str.clone() } else { name_str.clone() };
+                                match db::upsert_query(&pool_clone, &query_str, "pull_request", name_opt).await {
                                     Ok(id) => {
                                         let _ = tx_clone
                                             .send(AppMessage::QueryAdded(QueryEntry {
                                                 id,
-                                                label: query_str.clone(),
+                                                label,
                                                 query_str,
                                                 kind: "pull_request".into(),
                                             }))
