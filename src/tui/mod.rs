@@ -886,14 +886,20 @@ async fn run_app<B: ratatui::backend::Backend>(
         tokio::spawn(sync_task(pool, gh, query_id, query_str, tx));
     };
 
-    // Load items for the initially selected entry; track which query we sync manually.
+    // Load items for the initially selected entry; sync only if the cache is stale.
     let mut initially_synced_id: Option<i64> = None;
     if let Some(root_id) = app.activate_selected_entry() {
         if let Some(entry) = app.entries.first() {
             if !entry.is_filter_stream() {
                 let query_str = entry.root_query_str().unwrap_or_default().to_string();
-                spawn_load_and_sync(pool.clone(), gh.clone(), root_id, query_str, tx.clone());
-                app.syncing = true;
+                tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
+                if db::is_cache_stale(&pool, root_id, CACHE_STALE_SECS)
+                    .await
+                    .unwrap_or(true)
+                {
+                    tokio::spawn(sync_task(pool.clone(), gh.clone(), root_id, query_str, tx.clone()));
+                    app.syncing = true;
+                }
                 initially_synced_id = Some(root_id);
             } else {
                 tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
