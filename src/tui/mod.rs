@@ -138,6 +138,8 @@ pub struct CommentEntry {
     pub author: String,
     pub created_at: String,
     pub body: String,
+    pub is_minimized: bool,
+    pub minimized_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -261,6 +263,10 @@ pub struct App {
     pub comments_loading: bool,
     /// Scroll offset within the comments popup.
     pub comments_scroll: usize,
+    /// Whether to show minimized/hidden comments (default: false = collapsed).
+    pub comments_show_hidden: bool,
+    /// Sort order for comments: true = newest first, false = oldest first.
+    pub comments_sort_desc: bool,
     pub status: Option<String>,
     /// Whether a manual GitHub sync is in progress for the selected query.
     pub syncing: bool,
@@ -296,6 +302,8 @@ impl App {
             comments: Vec::new(),
             comments_loading: false,
             comments_scroll: 0,
+            comments_show_hidden: false,
+            comments_sort_desc: false,
             status: None,
             syncing: false,
             bg_sync_pending: 0,
@@ -638,6 +646,14 @@ fn handle_key_comments_popup(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char('G') => {
             app.comments_scroll = app.comments_scroll.saturating_add(9999);
         }
+        KeyCode::Char('h') => {
+            app.comments_show_hidden = !app.comments_show_hidden;
+            app.comments_scroll = 0;
+        }
+        KeyCode::Char('s') => {
+            app.comments_sort_desc = !app.comments_sort_desc;
+            app.comments_scroll = 0;
+        }
         _ => {}
     }
     Action::None
@@ -832,20 +848,86 @@ async fn fetch_comments_task(
     repo: &str,
     number: u64,
 ) -> anyhow::Result<Vec<CommentEntry>> {
-    let page = gh
-        .issues(owner, repo)
-        .list_comments(number)
-        .per_page(100)
-        .send()
-        .await?;
+    let query = r#"
+        query($owner: String!, $repo: String!, $number: Int!) {
+          repository(owner: $owner, name: $repo) {
+            issueOrPullRequest(number: $number) {
+              ... on Issue {
+                comments(first: 100) {
+                  nodes {
+                    author { login }
+                    body
+                    createdAt
+                    isMinimized
+                    minimizedReason
+                  }
+                }
+              }
+              ... on PullRequest {
+                comments(first: 100) {
+                  nodes {
+                    author { login }
+                    body
+                    createdAt
+                    isMinimized
+                    minimizedReason
+                  }
+                }
+              }
+            }
+          }
+        }
+    "#;
+    let payload = serde_json::json!({
+        "query": query,
+        "variables": {
+            "owner": owner,
+            "repo": repo,
+            "number": number as i64,
+        }
+    });
+    let resp: serde_json::Value = gh.graphql(&payload).await?;
+    let nodes = resp
+        .pointer("/data/repository/issueOrPullRequest/comments/nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
 
-    let comments = page
-        .items
+    let comments = nodes
         .into_iter()
-        .map(|c| CommentEntry {
-            author: c.user.login,
-            created_at: c.created_at.format("%Y-%m-%d %H:%M").to_string(),
-            body: c.body.unwrap_or_default(),
+        .map(|n| {
+            let author = n
+                .pointer("/author/login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ghost")
+                .to_string();
+            let created_at = n
+                .get("createdAt")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            let body = n
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let is_minimized = n
+                .get("isMinimized")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let minimized_reason = n
+                .get("minimizedReason")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            CommentEntry {
+                author,
+                created_at,
+                body,
+                is_minimized,
+                minimized_reason,
+            }
         })
         .collect();
     Ok(comments)
@@ -1968,6 +2050,8 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                             author: "error".into(),
                             created_at: String::new(),
                             body: format!("Failed to load comments: {err}"),
+                            is_minimized: false,
+                            minimized_reason: None,
                         }];
                     }
                     AppMessage::SyncDone { query_id, count } => {
