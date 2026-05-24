@@ -1,5 +1,6 @@
 use crate::{db, github};
 use anyhow::Result;
+use chrono::Utc;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
 use octocrab::Octocrab;
@@ -7,6 +8,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use sqlx::SqlitePool;
 use std::{
+    collections::HashMap,
     io,
     process::Stdio,
     time::{SystemTime, UNIX_EPOCH},
@@ -28,6 +30,7 @@ pub struct QueryEntry {
     /// Actual GitHub search query string sent to the API.
     pub query_str: String,
     pub kind: String,
+    pub last_viewed_at: Option<String>,
 }
 
 #[derive(Clone)]
@@ -37,6 +40,7 @@ pub struct FilterStreamEntry {
     pub name: String,
     pub filter: String,
     pub kind: String,
+    pub last_viewed_at: Option<String>,
 }
 
 /// A single row in the left pane — either a root query or a filter stream.
@@ -97,6 +101,20 @@ impl LeftPaneEntry {
         matches!(self, Self::FilterStream(_))
     }
 
+    pub fn last_viewed_at(&self) -> Option<&str> {
+        match self {
+            Self::Query(q) => q.last_viewed_at.as_deref(),
+            Self::FilterStream(fs) => fs.last_viewed_at.as_deref(),
+        }
+    }
+
+    pub fn set_last_viewed_at(&mut self, last_viewed_at: Option<String>) {
+        match self {
+            Self::Query(q) => q.last_viewed_at = last_viewed_at,
+            Self::FilterStream(fs) => fs.last_viewed_at = last_viewed_at,
+        }
+    }
+
     #[allow(dead_code)]
     pub fn parent_id(&self) -> Option<i64> {
         match self {
@@ -130,6 +148,8 @@ pub struct ItemEntry {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
+    pub cached_at: String,
+    pub is_new: bool,
 }
 
 /// A single comment entry fetched from GitHub and displayed in the comments popup.
@@ -241,6 +261,8 @@ pub struct App {
 
     pub items: Vec<ItemEntry>,
     pub item_cursor: usize,
+    pub unread_counts: HashMap<i64, usize>,
+    pub active_entry_last_viewed_at: Option<String>,
     pub filter: String,
     /// Active filter stream filter applied before the inline filter (if any).
     pub stream_filter: Option<String>,
@@ -288,6 +310,8 @@ impl App {
             entry_cursor: 0,
             items: Vec::new(),
             item_cursor: 0,
+            unread_counts: HashMap::new(),
+            active_entry_last_viewed_at: None,
             filter: String::new(),
             stream_filter: None,
             new_query_input: String::new(),
@@ -379,13 +403,35 @@ impl App {
         }
     }
 
-    /// Apply the selected entry's stream filter and return the root query_id.
-    fn activate_selected_entry(&mut self) -> Option<i64> {
-        if let Some(entry) = self.entries.get(self.entry_cursor) {
-            self.stream_filter = entry.stream_filter().map(|s| s.to_string());
-            Some(entry.root_query_id())
-        } else {
-            None
+    fn mark_entry_viewed(&mut self, entry_id: i64, viewed_at: String) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id() == entry_id) {
+            entry.set_last_viewed_at(Some(viewed_at));
+        }
+    }
+
+    fn recompute_unread_counts_for_query(&mut self, query_id: i64, items: &[ItemEntry]) {
+        for entry in self
+            .entries
+            .iter()
+            .filter(|entry| entry.root_query_id() == query_id)
+        {
+            let unread = match entry {
+                LeftPaneEntry::Query(q) => items
+                    .iter()
+                    .filter(|item| is_item_new_since(&item.cached_at, q.last_viewed_at.as_deref()))
+                    .count(),
+                LeftPaneEntry::FilterStream(fs) => {
+                    let filter = FilterQuery::parse(&self.expand_me(&fs.filter));
+                    items
+                        .iter()
+                        .filter(|item| {
+                            is_item_new_since(&item.cached_at, fs.last_viewed_at.as_deref())
+                                && filter.matches(item)
+                        })
+                        .count()
+                }
+            };
+            self.unread_counts.insert(entry.id(), unread);
         }
     }
 }
@@ -408,6 +454,10 @@ pub enum AppMessage {
         id: i64,
         new_name: String,
         new_filter: String,
+    },
+    EntryViewed {
+        entry_id: i64,
+        viewed_at: String,
     },
     Status(String),
     ActionDone(String),
@@ -1066,34 +1116,52 @@ async fn execute_merge(url: &str, strategy: &MergeStrategy) -> anyhow::Result<St
     Ok(format!("PR merged ({})", strategy.label()))
 }
 
-async fn load_items_task(pool: SqlitePool, query_id: i64, tx: mpsc::Sender<AppMessage>) {
+fn is_item_new_since(cached_at: &str, last_viewed_at: Option<&str>) -> bool {
+    last_viewed_at
+        .map(|last_viewed_at| cached_at > last_viewed_at)
+        .unwrap_or(true)
+}
+
+fn cached_item_to_item_entry(c: db::CachedItem, last_viewed_at: Option<&str>) -> ItemEntry {
+    let is_new = is_item_new_since(&c.cached_at, last_viewed_at);
+    ItemEntry {
+        number: c.number,
+        title: c.title,
+        repo_owner: c.repo_owner,
+        repo_name: c.repo_name,
+        author: c.author,
+        state: c.state,
+        updated_at: c.updated_at,
+        labels: serde_labels(&c.labels),
+        url: c.url,
+        comment_count: c.comment_count,
+        kind: c.kind,
+        requested_reviewers: serde_labels(&c.requested_reviewers),
+        reviews: serde_reviews(&c.reviews),
+        body: c.body,
+        assignees: serde_labels(&c.assignees),
+        is_draft: c.is_draft,
+        created_at_item: c.created_at_item,
+        base_ref: c.base_ref,
+        head_ref: c.head_ref,
+        review_decision: c.review_decision,
+        milestone: c.milestone,
+        cached_at: c.cached_at,
+        is_new,
+    }
+}
+
+async fn load_items_task(
+    pool: SqlitePool,
+    query_id: i64,
+    last_viewed_at: Option<String>,
+    tx: mpsc::Sender<AppMessage>,
+) {
     match db::fetch_items(&pool, query_id).await {
         Ok(cached) => {
             let items = cached
                 .into_iter()
-                .map(|c| ItemEntry {
-                    number: c.number,
-                    title: c.title,
-                    repo_owner: c.repo_owner,
-                    repo_name: c.repo_name,
-                    author: c.author,
-                    state: c.state,
-                    updated_at: c.updated_at,
-                    labels: serde_labels(&c.labels),
-                    url: c.url,
-                    comment_count: c.comment_count,
-                    kind: c.kind,
-                    requested_reviewers: serde_labels(&c.requested_reviewers),
-                    reviews: serde_reviews(&c.reviews),
-                    body: c.body,
-                    assignees: serde_labels(&c.assignees),
-                    is_draft: c.is_draft,
-                    created_at_item: c.created_at_item,
-                    base_ref: c.base_ref,
-                    head_ref: c.head_ref,
-                    review_decision: c.review_decision,
-                    milestone: c.milestone,
-                })
+                .map(|c| cached_item_to_item_entry(c, last_viewed_at.as_deref()))
                 .collect();
             let _ = tx.send(AppMessage::ItemsLoaded { query_id, items }).await;
         }
@@ -1130,11 +1198,11 @@ async fn sync_task(
     gh: Octocrab,
     query_id: i64,
     query_str: String,
+    last_viewed_at: Option<String>,
     tx: mpsc::Sender<AppMessage>,
 ) {
     let mut after: Option<String> = None;
     let mut total_count = 0usize;
-    let mut page_num = 0usize;
 
     loop {
         let result = github::search_page(&gh, query_id, &query_str, after.as_deref()).await;
@@ -1165,10 +1233,9 @@ async fn sync_task(
                     }
                 }
                 total_count += page.items.len();
-                page_num += 1;
 
                 // Reload from DB after each page so the TUI shows results immediately.
-                load_items_task(pool.clone(), query_id, tx.clone()).await;
+                load_items_task(pool.clone(), query_id, last_viewed_at.clone(), tx.clone()).await;
 
                 if !has_next {
                     break;
@@ -1224,6 +1291,7 @@ async fn sync_worker_task(
                 gh.clone(),
                 job.query_id,
                 job.query_str,
+                None,
                 tx.clone(),
             )
             .await;
@@ -1300,6 +1368,69 @@ fn move_group_down(entries: &mut Vec<LeftPaneEntry>, query_idx: usize) -> Option
     Some(insert_at + b_len) // new start index of the moved group
 }
 
+struct SelectedEntryLoad {
+    entry_id: i64,
+    root_id: i64,
+    query_str: Option<String>,
+    is_filter_stream: bool,
+    highlight_since: Option<String>,
+    viewed_at: String,
+}
+
+fn prepare_selected_entry_load(app: &mut App) -> Option<SelectedEntryLoad> {
+    let entry = app.entries.get(app.entry_cursor)?.clone();
+    let viewed_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let highlight_since = entry.last_viewed_at().map(str::to_string);
+
+    app.stream_filter = entry.stream_filter().map(|s| s.to_string());
+    app.active_entry_last_viewed_at = highlight_since.clone();
+    if let Some(selected) = app.entries.get_mut(app.entry_cursor) {
+        selected.set_last_viewed_at(Some(viewed_at.clone()));
+    }
+    app.unread_counts.insert(entry.id(), 0);
+
+    Some(SelectedEntryLoad {
+        entry_id: entry.id(),
+        root_id: entry.root_query_id(),
+        query_str: entry.root_query_str().map(str::to_string),
+        is_filter_stream: entry.is_filter_stream(),
+        highlight_since,
+        viewed_at,
+    })
+}
+
+fn spawn_mark_entry_viewed(
+    pool: SqlitePool,
+    entry_id: i64,
+    is_filter_stream: bool,
+    viewed_at: String,
+    tx: mpsc::Sender<AppMessage>,
+) {
+    tokio::spawn(async move {
+        let result = if is_filter_stream {
+            db::mark_filter_stream_viewed(&pool, entry_id).await
+        } else {
+            db::mark_query_viewed(&pool, entry_id).await
+        };
+
+        match result {
+            Ok(()) => {
+                let _ = tx
+                    .send(AppMessage::EntryViewed {
+                        entry_id,
+                        viewed_at,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(AppMessage::Status(format!("mark viewed error: {e}")))
+                    .await;
+            }
+        }
+    });
+}
+
 // ── Main run loop ─────────────────────────────────────────────────────────────
 
 pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
@@ -1341,6 +1472,7 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
             label,
             query_str: r.query.clone(),
             kind: kind.clone(),
+            last_viewed_at: r.last_viewed_at,
         }));
         for s in streams {
             entries.push(LeftPaneEntry::FilterStream(FilterStreamEntry {
@@ -1349,6 +1481,7 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                 name: s.name,
                 filter: s.filter,
                 kind: kind.clone(),
+                last_viewed_at: s.last_viewed_at,
             }));
         }
     }
@@ -1380,6 +1513,7 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                     label: q.label.clone(),
                     query_str: q.query_str.clone(),
                     kind: q.kind.clone(),
+                    last_viewed_at: q.last_viewed_at.clone(),
                 })
             } else {
                 None
@@ -1390,40 +1524,72 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
     app.entries = entries;
     app.current_user = github::get_current_user(&gh).await;
 
+    let root_query_ids: Vec<i64> = app
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            LeftPaneEntry::Query(q) => Some(q.id),
+            LeftPaneEntry::FilterStream(_) => None,
+        })
+        .collect();
+    for query_id in root_query_ids {
+        if let Ok(items) = db::fetch_items(&pool, query_id).await {
+            let items = items
+                .into_iter()
+                .map(|item| cached_item_to_item_entry(item, None))
+                .collect::<Vec<_>>();
+            app.recompute_unread_counts_for_query(query_id, &items);
+        }
+    }
+
     // Helper: spawn cache load + GitHub sync for a root query
     let spawn_load_and_sync = |pool: SqlitePool,
                                gh: Octocrab,
                                query_id: i64,
                                query_str: String,
+                               last_viewed_at: Option<String>,
                                tx: mpsc::Sender<AppMessage>| {
-        tokio::spawn(load_items_task(pool.clone(), query_id, tx.clone()));
-        tokio::spawn(sync_task(pool, gh, query_id, query_str, tx));
+        tokio::spawn(load_items_task(
+            pool.clone(),
+            query_id,
+            last_viewed_at.clone(),
+            tx.clone(),
+        ));
+        tokio::spawn(sync_task(pool, gh, query_id, query_str, last_viewed_at, tx));
     };
 
     // Load items for the initially selected entry; sync only if the cache is stale.
     let mut initially_synced_id: Option<i64> = None;
-    if let Some(root_id) = app.activate_selected_entry() {
-        if let Some(entry) = app.entries.first() {
-            if !entry.is_filter_stream() {
-                let query_str = entry.root_query_str().unwrap_or_default().to_string();
-                tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
-                if db::is_cache_stale(&pool, root_id, CACHE_STALE_SECS)
-                    .await
-                    .unwrap_or(true)
-                {
-                    tokio::spawn(sync_task(
-                        pool.clone(),
-                        gh.clone(),
-                        root_id,
-                        query_str,
-                        tx.clone(),
-                    ));
-                    app.syncing = true;
-                }
-                initially_synced_id = Some(root_id);
-            } else {
-                tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
+    if let Some(load) = prepare_selected_entry_load(&mut app) {
+        tokio::spawn(load_items_task(
+            pool.clone(),
+            load.root_id,
+            load.highlight_since.clone(),
+            tx.clone(),
+        ));
+        spawn_mark_entry_viewed(
+            pool.clone(),
+            load.entry_id,
+            load.is_filter_stream,
+            load.viewed_at.clone(),
+            tx.clone(),
+        );
+        if !load.is_filter_stream {
+            if db::is_cache_stale(&pool, load.root_id, CACHE_STALE_SECS)
+                .await
+                .unwrap_or(true)
+            {
+                tokio::spawn(sync_task(
+                    pool.clone(),
+                    gh.clone(),
+                    load.root_id,
+                    load.query_str.clone().unwrap_or_default(),
+                    load.highlight_since.clone(),
+                    tx.clone(),
+                ));
+                app.syncing = true;
             }
+            initially_synced_id = Some(load.root_id);
         }
     }
 
@@ -1481,18 +1647,32 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                                         app.item_cursor = 0;
                                         app.filter.clear();
                                         app.stream_filter = None;
-                                        if let Some(root_id) = app.activate_selected_entry() {
-                                            if let Some(e) = app.entries.get(app.entry_cursor) {
-                                                if !e.is_filter_stream() {
-                                                    let qs = e.root_query_str().unwrap_or_default().to_string();
-                                                    spawn_load_and_sync(
-                                                        pool.clone(), gh.clone(), root_id, qs, tx.clone(),
-                                                    );
-                                                    app.syncing = true;
-                                                } else {
-                                                    tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
-                                                }
+                                        if let Some(load) = prepare_selected_entry_load(&mut app) {
+                                            if !load.is_filter_stream {
+                                                spawn_load_and_sync(
+                                                    pool.clone(),
+                                                    gh.clone(),
+                                                    load.root_id,
+                                                    load.query_str.clone().unwrap_or_default(),
+                                                    load.highlight_since.clone(),
+                                                    tx.clone(),
+                                                );
+                                                app.syncing = true;
+                                            } else {
+                                                tokio::spawn(load_items_task(
+                                                    pool.clone(),
+                                                    load.root_id,
+                                                    load.highlight_since.clone(),
+                                                    tx.clone(),
+                                                ));
                                             }
+                                            spawn_mark_entry_viewed(
+                                                pool.clone(),
+                                                load.entry_id,
+                                                load.is_filter_stream,
+                                                load.viewed_at.clone(),
+                                                tx.clone(),
+                                            );
                                         }
                                     }
                                 }
@@ -1507,8 +1687,20 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                                         app.item_cursor = 0;
                                         app.filter.clear();
                                         app.stream_filter = None;
-                                        if let Some(root_id) = app.activate_selected_entry() {
-                                            tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
+                                        if let Some(load) = prepare_selected_entry_load(&mut app) {
+                                            tokio::spawn(load_items_task(
+                                                pool.clone(),
+                                                load.root_id,
+                                                load.highlight_since.clone(),
+                                                tx.clone(),
+                                            ));
+                                            spawn_mark_entry_viewed(
+                                                pool.clone(),
+                                                load.entry_id,
+                                                load.is_filter_stream,
+                                                load.viewed_at.clone(),
+                                                tx.clone(),
+                                            );
                                         }
                                     }
                                 }
@@ -1619,18 +1811,32 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                             app.item_cursor = 0;
                             app.detail_scroll = 0;
                             app.items.clear();
-                            if let Some(root_id) = app.activate_selected_entry() {
-                                if let Some(e) = app.entries.get(app.entry_cursor) {
-                                    if !e.is_filter_stream() {
-                                        let qs = e.root_query_str().unwrap_or_default().to_string();
-                                        spawn_load_and_sync(
-                                            pool.clone(), gh.clone(), root_id, qs, tx.clone(),
-                                        );
-                                        app.syncing = true;
-                                    } else {
-                                        tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
-                                    }
+                            if let Some(load) = prepare_selected_entry_load(&mut app) {
+                                if !load.is_filter_stream {
+                                    spawn_load_and_sync(
+                                        pool.clone(),
+                                        gh.clone(),
+                                        load.root_id,
+                                        load.query_str.clone().unwrap_or_default(),
+                                        load.highlight_since.clone(),
+                                        tx.clone(),
+                                    );
+                                    app.syncing = true;
+                                } else {
+                                    tokio::spawn(load_items_task(
+                                        pool.clone(),
+                                        load.root_id,
+                                        load.highlight_since.clone(),
+                                        tx.clone(),
+                                    ));
                                 }
+                                spawn_mark_entry_viewed(
+                                    pool.clone(),
+                                    load.entry_id,
+                                    load.is_filter_stream,
+                                    load.viewed_at.clone(),
+                                    tx.clone(),
+                                );
                             }
                         }
                         Action::SaveNewQuery => {
@@ -1653,6 +1859,7 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                                                 label,
                                                 query_str,
                                                 kind: "pull_request".into(),
+                                                last_viewed_at: None,
                                             }))
                                             .await;
                                     }
@@ -1687,6 +1894,7 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                                                     name,
                                                     filter,
                                                     kind,
+                                                    last_viewed_at: None,
                                                 }))
                                                 .await;
                                         }
@@ -1961,34 +2169,41 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
             }
             Some(msg) = rx.recv() => {
                 match msg {
-                    AppMessage::ItemsLoaded { query_id, items } => {
+                    AppMessage::ItemsLoaded { query_id, mut items } => {
+                        app.recompute_unread_counts_for_query(query_id, &items);
                         if app.selected_root_query_id() == Some(query_id) {
+                            let highlight_since = app.active_entry_last_viewed_at.clone();
+                            for item in &mut items {
+                                item.is_new = is_item_new_since(&item.cached_at, highlight_since.as_deref());
+                            }
                             app.items = items;
                             app.clamp_item_cursor();
                         }
                     }
                     AppMessage::QueryAdded(q) => {
-                        let load_id = q.id;
-                        let query_str = q.query_str.clone();
-                        let kind = q.kind.clone();
-                        app.entries.push(LeftPaneEntry::Query(QueryEntry {
-                            id: q.id,
-                            label: q.label,
-                            query_str: query_str.clone(),
-                            kind,
-                        }));
+                        app.entries.push(LeftPaneEntry::Query(q));
                         app.entry_cursor = app.entries.len() - 1;
                         app.items.clear();
                         app.filter.clear();
                         app.stream_filter = None;
-                        spawn_load_and_sync(
-                            pool.clone(),
-                            gh.clone(),
-                            load_id,
-                            query_str,
-                            tx.clone(),
-                        );
-                        app.syncing = true;
+                        if let Some(load) = prepare_selected_entry_load(&mut app) {
+                            spawn_load_and_sync(
+                                pool.clone(),
+                                gh.clone(),
+                                load.root_id,
+                                load.query_str.clone().unwrap_or_default(),
+                                load.highlight_since.clone(),
+                                tx.clone(),
+                            );
+                            app.syncing = true;
+                            spawn_mark_entry_viewed(
+                                pool.clone(),
+                                load.entry_id,
+                                load.is_filter_stream,
+                                load.viewed_at.clone(),
+                                tx.clone(),
+                            );
+                        }
                     }
                     AppMessage::FilterStreamAdded(fs) => {
                         // Insert the filter stream after the last sibling (or after its parent)
@@ -2004,8 +2219,20 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                         app.filter.clear();
                         app.item_cursor = 0;
                         app.detail_scroll = 0;
-                        if let Some(root_id) = app.activate_selected_entry() {
-                            tokio::spawn(load_items_task(pool.clone(), root_id, tx.clone()));
+                        if let Some(load) = prepare_selected_entry_load(&mut app) {
+                            tokio::spawn(load_items_task(
+                                pool.clone(),
+                                load.root_id,
+                                load.highlight_since.clone(),
+                                tx.clone(),
+                            ));
+                            spawn_mark_entry_viewed(
+                                pool.clone(),
+                                load.entry_id,
+                                load.is_filter_stream,
+                                load.viewed_at.clone(),
+                                tx.clone(),
+                            );
                         }
                     }
                     AppMessage::QueryUpdated { id, new_name, new_query } => {
@@ -2028,6 +2255,7 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                                 gh.clone(),
                                 id,
                                 new_query,
+                                app.active_entry_last_viewed_at.clone(),
                                 tx.clone(),
                             );
                             app.syncing = true;
@@ -2048,13 +2276,27 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
                             app.entries.get(app.entry_cursor)
                         {
                             if fs.id == id {
-                                app.stream_filter = Some(new_filter);
+                                app.stream_filter = Some(new_filter.clone());
                                 app.item_cursor = 0;
                                 app.detail_scroll = 0;
                                 app.clamp_item_cursor();
                             }
                         }
+                        if let Some(root_id) = app
+                            .entries
+                            .iter()
+                            .find_map(|entry| match entry {
+                                LeftPaneEntry::FilterStream(fs) if fs.id == id => Some(fs.parent_id),
+                                _ => None,
+                            })
+                        {
+                            let items = app.items.clone();
+                            app.recompute_unread_counts_for_query(root_id, &items);
+                        }
                         app.status = Some("Filter stream updated".into());
+                    }
+                    AppMessage::EntryViewed { entry_id, viewed_at } => {
+                        app.mark_entry_viewed(entry_id, viewed_at);
                     }
                     AppMessage::Status(s) => {
                         app.status = Some(s);
@@ -2118,6 +2360,7 @@ mod tests {
             label: "test query".into(),
             query_str: "test query".into(),
             kind: "pull_request".into(),
+            last_viewed_at: None,
         }]);
         app.items = titles
             .iter()
@@ -2144,6 +2387,8 @@ mod tests {
                 head_ref: None,
                 review_decision: None,
                 milestone: None,
+                cached_at: String::new(),
+                is_new: false,
             })
             .collect();
         app
@@ -2231,6 +2476,7 @@ mod tests {
             label: "test".into(),
             query_str: "test".into(),
             kind: "pull_request".into(),
+            last_viewed_at: None,
         }]);
         app.items = vec![
             ItemEntry {
@@ -2255,6 +2501,8 @@ mod tests {
                 head_ref: None,
                 review_decision: None,
                 milestone: None,
+                cached_at: String::new(),
+                is_new: false,
             },
             ItemEntry {
                 number: 2,
@@ -2278,12 +2526,93 @@ mod tests {
                 head_ref: None,
                 review_decision: None,
                 milestone: None,
+                cached_at: String::new(),
+                is_new: false,
             },
         ];
         app.stream_filter = Some("state:open".into());
         let filtered = app.filtered_items();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title, "Open PR");
+    }
+
+    #[test]
+    fn recompute_unread_counts_uses_entry_last_viewed_at() {
+        let mut app = App::new(vec![]);
+        app.entries = vec![
+            LeftPaneEntry::Query(QueryEntry {
+                id: 1,
+                label: "Open PRs".into(),
+                query_str: "is:pr is:open".into(),
+                kind: "pull_request".into(),
+                last_viewed_at: Some("2026-05-24 10:00:00".into()),
+            }),
+            LeftPaneEntry::FilterStream(FilterStreamEntry {
+                id: 2,
+                parent_id: 1,
+                name: "Fresh open".into(),
+                filter: "state:open".into(),
+                kind: "pull_request".into(),
+                last_viewed_at: Some("2026-05-24 10:30:00".into()),
+            }),
+        ];
+        let items = vec![
+            ItemEntry {
+                number: 1,
+                title: "Older open".into(),
+                repo_owner: "o".into(),
+                repo_name: "r".into(),
+                author: None,
+                state: "open".into(),
+                updated_at: String::new(),
+                labels: vec![],
+                url: String::new(),
+                comment_count: 0,
+                kind: "pull_request".into(),
+                requested_reviewers: vec![],
+                reviews: vec![],
+                body: None,
+                assignees: vec![],
+                is_draft: false,
+                created_at_item: None,
+                base_ref: None,
+                head_ref: None,
+                review_decision: None,
+                milestone: None,
+                cached_at: "2026-05-24 10:15:00".into(),
+                is_new: false,
+            },
+            ItemEntry {
+                number: 2,
+                title: "Newest open".into(),
+                repo_owner: "o".into(),
+                repo_name: "r".into(),
+                author: None,
+                state: "open".into(),
+                updated_at: String::new(),
+                labels: vec![],
+                url: String::new(),
+                comment_count: 0,
+                kind: "pull_request".into(),
+                requested_reviewers: vec![],
+                reviews: vec![],
+                body: None,
+                assignees: vec![],
+                is_draft: false,
+                created_at_item: None,
+                base_ref: None,
+                head_ref: None,
+                review_decision: None,
+                milestone: None,
+                cached_at: "2026-05-24 10:45:00".into(),
+                is_new: false,
+            },
+        ];
+
+        app.recompute_unread_counts_for_query(1, &items);
+
+        assert_eq!(app.unread_counts.get(&1), Some(&2));
+        assert_eq!(app.unread_counts.get(&2), Some(&1));
     }
 
     // ── App::new defaults ────────────────────────────────────────────────────────
@@ -2311,12 +2640,14 @@ mod tests {
                 label: "Open PRs".into(),
                 query_str: "is:pr is:open".into(),
                 kind: "pull_request".into(),
+                last_viewed_at: None,
             },
             QueryEntry {
                 id: 2,
                 label: "Open issues".into(),
                 query_str: "is:issue is:open".into(),
                 kind: "issue".into(),
+                last_viewed_at: None,
             },
         ];
 

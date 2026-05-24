@@ -207,6 +207,8 @@ mod tests {
             head_ref: None,
             review_decision: None,
             milestone: None,
+            cached_at: String::new(),
+            is_new: false,
         }
     }
 

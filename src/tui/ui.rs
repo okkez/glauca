@@ -65,20 +65,40 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .entries
         .iter()
-        .map(|entry| match entry {
-            LeftPaneEntry::Query(q) => {
-                let kind_badge = if q.kind == "pull_request" {
-                    " PR "
-                } else {
-                    " IS "
-                };
-                let label = format!("{kind_badge} {}", q.label);
-                ListItem::new(label)
-            }
-            LeftPaneEntry::FilterStream(fs) => {
-                // Indent with a visual tree connector
-                let label = format!("   ↳ {}", fs.name);
-                ListItem::new(label).style(Style::default().fg(Color::Gray))
+        .map(|entry| {
+            let unread = app.unread_counts.get(&entry.id()).copied().unwrap_or(0);
+            let badge = (unread > 0).then(|| {
+                Span::styled(
+                    format!(" ({unread})"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            });
+
+            match entry {
+                LeftPaneEntry::Query(q) => {
+                    let kind_badge = if q.kind == "pull_request" {
+                        " PR "
+                    } else {
+                        " IS "
+                    };
+                    let mut spans = vec![Span::raw(format!("{kind_badge} {}", q.label))];
+                    if let Some(badge) = badge {
+                        spans.push(badge);
+                    }
+                    ListItem::new(Line::from(spans))
+                }
+                LeftPaneEntry::FilterStream(fs) => {
+                    let mut spans = vec![Span::styled(
+                        format!("   ↳ {}", fs.name),
+                        Style::default().fg(Color::Gray),
+                    )];
+                    if let Some(badge) = badge {
+                        spans.push(badge);
+                    }
+                    ListItem::new(Line::from(spans))
+                }
             }
         })
         .collect();
@@ -149,18 +169,23 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
             let title_spans =
                 filter_query.highlight_spans(&item.title, match_normal, match_highlight);
 
-            // Line 1: state●  kind⎇  #number  title
-            let mut line1_spans = vec![
+            // Line 1: new●  state●  kind⎇  #number  title
+            let mut line1_spans = vec![if item.is_new {
+                Span::styled("● ", Style::default().fg(Color::Yellow))
+            } else {
+                Span::raw("  ")
+            }];
+            line1_spans.extend([
                 Span::styled(state_badge, state_style),
                 Span::raw(" "),
                 Span::styled(kind_icon, Style::default().fg(Color::Cyan)),
                 Span::raw(format!(" #{} ", item.number)),
-            ];
+            ]);
             line1_spans.extend(title_spans);
 
             // Line 2: (indent)  repo  ·  updated_at
             let line2 = Line::from(vec![
-                Span::raw("      "),
+                Span::raw("        "),
                 Span::styled(repo, Style::default().fg(Color::Gray)),
                 Span::styled("  ·  ", Style::default().fg(Color::Gray)),
                 Span::styled(updated, Style::default().fg(Color::Gray)),
@@ -919,7 +944,8 @@ fn draw_comments_popup(f: &mut Frame, app: &App, area: Rect) {
         if app.comments_sort_desc {
             ordered.reverse();
         }
-        let lines = build_comment_lines(&ordered, chunks[0].width as usize, app.comments_show_hidden);
+        let lines =
+            build_comment_lines(&ordered, chunks[0].width as usize, app.comments_show_hidden);
         let total = lines.len();
         // Clamp scroll
         let max_scroll = total.saturating_sub(chunks[0].height as usize);
@@ -932,7 +958,11 @@ fn draw_comments_popup(f: &mut Frame, app: &App, area: Rect) {
 
         // Status / hint bar
         let hidden_count = app.comments.iter().filter(|c| c.is_minimized).count();
-        let sort_label = if app.comments_sort_desc { "newest↑" } else { "oldest↑" };
+        let sort_label = if app.comments_sort_desc {
+            "newest↑"
+        } else {
+            "oldest↑"
+        };
         let hidden_toggle = if hidden_count > 0 {
             if app.comments_show_hidden {
                 format!("h:hide({hidden_count})")
@@ -948,11 +978,21 @@ fn draw_comments_popup(f: &mut Frame, app: &App, area: Rect) {
             String::new()
         };
         let hint = Paragraph::new(Line::from(vec![
-            Span::styled("Esc/q:close  j/k:scroll  g/G:top/bottom  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("s:{sort_label}  "), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "Esc/q:close  j/k:scroll  g/G:top/bottom  ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("s:{sort_label}  "),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::styled(hidden_toggle, Style::default().fg(Color::Yellow)),
             Span::styled(
-                if scroll_info.is_empty() { String::new() } else { format!("  {scroll_info}") },
+                if scroll_info.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {scroll_info}")
+                },
                 Style::default().fg(Color::DarkGray),
             ),
         ]))
@@ -961,7 +1001,11 @@ fn draw_comments_popup(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn build_comment_lines<'a>(comments: &[&'a CommentEntry], width: usize, show_hidden: bool) -> Vec<Line<'a>> {
+fn build_comment_lines<'a>(
+    comments: &[&'a CommentEntry],
+    width: usize,
+    show_hidden: bool,
+) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
     let sep_width = width.max(4) - 4; // account for block padding
     let mut first = true;
@@ -977,15 +1021,14 @@ fn build_comment_lines<'a>(comments: &[&'a CommentEntry], width: usize, show_hid
 
         if c.is_minimized && !show_hidden {
             // Collapsed stub
-            let reason = c
-                .minimized_reason
-                .as_deref()
-                .unwrap_or("hidden");
+            let reason = c.minimized_reason.as_deref().unwrap_or("hidden");
             lines.push(Line::from(vec![
                 Span::styled("▸ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("@{}", c.author),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 ),
                 Span::styled(
                     format!("  [hidden: {reason}]  — press h to expand"),
@@ -995,12 +1038,15 @@ fn build_comment_lines<'a>(comments: &[&'a CommentEntry], width: usize, show_hid
         } else {
             // Full comment
             let hidden_prefix = if c.is_minimized {
-                vec![
-                    Line::from(Span::styled(
-                        format!("  ⚠ This comment was hidden ({})", c.minimized_reason.as_deref().unwrap_or("hidden")),
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
-                    )),
-                ]
+                vec![Line::from(Span::styled(
+                    format!(
+                        "  ⚠ This comment was hidden ({})",
+                        c.minimized_reason.as_deref().unwrap_or("hidden")
+                    ),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::ITALIC),
+                ))]
             } else {
                 vec![]
             };
@@ -1010,7 +1056,9 @@ fn build_comment_lines<'a>(comments: &[&'a CommentEntry], width: usize, show_hid
                 Span::styled("▌ ", Style::default().fg(Color::Yellow)),
                 Span::styled(
                     format!("@{}", c.author),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     if c.created_at.is_empty() {

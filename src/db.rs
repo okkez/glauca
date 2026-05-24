@@ -24,12 +24,13 @@ pub struct QueryRecord {
     pub kind: String,
     /// Optional display name. If None, the query string is used as the label.
     pub name: Option<String>,
+    pub last_viewed_at: Option<String>,
 }
 
 /// List all saved queries ordered by position.
 pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>> {
     let rows = sqlx::query!(
-        "SELECT id, query, kind, name FROM queries ORDER BY position ASC, created_at ASC"
+        "SELECT id, query, kind, name, last_viewed_at FROM queries ORDER BY position ASC, created_at ASC"
     )
     .fetch_all(pool)
     .await?;
@@ -40,6 +41,7 @@ pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>> {
             query: r.query,
             kind: r.kind,
             name: r.name,
+            last_viewed_at: r.last_viewed_at,
         })
         .collect())
 }
@@ -51,6 +53,7 @@ pub struct FilterStreamRecord {
     pub parent_id: i64,
     pub name: String,
     pub filter: String,
+    pub last_viewed_at: Option<String>,
 }
 
 /// List filter streams for a given parent query, ordered by position.
@@ -59,7 +62,7 @@ pub async fn list_filter_streams(
     parent_id: i64,
 ) -> Result<Vec<FilterStreamRecord>> {
     let rows = sqlx::query!(
-        "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
+        "SELECT id, parent_id, name, filter, last_viewed_at FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
         parent_id,
     )
     .fetch_all(pool)
@@ -71,6 +74,7 @@ pub async fn list_filter_streams(
             parent_id: r.parent_id,
             name: r.name,
             filter: r.filter,
+            last_viewed_at: r.last_viewed_at,
         })
         .collect())
 }
@@ -232,6 +236,44 @@ pub async fn mark_fetched(pool: &SqlitePool, query_id: i64) -> Result<()> {
     Ok(())
 }
 
+pub async fn mark_query_viewed(pool: &SqlitePool, query_id: i64) -> Result<()> {
+    sqlx::query!(
+        "UPDATE queries SET last_viewed_at = datetime('now') WHERE id = ?",
+        query_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_filter_stream_viewed(pool: &SqlitePool, stream_id: i64) -> Result<()> {
+    sqlx::query!(
+        "UPDATE filter_streams SET last_viewed_at = datetime('now') WHERE id = ?",
+        stream_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn count_new_items(pool: &SqlitePool, query_id: i64, since: Option<&str>) -> Result<i64> {
+    let count: i64 = if let Some(since) = since {
+        sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM items WHERE query_id = ? AND cached_at > ?",
+            query_id,
+            since,
+        )
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_scalar!("SELECT COUNT(*) FROM items WHERE query_id = ?", query_id)
+            .fetch_one(pool)
+            .await?
+    };
+    Ok(count)
+}
+
 pub struct CachedItem {
     pub query_id: i64,
     pub kind: String,
@@ -255,6 +297,7 @@ pub struct CachedItem {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
+    pub cached_at: String,
 }
 
 /// Insert or replace a cached item for a query.
@@ -324,7 +367,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
         SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,
                state, updated_at, labels, comment_count, requested_reviewers, reviews,
                body, assignees, is_draft, created_at_item, base_ref, head_ref,
-               review_decision, milestone
+               review_decision, milestone, cached_at
         FROM items
         WHERE query_id = ?
         ORDER BY updated_at DESC
@@ -359,6 +402,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
             head_ref: r.head_ref,
             review_decision: r.review_decision,
             milestone: r.milestone,
+            cached_at: r.cached_at,
         })
         .collect())
 }
@@ -428,6 +472,7 @@ mod tests {
             head_ref: None,
             review_decision: None,
             milestone: None,
+            cached_at: "2026-05-22 00:00:00".into(),
         }
     }
 
@@ -530,6 +575,7 @@ mod tests {
             head_ref: None,
             review_decision: None,
             milestone: None,
+            cached_at: "2026-05-22 00:00:00".into(),
         };
         upsert_item(&pool, &item).await.expect("upsert item");
 
