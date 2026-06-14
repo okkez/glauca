@@ -24,11 +24,11 @@ use glauca_core::types::{CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, Mer
 use glauca_core::{db, github};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::text::markdown;
-use gpui_component::{h_flex, v_flex, ActiveTheme, Root, StyledExt, WindowExt};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Root, Sizable, StyledExt, WindowExt};
 use smol::Timer;
 use tokio::sync::mpsc::Sender;
 
@@ -1389,7 +1389,8 @@ impl GlaucaApp {
 
         // Empty area below the entries: right-click → New query. Kept as its own
         // flex_1 element so a right-click on a row hits the row handler, not this.
-        col.child(
+        // It also pushes the status footer below to the bottom of the pane.
+        col = col.child(
             div()
                 .id("left-empty")
                 .flex_1()
@@ -1400,7 +1401,41 @@ impl GlaucaApp {
                         this.open_menu(ev.position, MenuKind::NewQueryOnly, window, cx);
                     }),
                 ),
-        )
+        );
+
+        // Status footer (was the single-line top header): connection, sync state,
+        // and the latest status message, stacked over multiple wrapping lines.
+        let user = match &self.current_user {
+            Some(u) => format!("connected as {u}"),
+            None => "not authenticated".to_string(),
+        };
+        let mut sync_bits = Vec::new();
+        if self.syncing {
+            sync_bits.push("syncing…".to_string());
+        }
+        if self.bg_sync_pending > 0 {
+            sync_bits.push(format!("{} bg", self.bg_sync_pending));
+        }
+
+        let mut footer = v_flex()
+            .w_full()
+            .flex_shrink_0()
+            .px_3()
+            .py_2()
+            .gap_0p5()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(SharedString::from(user));
+        if !sync_bits.is_empty() {
+            footer = footer.child(SharedString::from(sync_bits.join("  ")));
+        }
+        if let Some(s) = &self.status {
+            footer = footer.child(SharedString::from(s.clone()));
+        }
+
+        col.child(footer)
     }
 
     fn render_items(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1892,28 +1927,136 @@ fn highlight_title(title: &str, range: Option<(usize, usize)>, cx: &App) -> impl
     }
 }
 
+/// Rows shown in the Help → Keyboard shortcuts dialog (`key`, `description`). An
+/// empty description marks a section-header row. Kept in sync by hand with the
+/// `KeyBinding::new(...)` table registered in `main()`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("j / k  ·  ↓ / ↑", "Move cursor down / up"),
+    ("h / l  ·  ← / →", "Focus previous / next pane"),
+    ("Enter", "Activate (commit selection / item action menu)"),
+    ("/", "Focus the filter input"),
+    ("Esc", "Cancel / close overlay / leave filter"),
+    ("n", "New query"),
+    ("f", "New filter stream"),
+    ("e", "Edit selected entry"),
+    ("d", "Delete selected entry"),
+    ("Shift+J / Shift+K", "Reorder selected entry down / up"),
+    ("o", "Open selected item in browser"),
+    ("c", "View comments for selected item"),
+    ("q", "Quit"),
+    ("Comments overlay", ""),
+    ("j / k  ·  ↓ / ↑", "Scroll comments"),
+    ("g / Shift+G", "Jump to top / bottom"),
+    ("s", "Toggle sort order"),
+    ("h", "Show / hide minimized comments"),
+    ("q / Esc", "Close comments"),
+];
+
+impl GlaucaApp {
+    /// Top dropdown menu bar. Deliberately minimal — item/entry actions stay on the
+    /// keyboard and right-click menus, not here. Only app-level commands: a Glauca
+    /// (app) menu and a Help menu.
+    fn render_menu_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = cx.entity();
+
+        // Glauca (app) menu: re-sync the selected query, then quit.
+        let glauca_app = app.clone();
+        let glauca_menu = Button::new("menu-glauca")
+            .small()
+            .ghost()
+            .label("Glauca")
+            .dropdown_menu(move |menu, _w, _cx| {
+                let mut menu = app_menu_item(menu, &glauca_app, "Sync now", |this, _w, cx| {
+                    this.select_current_entry(true);
+                    cx.notify();
+                });
+                menu = menu.separator();
+                app_menu_item(menu, &glauca_app, "Quit", |this, w, cx| this.on_quit(&Quit, w, cx))
+            });
+
+        // Help menu: About (version) and a keyboard-shortcuts reference.
+        let help_app = app.clone();
+        let help_menu = Button::new("menu-help")
+            .small()
+            .ghost()
+            .label("Help")
+            .dropdown_menu(move |menu, _w, _cx| {
+                let mut menu = app_menu_item(menu, &help_app, "About", |this, w, cx| {
+                    this.open_about_dialog(w, cx)
+                });
+                menu = app_menu_item(menu, &help_app, "Keyboard shortcuts", |this, w, cx| {
+                    this.open_shortcuts_dialog(w, cx)
+                });
+                menu
+            });
+
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(glauca_menu)
+            .child(help_menu)
+    }
+
+    /// Help → About: a small informational dialog with the app version. Uses the
+    /// same `window.open_dialog` pattern as `open_query_form`; the default OK button
+    /// dismisses it.
+    fn open_about_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.open_dialog(cx, move |dlg, _w, _cx| {
+            dlg.title("About Glauca").w(px(360.)).content(move |content, _w, _cx| {
+                content
+                    .gap_1()
+                    .text_sm()
+                    .child(SharedString::from(format!(
+                        "glauca-gui {}",
+                        env!("CARGO_PKG_VERSION")
+                    )))
+                    .child(SharedString::from("GitHub PR/issue triage for the terminal."))
+            })
+        });
+    }
+
+    /// Help → Keyboard shortcuts: a read-only two-column list of the key bindings.
+    fn open_shortcuts_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.open_dialog(cx, move |dlg, _w, _cx| {
+            dlg.title("Keyboard shortcuts").w(px(480.)).content(move |content, _w, _cx| {
+                let mut list = content.gap_1().text_sm();
+                for (key, desc) in SHORTCUTS {
+                    if desc.is_empty() {
+                        // Section header.
+                        list = list.child(
+                            div()
+                                .pt_2()
+                                .font_bold()
+                                .child(SharedString::from(*key)),
+                        );
+                    } else {
+                        list = list.child(
+                            h_flex()
+                                .w_full()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .w(px(160.))
+                                        .child(SharedString::from(*key)),
+                                )
+                                .child(div().flex_1().min_w_0().child(SharedString::from(*desc))),
+                        );
+                    }
+                }
+                list
+            })
+        });
+    }
+}
+
 impl Render for GlaucaApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let user = match &self.current_user {
-            Some(u) => format!("connected as {u}"),
-            None => "not authenticated".to_string(),
-        };
-        let mut status_bits = Vec::new();
-        if self.syncing {
-            status_bits.push("syncing…".to_string());
-        }
-        if self.bg_sync_pending > 0 {
-            status_bits.push(format!("{} bg", self.bg_sync_pending));
-        }
-        if let Some(s) = &self.status {
-            status_bits.push(s.clone());
-        }
-        let header = if status_bits.is_empty() {
-            user
-        } else {
-            format!("{user}  ·  {}", status_bits.join("  ·  "))
-        };
-
         v_flex()
             .id("glauca-root")
             .key_context(GLAUCA_CONTEXT)
@@ -1949,18 +2092,7 @@ impl Render for GlaucaApp {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(
-                div()
-                    .w_full()
-                    .flex_shrink_0()
-                    .px_4()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(header)),
-            )
+            .child(self.render_menu_bar(cx))
             .child(
                 h_flex()
                     .w_full()
