@@ -1,4 +1,3 @@
-use crate::{db, github};
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
@@ -12,23 +11,17 @@ use std::{
     io,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc;
 
 pub mod ui;
 
-use glauca_core::engine::{
-    AppMessage, CACHE_STALE_SECS, SyncJob, execute_approve, execute_comment, execute_merge,
-    execute_open_browser, fetch_comments_task, load_items_task, refresh_timer_task,
-    spawn_mark_entry_viewed, sync_task, sync_worker_task,
-};
+use glauca_core::engine::{AppMessage, Engine, EngineCommand};
 use glauca_core::filter::FilterQuery;
-use glauca_core::logic::{cached_item_to_item_entry, group_range, is_item_new_since, move_group_down};
+use glauca_core::logic::{group_range, is_item_new_since, move_group_down};
 
 // ── Display/domain types ─────────────────────────────────────────────────────
 // Moved to glauca-core::types (framework 非依存)。TUI からは従来名で使えるよう re-export。
 pub use glauca_core::types::{
-    CommentEntry, FilterStreamEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy,
-    QueryEntry,
+    CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
 
 // ── Application state ────────────────────────────────────────────────────────
@@ -719,6 +712,51 @@ fn prepare_selected_entry_load(app: &mut App) -> Option<SelectedEntryLoad> {
 
 // `spawn_mark_entry_viewed` は glauca_core::engine へ移設（A6）。
 
+/// Issue the engine commands to (re)load the currently selected entry: load cached
+/// items, mark it viewed, and—for root queries—sync. With `always_sync`, sync
+/// unconditionally (and show the indicator immediately); otherwise sync only if the
+/// cache is stale. Returns the root query id when a query (not a filter stream) was
+/// selected, so the caller can skip it from the background-refresh sweep.
+async fn select_current_entry(app: &mut App, engine: &Engine, always_sync: bool) -> Option<i64> {
+    let load = prepare_selected_entry_load(app)?;
+    engine
+        .send(EngineCommand::LoadCached {
+            query_id: load.root_id,
+            highlight_since: load.highlight_since.clone(),
+        })
+        .await;
+    engine
+        .send(EngineCommand::MarkEntryViewed {
+            entry_id: load.entry_id,
+            is_filter_stream: load.is_filter_stream,
+            viewed_at: load.viewed_at.clone(),
+        })
+        .await;
+    if load.is_filter_stream {
+        return None;
+    }
+    let query_str = load.query_str.clone().unwrap_or_default();
+    if always_sync {
+        engine
+            .send(EngineCommand::Sync {
+                query_id: load.root_id,
+                query_str,
+                highlight_since: load.highlight_since,
+            })
+            .await;
+        app.syncing = true;
+    } else {
+        engine
+            .send(EngineCommand::SyncIfStale {
+                query_id: load.root_id,
+                query_str,
+                highlight_since: load.highlight_since,
+            })
+            .await;
+    }
+    Some(load.root_id)
+}
+
 // ── Main run loop ─────────────────────────────────────────────────────────────
 
 pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
@@ -749,72 +787,24 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    // Build hierarchical left-pane entries: root queries interleaved with their filter streams.
-    let query_rows = db::list_queries(&pool).await.unwrap_or_default();
-    let mut entries: Vec<LeftPaneEntry> = Vec::new();
-    for r in query_rows {
-        let streams = db::list_filter_streams(&pool, r.id)
-            .await
-            .unwrap_or_default();
-        let kind = r.kind.clone();
-        let label = r.name.clone().unwrap_or_else(|| r.query.clone());
-        entries.push(LeftPaneEntry::Query(QueryEntry {
-            id: r.id,
-            label,
-            query_str: r.query.clone(),
-            kind: kind.clone(),
-            last_viewed_at: r.last_viewed_at,
-        }));
-        for s in streams {
-            entries.push(LeftPaneEntry::FilterStream(FilterStreamEntry {
-                id: s.id,
-                parent_id: s.parent_id,
-                name: s.name,
-                filter: s.filter,
-                kind: kind.clone(),
-                last_viewed_at: s.last_viewed_at,
-            }));
-        }
-    }
+    // Start the async engine: builds the left-pane entries, resolves the current
+    // user, and spawns the background worker / refresh timer / command loop.
+    let (mut engine, init) = Engine::start(pool, gh).await?;
 
-    let (tx, mut rx) = mpsc::channel::<AppMessage>(32);
-    let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
-
-    // Spawn the sequential background sync worker.
-    tokio::spawn(sync_worker_task(
-        pool.clone(),
-        gh.clone(),
-        sync_job_rx,
-        tx.clone(),
-    ));
-    // Spawn the periodic refresh timer (fires every BG_SYNC_INTERVAL_SECS).
-    tokio::spawn(refresh_timer_task(
-        pool.clone(),
-        sync_job_tx.clone(),
-        tx.clone(),
-    ));
-
-    // Build App from QueryEntry list (filter streams handled via entries above)
-    let queries: Vec<QueryEntry> = entries
+    // Build App from the engine's initial entries (filter streams interleaved).
+    let queries: Vec<QueryEntry> = init
+        .entries
         .iter()
-        .filter_map(|e| {
-            if let LeftPaneEntry::Query(q) = e {
-                Some(QueryEntry {
-                    id: q.id,
-                    label: q.label.clone(),
-                    query_str: q.query_str.clone(),
-                    kind: q.kind.clone(),
-                    last_viewed_at: q.last_viewed_at.clone(),
-                })
-            } else {
-                None
-            }
+        .filter_map(|e| match e {
+            LeftPaneEntry::Query(q) => Some(q.clone()),
+            LeftPaneEntry::FilterStream(_) => None,
         })
         .collect();
     let mut app = App::new(queries);
-    app.entries = entries;
-    app.current_user = github::get_current_user(&gh).await;
+    app.entries = init.entries;
+    app.current_user = init.current_user;
 
+    // Prime unread counts for every root query via a cached load (no sync).
     let root_query_ids: Vec<i64> = app
         .entries
         .iter()
@@ -823,91 +813,24 @@ where
             LeftPaneEntry::FilterStream(_) => None,
         })
         .collect();
-    for query_id in root_query_ids {
-        if let Ok(items) = db::fetch_items(&pool, query_id).await {
-            let items = items
-                .into_iter()
-                .map(|item| cached_item_to_item_entry(item, None))
-                .collect::<Vec<_>>();
-            app.recompute_unread_counts_for_query(query_id, &items);
-        }
+    for query_id in &root_query_ids {
+        engine
+            .send(EngineCommand::LoadCached {
+                query_id: *query_id,
+                highlight_since: None,
+            })
+            .await;
     }
-
-    // Helper: spawn cache load + GitHub sync for a root query
-    let spawn_load_and_sync = |pool: SqlitePool,
-                               gh: Octocrab,
-                               query_id: i64,
-                               query_str: String,
-                               last_viewed_at: Option<String>,
-                               tx: mpsc::Sender<AppMessage>| {
-        tokio::spawn(load_items_task(
-            pool.clone(),
-            query_id,
-            last_viewed_at.clone(),
-            tx.clone(),
-        ));
-        tokio::spawn(sync_task(pool, gh, query_id, query_str, last_viewed_at, tx));
-    };
 
     // Load items for the initially selected entry; sync only if the cache is stale.
-    let mut initially_synced_id: Option<i64> = None;
-    if let Some(load) = prepare_selected_entry_load(&mut app) {
-        tokio::spawn(load_items_task(
-            pool.clone(),
-            load.root_id,
-            load.highlight_since.clone(),
-            tx.clone(),
-        ));
-        spawn_mark_entry_viewed(
-            pool.clone(),
-            load.entry_id,
-            load.is_filter_stream,
-            load.viewed_at.clone(),
-            tx.clone(),
-        );
-        if !load.is_filter_stream {
-            if db::is_cache_stale(&pool, load.root_id, CACHE_STALE_SECS)
-                .await
-                .unwrap_or(true)
-            {
-                tokio::spawn(sync_task(
-                    pool.clone(),
-                    gh.clone(),
-                    load.root_id,
-                    load.query_str.clone().unwrap_or_default(),
-                    load.highlight_since.clone(),
-                    tx.clone(),
-                ));
-                app.syncing = true;
-            }
-            initially_synced_id = Some(load.root_id);
-        }
-    }
+    let initially_synced_id = select_current_entry(&mut app, &engine, false).await;
 
     // Enqueue all other stale queries for immediate background refresh.
-    {
-        let mut bg_count = 0usize;
-        for entry in &app.entries {
-            if let LeftPaneEntry::Query(q) = entry {
-                if Some(q.id) == initially_synced_id {
-                    continue; // already being synced manually
-                }
-                if db::is_cache_stale(&pool, q.id, CACHE_STALE_SECS)
-                    .await
-                    .unwrap_or(true)
-                {
-                    let _ = sync_job_tx
-                        .send(SyncJob {
-                            query_id: q.id,
-                            query_str: q.query_str.clone(),
-                        })
-                        .await;
-                    bg_count += 1;
-                }
-            }
-        }
-        app.bg_sync_pending = bg_count;
-    }
+    engine
+        .send(EngineCommand::EnqueueStale {
+            skip_query_id: initially_synced_id,
+        })
+        .await;
 
     let mut events = EventStream::new();
 
@@ -917,179 +840,106 @@ where
         tokio::select! {
             Some(Ok(event)) = events.next() => {
                 if let Event::Key(key) = event {
-                    // 'd' in query list → delete selected entry
+                    // 'd' in query list → delete selected entry (UI updates on the
+                    // QueryDeleted / FilterStreamDeleted message once the DB op succeeds).
                     if key.code == KeyCode::Char('d')
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
                     {
-                        if let Some(entry) = app.entries.get(app.entry_cursor) {
-                            match entry {
-                                LeftPaneEntry::Query(q) => {
-                                    let qid = q.id;
-                                    if db::delete_query(&pool, qid).await.is_ok() {
-                                        // Remove all entries for this root query and its streams
-                                        app.entries.retain(|e| {
-                                            e.root_query_id() != qid
-                                        });
-                                        app.entry_cursor = app
-                                            .entry_cursor
-                                            .min(app.entries.len().saturating_sub(1));
-                                        app.items.clear();
-                                        app.item_cursor = 0;
-                                        app.filter.clear();
-                                        app.stream_filter = None;
-                                        if let Some(load) = prepare_selected_entry_load(&mut app) {
-                                            if !load.is_filter_stream {
-                                                spawn_load_and_sync(
-                                                    pool.clone(),
-                                                    gh.clone(),
-                                                    load.root_id,
-                                                    load.query_str.clone().unwrap_or_default(),
-                                                    load.highlight_since.clone(),
-                                                    tx.clone(),
-                                                );
-                                                app.syncing = true;
-                                            } else {
-                                                tokio::spawn(load_items_task(
-                                                    pool.clone(),
-                                                    load.root_id,
-                                                    load.highlight_since.clone(),
-                                                    tx.clone(),
-                                                ));
-                                            }
-                                            spawn_mark_entry_viewed(
-                                                pool.clone(),
-                                                load.entry_id,
-                                                load.is_filter_stream,
-                                                load.viewed_at.clone(),
-                                                tx.clone(),
-                                            );
-                                        }
-                                    }
-                                }
-                                LeftPaneEntry::FilterStream(fs) => {
-                                    let fid = fs.id;
-                                    if db::delete_filter_stream(&pool, fid).await.is_ok() {
-                                        app.entries.retain(|e| e.id() != fid);
-                                        app.entry_cursor = app
-                                            .entry_cursor
-                                            .min(app.entries.len().saturating_sub(1));
-                                        app.items.clear();
-                                        app.item_cursor = 0;
-                                        app.filter.clear();
-                                        app.stream_filter = None;
-                                        if let Some(load) = prepare_selected_entry_load(&mut app) {
-                                            tokio::spawn(load_items_task(
-                                                pool.clone(),
-                                                load.root_id,
-                                                load.highlight_since.clone(),
-                                                tx.clone(),
-                                            ));
-                                            spawn_mark_entry_viewed(
-                                                pool.clone(),
-                                                load.entry_id,
-                                                load.is_filter_stream,
-                                                load.viewed_at.clone(),
-                                                tx.clone(),
-                                            );
-                                        }
-                                    }
-                                }
+                        let cmd = match app.entries.get(app.entry_cursor) {
+                            Some(LeftPaneEntry::Query(q)) => {
+                                Some(EngineCommand::DeleteQuery { query_id: q.id })
                             }
+                            Some(LeftPaneEntry::FilterStream(fs)) => {
+                                Some(EngineCommand::DeleteFilterStream { id: fs.id })
+                            }
+                            None => None,
+                        };
+                        if let Some(cmd) = cmd {
+                            engine.send(cmd).await;
                         }
                         continue;
                     }
 
-                    // J/K: move selected entry up/down within its group
+                    // J/K: move selected entry up/down within its group. The DB swap
+                    // runs through the engine; the entries vec is reordered on the
+                    // QueriesSwapped / FilterStreamsSwapped confirmation message.
                     if (key.code == KeyCode::Char('J') || key.code == KeyCode::Char('K'))
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
                     {
                         let cursor = app.entry_cursor;
-                        match app.entries.get(cursor).cloned() {
+                        let down = key.code == KeyCode::Char('J');
+                        let cmd = match app.entries.get(cursor) {
                             Some(LeftPaneEntry::Query(q)) => {
                                 let current_id = q.id;
-                                if key.code == KeyCode::Char('J') {
+                                if down {
                                     let next_query_idx = group_range(&app.entries, cursor).end;
-                                    if let Some(LeftPaneEntry::Query(nq)) =
-                                        app.entries.get(next_query_idx)
-                                    {
-                                        let next_id = nq.id;
-                                        if db::swap_query_positions(&pool, current_id, next_id)
-                                            .await
-                                            .is_ok()
-                                        {
-                                            if let Some(new_cursor) =
-                                                move_group_down(&mut app.entries, cursor)
-                                            {
-                                                app.entry_cursor = new_cursor;
-                                            }
+                                    match app.entries.get(next_query_idx) {
+                                        Some(LeftPaneEntry::Query(nq)) => {
+                                            Some(EngineCommand::SwapQueryPositions {
+                                                upper_id: current_id,
+                                                lower_id: nq.id,
+                                                active_id: current_id,
+                                            })
                                         }
+                                        _ => None,
                                     }
                                 } else {
-                                    if let Some(prev_query_idx) = app.entries[..cursor]
+                                    app.entries[..cursor]
                                         .iter()
                                         .rposition(|e| matches!(e, LeftPaneEntry::Query(_)))
-                                    {
-                                        if let LeftPaneEntry::Query(pq) =
-                                            &app.entries[prev_query_idx]
-                                        {
-                                            let prev_id = pq.id;
-                                            if db::swap_query_positions(
-                                                &pool, prev_id, current_id,
-                                            )
-                                            .await
-                                            .is_ok()
-                                            {
-                                                move_group_down(&mut app.entries, prev_query_idx);
-                                                app.entry_cursor = prev_query_idx;
+                                        .and_then(|prev_idx| match &app.entries[prev_idx] {
+                                            LeftPaneEntry::Query(pq) => {
+                                                Some(EngineCommand::SwapQueryPositions {
+                                                    upper_id: pq.id,
+                                                    lower_id: current_id,
+                                                    active_id: current_id,
+                                                })
                                             }
-                                        }
-                                    }
+                                            _ => None,
+                                        })
                                 }
                             }
                             Some(LeftPaneEntry::FilterStream(fs)) => {
                                 let fs_id = fs.id;
                                 let parent_id = fs.parent_id;
-                                if key.code == KeyCode::Char('J') {
+                                if down {
                                     // Swap with next sibling (same parent, immediately after).
-                                    if let Some(LeftPaneEntry::FilterStream(next)) =
-                                        app.entries.get(cursor + 1)
-                                    {
-                                        if next.parent_id == parent_id {
-                                            let next_id = next.id;
-                                            if db::swap_filter_stream_positions(
-                                                &pool, fs_id, next_id,
-                                            )
-                                            .await
-                                            .is_ok()
-                                            {
-                                                app.entries.swap(cursor, cursor + 1);
-                                                app.entry_cursor += 1;
-                                            }
+                                    match app.entries.get(cursor + 1) {
+                                        Some(LeftPaneEntry::FilterStream(next))
+                                            if next.parent_id == parent_id =>
+                                        {
+                                            Some(EngineCommand::SwapFilterStreamPositions {
+                                                upper_id: fs_id,
+                                                lower_id: next.id,
+                                                active_id: fs_id,
+                                            })
                                         }
+                                        _ => None,
                                     }
                                 } else if cursor > 0 {
                                     // Swap with previous sibling (same parent, immediately before).
-                                    if let Some(LeftPaneEntry::FilterStream(prev)) =
-                                        app.entries.get(cursor - 1)
-                                    {
-                                        if prev.parent_id == parent_id {
-                                            let prev_id = prev.id;
-                                            if db::swap_filter_stream_positions(
-                                                &pool, prev_id, fs_id,
-                                            )
-                                            .await
-                                            .is_ok()
-                                            {
-                                                app.entries.swap(cursor - 1, cursor);
-                                                app.entry_cursor -= 1;
-                                            }
+                                    match app.entries.get(cursor - 1) {
+                                        Some(LeftPaneEntry::FilterStream(prev))
+                                            if prev.parent_id == parent_id =>
+                                        {
+                                            Some(EngineCommand::SwapFilterStreamPositions {
+                                                upper_id: prev.id,
+                                                lower_id: fs_id,
+                                                active_id: fs_id,
+                                            })
                                         }
+                                        _ => None,
                                     }
+                                } else {
+                                    None
                                 }
                             }
-                            _ => {}
+                            None => None,
+                        };
+                        if let Some(cmd) = cmd {
+                            engine.send(cmd).await;
                         }
                         continue;
                     }
@@ -1102,33 +952,7 @@ where
                             app.item_cursor = 0;
                             app.detail_scroll = 0;
                             app.items.clear();
-                            if let Some(load) = prepare_selected_entry_load(&mut app) {
-                                if !load.is_filter_stream {
-                                    spawn_load_and_sync(
-                                        pool.clone(),
-                                        gh.clone(),
-                                        load.root_id,
-                                        load.query_str.clone().unwrap_or_default(),
-                                        load.highlight_since.clone(),
-                                        tx.clone(),
-                                    );
-                                    app.syncing = true;
-                                } else {
-                                    tokio::spawn(load_items_task(
-                                        pool.clone(),
-                                        load.root_id,
-                                        load.highlight_since.clone(),
-                                        tx.clone(),
-                                    ));
-                                }
-                                spawn_mark_entry_viewed(
-                                    pool.clone(),
-                                    load.entry_id,
-                                    load.is_filter_stream,
-                                    load.viewed_at.clone(),
-                                    tx.clone(),
-                                );
-                            }
+                            select_current_entry(&mut app, &engine, true).await;
                         }
                         Action::SaveNewQuery => {
                             let query_str = app.new_query_input.trim().to_string();
@@ -1137,30 +961,17 @@ where
                             app.modal_field = 0;
                             app.new_query_input.clear();
                             app.new_query_name.clear();
-                            let pool_clone = pool.clone();
-                            let tx_clone = tx.clone();
-                            tokio::spawn(async move {
-                                let name_opt = if name_str.is_empty() { None } else { Some(name_str.as_str()) };
-                                let label = if name_str.is_empty() { query_str.clone() } else { name_str.clone() };
-                                match db::upsert_query(&pool_clone, &query_str, "pull_request", name_opt).await {
-                                    Ok(id) => {
-                                        let _ = tx_clone
-                                            .send(AppMessage::QueryAdded(QueryEntry {
-                                                id,
-                                                label,
-                                                query_str,
-                                                kind: "pull_request".into(),
-                                                last_viewed_at: None,
-                                            }))
-                                            .await;
-                                    }
-                                    Err(e) => {
-                                        let _ = tx_clone
-                                            .send(AppMessage::Status(format!("save error: {e}")))
-                                            .await;
-                                    }
-                                }
-                            });
+                            let name = if name_str.is_empty() {
+                                None
+                            } else {
+                                Some(name_str)
+                            };
+                            engine
+                                .send(EngineCommand::AddQuery {
+                                    name,
+                                    query: query_str,
+                                })
+                                .await;
                         }
                         Action::SaveNewFilterStream => {
                             let name = app.new_filter_stream_name.trim().to_string();
@@ -1173,29 +984,14 @@ where
                             if let Some(entry) = app.entries.get(app.entry_cursor) {
                                 let parent_id = entry.root_query_id();
                                 let kind = entry.kind().to_string();
-                                let pool_clone = pool.clone();
-                                let tx_clone = tx.clone();
-                                tokio::spawn(async move {
-                                    match db::upsert_filter_stream(&pool_clone, parent_id, &name, &filter).await {
-                                        Ok(id) => {
-                                            let _ = tx_clone
-                                                .send(AppMessage::FilterStreamAdded(FilterStreamEntry {
-                                                    id,
-                                                    parent_id,
-                                                    name,
-                                                    filter,
-                                                    kind,
-                                                    last_viewed_at: None,
-                                                }))
-                                                .await;
-                                        }
-                                        Err(e) => {
-                                            let _ = tx_clone
-                                                .send(AppMessage::Status(format!("save filter stream error: {e}")))
-                                                .await;
-                                        }
-                                    }
-                                });
+                                engine
+                                    .send(EngineCommand::AddFilterStream {
+                                        parent_id,
+                                        kind,
+                                        name,
+                                        filter,
+                                    })
+                                    .await;
                             }
                         }
                         Action::SaveEditFilterStream => {
@@ -1208,31 +1004,13 @@ where
                             if let Some(LeftPaneEntry::FilterStream(fs)) =
                                 app.entries.get(app.entry_cursor)
                             {
-                                let id = fs.id;
-                                let pool_clone = pool.clone();
-                                let tx_clone = tx.clone();
-                                tokio::spawn(async move {
-                                    match db::update_filter_stream(&pool_clone, id, &name, &filter)
-                                        .await
-                                    {
-                                        Ok(()) => {
-                                            let _ = tx_clone
-                                                .send(AppMessage::FilterStreamUpdated {
-                                                    id,
-                                                    new_name: name,
-                                                    new_filter: filter,
-                                                })
-                                                .await;
-                                        }
-                                        Err(e) => {
-                                            let _ = tx_clone
-                                                .send(AppMessage::Status(format!(
-                                                    "edit filter stream error: {e}"
-                                                )))
-                                                .await;
-                                        }
-                                    }
-                                });
+                                engine
+                                    .send(EngineCommand::EditFilterStream {
+                                        id: fs.id,
+                                        name,
+                                        filter,
+                                    })
+                                    .await;
                             }
                         }
                         Action::SaveEditQuery => {
@@ -1245,43 +1023,19 @@ where
                             if let Some(LeftPaneEntry::Query(q)) =
                                 app.entries.get(app.entry_cursor)
                             {
-                                let id = q.id;
                                 // Empty name means "use query string as label"
                                 let new_name: Option<String> = if name_input.is_empty() {
                                     None
                                 } else {
                                     Some(name_input)
                                 };
-                                let pool_clone = pool.clone();
-                                let tx_clone = tx.clone();
-                                let new_name_clone = new_name.clone();
-                                tokio::spawn(async move {
-                                    match db::update_query(
-                                        &pool_clone,
-                                        id,
-                                        new_name_clone.as_deref(),
-                                        &new_query,
-                                    )
-                                    .await
-                                    {
-                                        Ok(()) => {
-                                            let _ = tx_clone
-                                                .send(AppMessage::QueryUpdated {
-                                                    id,
-                                                    new_name,
-                                                    new_query,
-                                                })
-                                                .await;
-                                        }
-                                        Err(e) => {
-                                            let _ = tx_clone
-                                                .send(AppMessage::Status(format!(
-                                                    "edit query error: {e}"
-                                                )))
-                                                .await;
-                                        }
-                                    }
-                                });
+                                engine
+                                    .send(EngineCommand::EditQuery {
+                                        id: q.id,
+                                        name: new_name,
+                                        query: new_query,
+                                    })
+                                    .await;
                             }
                         }
                         Action::ConfirmAction => {
@@ -1291,20 +1045,11 @@ where
                                     match action {
                                         ItemAction::OpenBrowser => {
                                             app.input_mode = InputMode::Normal;
-                                            let tx_clone = tx.clone();
-                                            let item_clone = item.clone();
-                                            tokio::spawn(async move {
-                                                match execute_open_browser(&item_clone).await {
-                                                    Ok(msg) => {
-                                                        let _ = tx_clone.send(AppMessage::ActionDone(msg)).await;
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = tx_clone
-                                                            .send(AppMessage::ActionError(e.to_string()))
-                                                            .await;
-                                                    }
-                                                }
-                                            });
+                                            engine
+                                                .send(EngineCommand::OpenBrowser {
+                                                    item: item.clone(),
+                                                })
+                                                .await;
                                         }
                                         ItemAction::Comment => {
                                             app.input_mode = InputMode::Normal;
@@ -1314,23 +1059,13 @@ where
 
                                             match editor_result {
                                                 Ok(Some(body)) => {
-                                                    let url = item.url.clone();
-                                                    let kind = item.kind.clone();
-                                                    let tx_clone = tx.clone();
-                                                    tokio::spawn(async move {
-                                                        match execute_comment(&url, &kind, &body).await {
-                                                            Ok(msg) => {
-                                                                let _ = tx_clone
-                                                                    .send(AppMessage::ActionDone(msg))
-                                                                    .await;
-                                                            }
-                                                            Err(e) => {
-                                                                let _ = tx_clone
-                                                                    .send(AppMessage::ActionError(e.to_string()))
-                                                                    .await;
-                                                            }
-                                                        }
-                                                    });
+                                                    engine
+                                                        .send(EngineCommand::Comment {
+                                                            url: item.url.clone(),
+                                                            kind: item.kind.clone(),
+                                                            body,
+                                                        })
+                                                        .await;
                                                 }
                                                 Ok(None) => {
                                                     app.status = Some("Comment cancelled".into());
@@ -1346,21 +1081,13 @@ where
                                             app.comments.clear();
                                             app.comments_loading = true;
                                             app.comments_scroll = 0;
-                                            let owner = item.repo_owner.clone();
-                                            let repo = item.repo_name.clone();
-                                            let number = item.number as u64;
-                                            let gh_clone = gh.clone();
-                                            let tx_clone = tx.clone();
-                                            tokio::spawn(async move {
-                                                match fetch_comments_task(&gh_clone, &owner, &repo, number).await {
-                                                    Ok(comments) => {
-                                                        let _ = tx_clone.send(AppMessage::CommentsLoaded(comments)).await;
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = tx_clone.send(AppMessage::CommentsFailed(e.to_string())).await;
-                                                    }
-                                                }
-                                            });
+                                            engine
+                                                .send(EngineCommand::LoadComments {
+                                                    owner: item.repo_owner.clone(),
+                                                    repo: item.repo_name.clone(),
+                                                    number: item.number as u64,
+                                                })
+                                                .await;
                                         }
                                         ItemAction::ApprovePR => {
                                             app.input_mode = InputMode::Normal;
@@ -1382,22 +1109,12 @@ where
                                                     } else {
                                                         Some(body_final)
                                                     };
-                                                    let url = item.url.clone();
-                                                    let tx_clone = tx.clone();
-                                                    tokio::spawn(async move {
-                                                        match execute_approve(&url, body_final.as_deref()).await {
-                                                            Ok(msg) => {
-                                                                let _ = tx_clone
-                                                                    .send(AppMessage::ActionDone(msg))
-                                                                    .await;
-                                                            }
-                                                            Err(e) => {
-                                                                let _ = tx_clone
-                                                                    .send(AppMessage::ActionError(e.to_string()))
-                                                                    .await;
-                                                            }
-                                                        }
-                                                    });
+                                                    engine
+                                                        .send(EngineCommand::Approve {
+                                                            url: item.url.clone(),
+                                                            body: body_final,
+                                                        })
+                                                        .await;
                                                 }
                                                 Ok(None) => {
                                                     app.status = Some("Approval cancelled".into());
@@ -1420,45 +1137,25 @@ where
                                 let strategies = MergeStrategy::all();
                                 if let Some(strategy) = strategies.get(app.merge_strategy_cursor).cloned() {
                                     app.input_mode = InputMode::Normal;
-                                    let url = item.url.clone();
-                                    let tx_clone = tx.clone();
-                                    tokio::spawn(async move {
-                                        match execute_merge(&url, &strategy).await {
-                                            Ok(msg) => {
-                                                let _ = tx_clone.send(AppMessage::ActionDone(msg)).await;
-                                            }
-                                            Err(e) => {
-                                                let _ = tx_clone
-                                                    .send(AppMessage::ActionError(e.to_string()))
-                                                    .await;
-                                            }
-                                        }
-                                    });
+                                    engine
+                                        .send(EngineCommand::Merge {
+                                            url: item.url.clone(),
+                                            strategy,
+                                        })
+                                        .await;
                                 }
                             }
                         }
                         Action::OpenBrowser => {
                             if let Some(item) = app.selected_item().cloned() {
-                                let tx_clone = tx.clone();
-                                tokio::spawn(async move {
-                                    match execute_open_browser(&item).await {
-                                        Ok(msg) => {
-                                            let _ = tx_clone.send(AppMessage::ActionDone(msg)).await;
-                                        }
-                                        Err(e) => {
-                                            let _ = tx_clone
-                                                .send(AppMessage::ActionError(e.to_string()))
-                                                .await;
-                                        }
-                                    }
-                                });
+                                engine.send(EngineCommand::OpenBrowser { item }).await;
                             }
                         }
                         Action::None => {}
                     }
                 }
             }
-            Some(msg) = rx.recv() => {
+            Some(msg) = engine.recv() => {
                 match msg {
                     AppMessage::ItemsLoaded { query_id, mut items } => {
                         app.recompute_unread_counts_for_query(query_id, &items);
@@ -1477,24 +1174,7 @@ where
                         app.items.clear();
                         app.filter.clear();
                         app.stream_filter = None;
-                        if let Some(load) = prepare_selected_entry_load(&mut app) {
-                            spawn_load_and_sync(
-                                pool.clone(),
-                                gh.clone(),
-                                load.root_id,
-                                load.query_str.clone().unwrap_or_default(),
-                                load.highlight_since.clone(),
-                                tx.clone(),
-                            );
-                            app.syncing = true;
-                            spawn_mark_entry_viewed(
-                                pool.clone(),
-                                load.entry_id,
-                                load.is_filter_stream,
-                                load.viewed_at.clone(),
-                                tx.clone(),
-                            );
-                        }
+                        select_current_entry(&mut app, &engine, true).await;
                     }
                     AppMessage::FilterStreamAdded(fs) => {
                         // Insert the filter stream after the last sibling (or after its parent)
@@ -1510,21 +1190,7 @@ where
                         app.filter.clear();
                         app.item_cursor = 0;
                         app.detail_scroll = 0;
-                        if let Some(load) = prepare_selected_entry_load(&mut app) {
-                            tokio::spawn(load_items_task(
-                                pool.clone(),
-                                load.root_id,
-                                load.highlight_since.clone(),
-                                tx.clone(),
-                            ));
-                            spawn_mark_entry_viewed(
-                                pool.clone(),
-                                load.entry_id,
-                                load.is_filter_stream,
-                                load.viewed_at.clone(),
-                                tx.clone(),
-                            );
-                        }
+                        select_current_entry(&mut app, &engine, true).await;
                     }
                     AppMessage::QueryUpdated { id, new_name, new_query } => {
                         if let Some(LeftPaneEntry::Query(q)) = app
@@ -1541,14 +1207,20 @@ where
                             app.item_cursor = 0;
                             app.detail_scroll = 0;
                             app.filter.clear();
-                            spawn_load_and_sync(
-                                pool.clone(),
-                                gh.clone(),
-                                id,
-                                new_query,
-                                app.active_entry_last_viewed_at.clone(),
-                                tx.clone(),
-                            );
+                            let highlight_since = app.active_entry_last_viewed_at.clone();
+                            engine
+                                .send(EngineCommand::LoadCached {
+                                    query_id: id,
+                                    highlight_since: highlight_since.clone(),
+                                })
+                                .await;
+                            engine
+                                .send(EngineCommand::Sync {
+                                    query_id: id,
+                                    query_str: new_query,
+                                    highlight_since,
+                                })
+                                .await;
                             app.syncing = true;
                         }
                         app.status = Some("Query updated".into());
@@ -1631,6 +1303,64 @@ where
                     AppMessage::BgSyncJobDone => {
                         app.bg_sync_pending = app.bg_sync_pending.saturating_sub(1);
                     }
+                    AppMessage::SyncStarted { query_id } => {
+                        if app.selected_root_query_id() == Some(query_id) {
+                            app.syncing = true;
+                        }
+                    }
+                    AppMessage::QueryDeleted { query_id } => {
+                        // Remove all entries for this root query and its streams.
+                        app.entries.retain(|e| e.root_query_id() != query_id);
+                        app.entry_cursor = app
+                            .entry_cursor
+                            .min(app.entries.len().saturating_sub(1));
+                        app.items.clear();
+                        app.item_cursor = 0;
+                        app.filter.clear();
+                        app.stream_filter = None;
+                        select_current_entry(&mut app, &engine, true).await;
+                    }
+                    AppMessage::FilterStreamDeleted { id } => {
+                        app.entries.retain(|e| e.id() != id);
+                        app.entry_cursor = app
+                            .entry_cursor
+                            .min(app.entries.len().saturating_sub(1));
+                        app.items.clear();
+                        app.item_cursor = 0;
+                        app.filter.clear();
+                        app.stream_filter = None;
+                        select_current_entry(&mut app, &engine, true).await;
+                    }
+                    AppMessage::QueriesSwapped { upper_id, active_id, .. } => {
+                        // Move the upper group down past the next group, then follow the
+                        // active query with the cursor.
+                        if let Some(idx) = app.entries.iter().position(
+                            |e| matches!(e, LeftPaneEntry::Query(q) if q.id == upper_id),
+                        ) {
+                            move_group_down(&mut app.entries, idx);
+                            if let Some(new_cursor) = app.entries.iter().position(
+                                |e| matches!(e, LeftPaneEntry::Query(q) if q.id == active_id),
+                            ) {
+                                app.entry_cursor = new_cursor;
+                            }
+                        }
+                    }
+                    AppMessage::FilterStreamsSwapped { upper_id, lower_id, active_id } => {
+                        let upper_idx = app.entries.iter().position(
+                            |e| matches!(e, LeftPaneEntry::FilterStream(fs) if fs.id == upper_id),
+                        );
+                        let lower_idx = app.entries.iter().position(
+                            |e| matches!(e, LeftPaneEntry::FilterStream(fs) if fs.id == lower_id),
+                        );
+                        if let (Some(u), Some(l)) = (upper_idx, lower_idx) {
+                            app.entries.swap(u, l);
+                            if let Some(new_cursor) =
+                                app.entries.iter().position(|e| e.id() == active_id)
+                            {
+                                app.entry_cursor = new_cursor;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1644,6 +1374,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glauca_core::types::FilterStreamEntry;
 
     fn make_app_with_items(titles: &[&str]) -> App {
         let mut app = App::new(vec![QueryEntry {

@@ -3,7 +3,9 @@
 // ここには pool/gh/mpsc チャネルだけで完結するタスクと、それらが受け渡すメッセージ型を集約する。
 
 use crate::logic::cached_item_to_item_entry;
-use crate::types::{CommentEntry, FilterStreamEntry, ItemEntry, MergeStrategy, QueryEntry};
+use crate::types::{
+    CommentEntry, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
+};
 use crate::{db, github};
 use octocrab::Octocrab;
 use sqlx::SqlitePool;
@@ -50,6 +52,33 @@ pub enum AppMessage {
     BgSyncQueued(usize),
     /// One background sync job finished (success or skip).
     BgSyncJobDone,
+    /// A GitHub sync actually started for `query_id` (drives the syncing indicator
+    /// for paths where the decision is made asynchronously, e.g. sync-if-stale).
+    SyncStarted {
+        query_id: i64,
+    },
+    /// A root query (and its filter streams) was deleted from the DB.
+    QueryDeleted {
+        query_id: i64,
+    },
+    /// A filter stream was deleted from the DB.
+    FilterStreamDeleted {
+        id: i64,
+    },
+    /// Two query groups swapped position in the DB; `active_id` is the query the
+    /// cursor should follow after the front-end reorders its entries.
+    QueriesSwapped {
+        upper_id: i64,
+        lower_id: i64,
+        active_id: i64,
+    },
+    /// Two sibling filter streams swapped position in the DB; `active_id` is the
+    /// filter stream the cursor should follow.
+    FilterStreamsSwapped {
+        upper_id: i64,
+        lower_id: i64,
+        active_id: i64,
+    },
 }
 
 /// A job request sent to the background sync worker.
@@ -411,4 +440,526 @@ pub fn spawn_mark_entry_viewed(
             }
         }
     });
+}
+
+// ── Engine: command-driven async facade ───────────────────────────────────────
+
+/// Initial state produced by `Engine::start`: the left-pane entries (root queries
+/// interleaved with their filter streams) and the authenticated user login.
+pub struct EngineInit {
+    pub entries: Vec<LeftPaneEntry>,
+    pub current_user: Option<String>,
+}
+
+/// Commands the front-end sends to the engine. Each is handled asynchronously and,
+/// where the UI must react, produces an `AppMessage` in return. The front-end owns
+/// UI state (entries vec, cursors); the engine owns all DB/network/spawn work.
+pub enum EngineCommand {
+    /// Load cached items for a root query (no GitHub sync).
+    LoadCached {
+        query_id: i64,
+        highlight_since: Option<String>,
+    },
+    /// Unconditional GitHub sync for a root query.
+    Sync {
+        query_id: i64,
+        query_str: String,
+        highlight_since: Option<String>,
+    },
+    /// GitHub sync only if the query's cache is stale (sends `SyncStarted` if it runs).
+    SyncIfStale {
+        query_id: i64,
+        query_str: String,
+        highlight_since: Option<String>,
+    },
+    MarkEntryViewed {
+        entry_id: i64,
+        is_filter_stream: bool,
+        viewed_at: String,
+    },
+    /// Enqueue all stale queries for background refresh, optionally skipping one
+    /// (the query already being synced manually).
+    EnqueueStale {
+        skip_query_id: Option<i64>,
+    },
+    AddQuery {
+        name: Option<String>,
+        query: String,
+    },
+    AddFilterStream {
+        parent_id: i64,
+        kind: String,
+        name: String,
+        filter: String,
+    },
+    EditQuery {
+        id: i64,
+        name: Option<String>,
+        query: String,
+    },
+    EditFilterStream {
+        id: i64,
+        name: String,
+        filter: String,
+    },
+    DeleteQuery {
+        query_id: i64,
+    },
+    DeleteFilterStream {
+        id: i64,
+    },
+    SwapQueryPositions {
+        upper_id: i64,
+        lower_id: i64,
+        active_id: i64,
+    },
+    SwapFilterStreamPositions {
+        upper_id: i64,
+        lower_id: i64,
+        active_id: i64,
+    },
+    LoadComments {
+        owner: String,
+        repo: String,
+        number: u64,
+    },
+    OpenBrowser {
+        item: ItemEntry,
+    },
+    Comment {
+        url: String,
+        kind: String,
+        body: String,
+    },
+    Approve {
+        url: String,
+        body: Option<String>,
+    },
+    Merge {
+        url: String,
+        strategy: MergeStrategy,
+    },
+}
+
+/// Async engine shared by the TUI and GUI front-ends. Owns the background worker,
+/// refresh timer, and command-handling loop; exposes a command channel in and an
+/// `AppMessage` channel out.
+pub struct Engine {
+    cmd_tx: mpsc::Sender<EngineCommand>,
+    msg_rx: mpsc::Receiver<AppMessage>,
+}
+
+impl Engine {
+    /// Build the initial left-pane entries, resolve the current user, spawn the
+    /// background worker / refresh timer / command loop, and return the engine
+    /// handle plus the initial state.
+    pub async fn start(pool: SqlitePool, gh: Octocrab) -> anyhow::Result<(Engine, EngineInit)> {
+        let query_rows = db::list_queries(&pool).await.unwrap_or_default();
+        let mut entries: Vec<LeftPaneEntry> = Vec::new();
+        for r in query_rows {
+            let streams = db::list_filter_streams(&pool, r.id)
+                .await
+                .unwrap_or_default();
+            let kind = r.kind.clone();
+            let label = r.name.clone().unwrap_or_else(|| r.query.clone());
+            entries.push(LeftPaneEntry::Query(QueryEntry {
+                id: r.id,
+                label,
+                query_str: r.query.clone(),
+                kind: kind.clone(),
+                last_viewed_at: r.last_viewed_at,
+            }));
+            for s in streams {
+                entries.push(LeftPaneEntry::FilterStream(FilterStreamEntry {
+                    id: s.id,
+                    parent_id: s.parent_id,
+                    name: s.name,
+                    filter: s.filter,
+                    kind: kind.clone(),
+                    last_viewed_at: s.last_viewed_at,
+                }));
+            }
+        }
+
+        let current_user = github::get_current_user(&gh).await;
+
+        let (msg_tx, msg_rx) = mpsc::channel::<AppMessage>(32);
+        let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(64);
+
+        // Spawn the sequential background sync worker.
+        tokio::spawn(sync_worker_task(
+            pool.clone(),
+            gh.clone(),
+            sync_job_rx,
+            msg_tx.clone(),
+        ));
+        // Spawn the periodic refresh timer.
+        tokio::spawn(refresh_timer_task(
+            pool.clone(),
+            sync_job_tx.clone(),
+            msg_tx.clone(),
+        ));
+        // Spawn the command-handling loop.
+        tokio::spawn(command_loop(pool, gh, cmd_rx, msg_tx, sync_job_tx));
+
+        Ok((
+            Engine { cmd_tx, msg_rx },
+            EngineInit {
+                entries,
+                current_user,
+            },
+        ))
+    }
+
+    /// Send a command to the engine. Errors (channel closed) are ignored.
+    pub async fn send(&self, cmd: EngineCommand) {
+        let _ = self.cmd_tx.send(cmd).await;
+    }
+
+    /// Await the next message from the engine (TUI/iced style).
+    pub async fn recv(&mut self) -> Option<AppMessage> {
+        self.msg_rx.recv().await
+    }
+
+    /// Non-blocking drain of the next message (GUI per-frame style).
+    pub fn try_recv(&mut self) -> Option<AppMessage> {
+        self.msg_rx.try_recv().ok()
+    }
+}
+
+/// Dispatch `EngineCommand`s, spawning the underlying async tasks so the loop never
+/// blocks on a single command (mirrors the previous in-`run_app` `tokio::spawn` use).
+async fn command_loop(
+    pool: SqlitePool,
+    gh: Octocrab,
+    mut cmd_rx: mpsc::Receiver<EngineCommand>,
+    msg_tx: mpsc::Sender<AppMessage>,
+    sync_tx: mpsc::Sender<SyncJob>,
+) {
+    while let Some(cmd) = cmd_rx.recv().await {
+        match cmd {
+            EngineCommand::LoadCached {
+                query_id,
+                highlight_since,
+            } => {
+                tokio::spawn(load_items_task(
+                    pool.clone(),
+                    query_id,
+                    highlight_since,
+                    msg_tx.clone(),
+                ));
+            }
+            EngineCommand::Sync {
+                query_id,
+                query_str,
+                highlight_since,
+            } => {
+                tokio::spawn(sync_task(
+                    pool.clone(),
+                    gh.clone(),
+                    query_id,
+                    query_str,
+                    highlight_since,
+                    msg_tx.clone(),
+                ));
+            }
+            EngineCommand::SyncIfStale {
+                query_id,
+                query_str,
+                highlight_since,
+            } => {
+                let pool2 = pool.clone();
+                let gh2 = gh.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    if db::is_cache_stale(&pool2, query_id, CACHE_STALE_SECS)
+                        .await
+                        .unwrap_or(true)
+                    {
+                        let _ = tx2.send(AppMessage::SyncStarted { query_id }).await;
+                        sync_task(pool2, gh2, query_id, query_str, highlight_since, tx2).await;
+                    }
+                });
+            }
+            EngineCommand::MarkEntryViewed {
+                entry_id,
+                is_filter_stream,
+                viewed_at,
+            } => {
+                spawn_mark_entry_viewed(
+                    pool.clone(),
+                    entry_id,
+                    is_filter_stream,
+                    viewed_at,
+                    msg_tx.clone(),
+                );
+            }
+            EngineCommand::EnqueueStale { skip_query_id } => {
+                let pool2 = pool.clone();
+                let sync_tx2 = sync_tx.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    let queries = db::list_queries(&pool2).await.unwrap_or_default();
+                    let mut count = 0usize;
+                    for q in queries {
+                        if Some(q.id) == skip_query_id {
+                            continue;
+                        }
+                        if db::is_cache_stale(&pool2, q.id, CACHE_STALE_SECS)
+                            .await
+                            .unwrap_or(true)
+                        {
+                            let _ = sync_tx2
+                                .send(SyncJob {
+                                    query_id: q.id,
+                                    query_str: q.query,
+                                })
+                                .await;
+                            count += 1;
+                        }
+                    }
+                    if count > 0 {
+                        let _ = tx2.send(AppMessage::BgSyncQueued(count)).await;
+                    }
+                });
+            }
+            EngineCommand::AddQuery { name, query } => {
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    let name_opt = name.as_deref();
+                    let label = name.clone().unwrap_or_else(|| query.clone());
+                    match db::upsert_query(&pool2, &query, "pull_request", name_opt).await {
+                        Ok(id) => {
+                            let _ = tx2
+                                .send(AppMessage::QueryAdded(QueryEntry {
+                                    id,
+                                    label,
+                                    query_str: query,
+                                    kind: "pull_request".into(),
+                                    last_viewed_at: None,
+                                }))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx2
+                                .send(AppMessage::Status(format!("save error: {e}")))
+                                .await;
+                        }
+                    }
+                });
+            }
+            EngineCommand::AddFilterStream {
+                parent_id,
+                kind,
+                name,
+                filter,
+            } => {
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    match db::upsert_filter_stream(&pool2, parent_id, &name, &filter).await {
+                        Ok(id) => {
+                            let _ = tx2
+                                .send(AppMessage::FilterStreamAdded(FilterStreamEntry {
+                                    id,
+                                    parent_id,
+                                    name,
+                                    filter,
+                                    kind,
+                                    last_viewed_at: None,
+                                }))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx2
+                                .send(AppMessage::Status(format!(
+                                    "save filter stream error: {e}"
+                                )))
+                                .await;
+                        }
+                    }
+                });
+            }
+            EngineCommand::EditQuery { id, name, query } => {
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    match db::update_query(&pool2, id, name.as_deref(), &query).await {
+                        Ok(()) => {
+                            let _ = tx2
+                                .send(AppMessage::QueryUpdated {
+                                    id,
+                                    new_name: name,
+                                    new_query: query,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx2
+                                .send(AppMessage::Status(format!("edit query error: {e}")))
+                                .await;
+                        }
+                    }
+                });
+            }
+            EngineCommand::EditFilterStream { id, name, filter } => {
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    match db::update_filter_stream(&pool2, id, &name, &filter).await {
+                        Ok(()) => {
+                            let _ = tx2
+                                .send(AppMessage::FilterStreamUpdated {
+                                    id,
+                                    new_name: name,
+                                    new_filter: filter,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx2
+                                .send(AppMessage::Status(format!(
+                                    "edit filter stream error: {e}"
+                                )))
+                                .await;
+                        }
+                    }
+                });
+            }
+            EngineCommand::DeleteQuery { query_id } => {
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    if db::delete_query(&pool2, query_id).await.is_ok() {
+                        let _ = tx2.send(AppMessage::QueryDeleted { query_id }).await;
+                    }
+                });
+            }
+            EngineCommand::DeleteFilterStream { id } => {
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    if db::delete_filter_stream(&pool2, id).await.is_ok() {
+                        let _ = tx2.send(AppMessage::FilterStreamDeleted { id }).await;
+                    }
+                });
+            }
+            EngineCommand::SwapQueryPositions {
+                upper_id,
+                lower_id,
+                active_id,
+            } => {
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    if db::swap_query_positions(&pool2, upper_id, lower_id)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = tx2
+                            .send(AppMessage::QueriesSwapped {
+                                upper_id,
+                                lower_id,
+                                active_id,
+                            })
+                            .await;
+                    }
+                });
+            }
+            EngineCommand::SwapFilterStreamPositions {
+                upper_id,
+                lower_id,
+                active_id,
+            } => {
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    if db::swap_filter_stream_positions(&pool2, upper_id, lower_id)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = tx2
+                            .send(AppMessage::FilterStreamsSwapped {
+                                upper_id,
+                                lower_id,
+                                active_id,
+                            })
+                            .await;
+                    }
+                });
+            }
+            EngineCommand::LoadComments {
+                owner,
+                repo,
+                number,
+            } => {
+                let gh2 = gh.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    match fetch_comments_task(&gh2, &owner, &repo, number).await {
+                        Ok(comments) => {
+                            let _ = tx2.send(AppMessage::CommentsLoaded(comments)).await;
+                        }
+                        Err(e) => {
+                            let _ = tx2.send(AppMessage::CommentsFailed(e.to_string())).await;
+                        }
+                    }
+                });
+            }
+            EngineCommand::OpenBrowser { item } => {
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    match execute_open_browser(&item).await {
+                        Ok(msg) => {
+                            let _ = tx2.send(AppMessage::ActionDone(msg)).await;
+                        }
+                        Err(e) => {
+                            let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
+                        }
+                    }
+                });
+            }
+            EngineCommand::Comment { url, kind, body } => {
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    match execute_comment(&url, &kind, &body).await {
+                        Ok(msg) => {
+                            let _ = tx2.send(AppMessage::ActionDone(msg)).await;
+                        }
+                        Err(e) => {
+                            let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
+                        }
+                    }
+                });
+            }
+            EngineCommand::Approve { url, body } => {
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    match execute_approve(&url, body.as_deref()).await {
+                        Ok(msg) => {
+                            let _ = tx2.send(AppMessage::ActionDone(msg)).await;
+                        }
+                        Err(e) => {
+                            let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
+                        }
+                    }
+                });
+            }
+            EngineCommand::Merge { url, strategy } => {
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    match execute_merge(&url, &strategy).await {
+                        Ok(msg) => {
+                            let _ = tx2.send(AppMessage::ActionDone(msg)).await;
+                        }
+                        Err(e) => {
+                            let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
+                        }
+                    }
+                });
+            }
+        }
+    }
 }
