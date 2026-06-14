@@ -1,5 +1,4 @@
 use anyhow::Result;
-use chrono::Utc;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
 use octocrab::Octocrab;
@@ -680,33 +679,26 @@ where
 /// Returns the contiguous range `[query_idx, next_query_idx)` for the group
 /// starting at `query_idx` (the query entry plus all following filter streams).
 struct SelectedEntryLoad {
-    entry_id: i64,
     root_id: i64,
     query_str: Option<String>,
     is_filter_stream: bool,
     highlight_since: Option<String>,
-    viewed_at: String,
 }
 
 fn prepare_selected_entry_load(app: &mut App) -> Option<SelectedEntryLoad> {
     let entry = app.entries.get(app.entry_cursor)?.clone();
-    let viewed_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    // Selecting an entry does NOT mark it viewed: the unread badge is kept and
+    // cleared per-item as items are read (see `mark_selected_item_read`). Only the
+    // stream filter and the highlight baseline are updated here.
     let highlight_since = entry.last_viewed_at().map(str::to_string);
-
     app.stream_filter = entry.stream_filter().map(|s| s.to_string());
     app.active_entry_last_viewed_at = highlight_since.clone();
-    if let Some(selected) = app.entries.get_mut(app.entry_cursor) {
-        selected.set_last_viewed_at(Some(viewed_at.clone()));
-    }
-    app.unread_counts.insert(entry.unread_key(), 0);
 
     Some(SelectedEntryLoad {
-        entry_id: entry.id(),
         root_id: entry.root_query_id(),
         query_str: entry.root_query_str().map(str::to_string),
         is_filter_stream: entry.is_filter_stream(),
         highlight_since,
-        viewed_at,
     })
 }
 
@@ -723,13 +715,6 @@ async fn select_current_entry(app: &mut App, engine: &Engine, always_sync: bool)
         .send(EngineCommand::LoadCached {
             query_id: load.root_id,
             highlight_since: load.highlight_since.clone(),
-        })
-        .await;
-    engine
-        .send(EngineCommand::MarkEntryViewed {
-            entry_id: load.entry_id,
-            is_filter_stream: load.is_filter_stream,
-            viewed_at: load.viewed_at.clone(),
         })
         .await;
     if load.is_filter_stream {
@@ -755,6 +740,48 @@ async fn select_current_entry(app: &mut App, engine: &Engine, always_sync: bool)
             .await;
     }
     Some(load.root_id)
+}
+
+/// Mark the item under the cursor read (it is shown in the detail pane): flip its
+/// in-memory `read`/`is_new`, recompute the current query's unread badges, and
+/// persist via the engine (fire-and-forget). No-op if there is no selection or the
+/// item is already read.
+async fn mark_selected_item_read(app: &mut App, engine: &Engine) {
+    let Some(item) = app.selected_item().cloned() else {
+        return;
+    };
+    let Some(idx) = app.items.iter().position(|i| {
+        i.repo_owner == item.repo_owner && i.repo_name == item.repo_name && i.number == item.number
+    }) else {
+        return;
+    };
+    if app.items[idx].read {
+        return;
+    }
+    app.items[idx].read = true;
+    app.items[idx].is_new = false;
+    let Some(query_id) = app.selected_root_query_id() else {
+        return;
+    };
+    // Recompute from the live items (compute → insert, to avoid borrowing app
+    // mutably while reading app.items/entries).
+    let updates = glauca_core::logic::compute_unread_counts(
+        &app.entries,
+        query_id,
+        &app.items,
+        app.current_user.as_deref(),
+    );
+    for (key, unread) in updates {
+        app.unread_counts.insert(key, unread);
+    }
+    engine
+        .send(EngineCommand::MarkItemRead {
+            query_id,
+            repo_owner: item.repo_owner,
+            repo_name: item.repo_name,
+            number: item.number,
+        })
+        .await;
 }
 
 // ── Main run loop ─────────────────────────────────────────────────────────────
@@ -1153,6 +1180,14 @@ where
                         }
                         Action::None => {}
                     }
+                    // Viewing an item (cursor on the item list or its detail pane)
+                    // marks it read and decrements the unread badge. Idempotent —
+                    // a no-op once the item is already read.
+                    if app.input_mode == InputMode::Normal
+                        && matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
+                    {
+                        mark_selected_item_read(&mut app, &engine).await;
+                    }
                 }
             }
             Some(msg) = engine.recv() => {
@@ -1162,7 +1197,8 @@ where
                         if app.selected_root_query_id() == Some(query_id) {
                             let highlight_since = app.active_entry_last_viewed_at.clone();
                             for item in &mut items {
-                                item.is_new = is_item_new_since(&item.cached_at, highlight_since.as_deref());
+                                item.is_new = is_item_new_since(&item.cached_at, highlight_since.as_deref())
+                                    && !item.read;
                             }
                             app.items = items;
                             app.clamp_item_cursor();

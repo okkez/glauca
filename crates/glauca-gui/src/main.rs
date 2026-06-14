@@ -1099,6 +1099,7 @@ impl GlaucaApp {
             _ => return,
         }
         self.items[idx].read = true;
+        self.items[idx].is_new = false;
         let (repo_owner, repo_name, number) = {
             let item = &self.items[idx];
             (item.repo_owner.clone(), item.repo_name.clone(), item.number)
@@ -1143,7 +1144,8 @@ impl GlaucaApp {
                     let highlight_since = self.active_entry_last_viewed_at.clone();
                     for item in &mut items {
                         item.is_new =
-                            is_item_new_since(&item.cached_at, highlight_since.as_deref());
+                            is_item_new_since(&item.cached_at, highlight_since.as_deref())
+                                && !item.read;
                     }
                     self.items = items;
                     needs_refilter = true;
