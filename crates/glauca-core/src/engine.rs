@@ -617,6 +617,13 @@ impl Engine {
         let _ = self.cmd_tx.send(cmd).await;
     }
 
+    /// A cloneable command sender for front-ends that issue commands from a
+    /// non-async context (e.g. a GUI event handler can hold this and call
+    /// `try_send` without `&self`/lifetime constraints).
+    pub fn sender(&self) -> mpsc::Sender<EngineCommand> {
+        self.cmd_tx.clone()
+    }
+
     /// Await the next message from the engine (TUI/iced style).
     pub async fn recv(&mut self) -> Option<AppMessage> {
         self.msg_rx.recv().await

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/glauca-core", "crates/glauca-cli"]
+members = ["crates/glauca-core", "crates/glauca-cli", "crates/glauca-gui"]
 resolver = "3"
 
 [workspace.package]
@@ -23,3 +23,16 @@ chrono = { version = "0.4.44", features = ["clock"] }
 tui-markdown = "0.3"
 tempfile = "3.27.0"
 glauca-core = { path = "crates/glauca-core" }
+smol = "2"
+# gpui GUI stack (pre-1.0, git-only). We track zed's default branch (same reference
+# gpui-component uses internally) so the whole graph resolves to ONE gpui. The exact
+# commit is pinned in Cargo.lock; bump it deliberately. Requires rustc >= 1.95
+# (see rust-toolchain.toml).
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "cda0fc7fd4e4809dd2a8bae0337ac43b49e9f675" }
+
+# gpui-component patches psm for stacker; mirror it since [patch] does not propagate
+# from a git dependency's own workspace.
+[patch.crates-io]
+psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
