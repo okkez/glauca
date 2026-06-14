@@ -386,9 +386,7 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                         "─── Description ────────────────────────────────",
                         Style::default().fg(Color::DarkGray),
                     )));
-                    for body_line in body.lines() {
-                        lines.push(Line::from(Span::raw(body_line.to_string())));
-                    }
+                    lines.extend(tui_markdown::from_str(body).lines);
                 }
             }
 
@@ -1071,9 +1069,7 @@ fn build_comment_lines<'a>(
             ]));
             lines.extend(hidden_prefix);
             lines.push(Line::from(""));
-            for body_line in c.body.lines() {
-                lines.push(Line::from(Span::raw(body_line.to_string())));
-            }
+            lines.extend(tui_markdown::from_str(&c.body).lines);
             lines.push(Line::from(""));
         }
     }

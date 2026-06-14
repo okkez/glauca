@@ -1041,7 +1041,10 @@ fn suspend_tui<B: ratatui::backend::Backend + io::Write>(
 
 fn restore_tui<B: ratatui::backend::Backend + io::Write>(
     terminal: &mut Terminal<B>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
@@ -1457,7 +1460,10 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
     terminal: &mut Terminal<B>,
     pool: SqlitePool,
     gh: Octocrab,
-) -> Result<()> {
+) -> Result<()>
+where
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     // Build hierarchical left-pane entries: root queries interleaved with their filter streams.
     let query_rows = db::list_queries(&pool).await.unwrap_or_default();
     let mut entries: Vec<LeftPaneEntry> = Vec::new();
