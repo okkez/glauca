@@ -52,7 +52,6 @@ struct GlaucaApp {
     status: Option<String>,
 
     left_scroll: ScrollHandle,
-    items_scroll: ScrollHandle,
 }
 
 impl GlaucaApp {
@@ -98,7 +97,6 @@ impl GlaucaApp {
             bg_sync_pending: 0,
             status: None,
             left_scroll: ScrollHandle::new(),
-            items_scroll: ScrollHandle::new(),
         };
         app.prime();
         app
@@ -312,24 +310,26 @@ impl GlaucaApp {
     }
 
     fn render_items(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let filtered = filter_items(
+        // Count only — the actual row elements are built lazily per visible
+        // range by `uniform_list` below. Building all rows eagerly is what froze
+        // the UI for large queries (1898 items ≈ 35ms construct + a far heavier
+        // gpui layout/paint pass every frame).
+        let count = filter_items(
             &self.items,
             self.stream_filter.as_deref(),
             "",
             self.current_user.as_deref(),
-        );
+        )
+        .len();
 
-        let mut col = v_flex()
-            .id("items-pane")
+        let container = v_flex()
             .flex_1()
             .h_full()
             .min_w_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.items_scroll)
             .bg(cx.theme().background);
 
-        if filtered.is_empty() {
-            return col.child(
+        if count == 0 {
+            return container.child(
                 div()
                     .p_4()
                     .text_color(cx.theme().muted_foreground)
@@ -337,71 +337,90 @@ impl GlaucaApp {
             );
         }
 
-        for item in filtered {
-            let meta = format!(
-                "{}/{}#{}  ·  {}  ·  @{}",
-                item.repo_owner,
-                item.repo_name,
-                item.number,
-                item.state,
-                item.author.as_deref().unwrap_or("ghost"),
-            );
-            let labels = item.labels.join(", ");
+        container.child(
+            uniform_list(
+                "items-list",
+                count,
+                cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+                    let filtered = filter_items(
+                        &this.items,
+                        this.stream_filter.as_deref(),
+                        "",
+                        this.current_user.as_deref(),
+                    );
+                    let mut rows = Vec::new();
+                    for ix in range {
+                        let Some(item) = filtered.get(ix) else {
+                            continue;
+                        };
+                        let mut meta = format!(
+                            "{}/{}#{}  ·  {}  ·  @{}",
+                            item.repo_owner,
+                            item.repo_name,
+                            item.number,
+                            item.state,
+                            item.author.as_deref().unwrap_or("ghost"),
+                        );
+                        if !item.labels.is_empty() {
+                            meta.push_str("  ·  ");
+                            meta.push_str(&item.labels.join(", "));
+                        }
+                        let is_new = item.is_new;
+                        let title = item.title.clone();
 
-            let row = v_flex()
-                .w_full()
-                .px_4()
-                .py_2()
-                .gap_0p5()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        .when(item.is_new, |e| {
-                            e.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_xs()
-                                    .font_bold()
-                                    .text_color(cx.theme().accent_foreground)
-                                    .bg(cx.theme().accent)
-                                    .px_1p5()
-                                    .rounded_md()
-                                    .child("NEW"),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_bold()
-                                .text_color(cx.theme().foreground)
-                                .child(SharedString::from(item.title.clone())),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(meta)),
-                )
-                .when(!labels.is_empty(), |e| {
-                    e.child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(labels)),
-                    )
-                });
-
-            col = col.child(row);
-        }
-
-        col
+                        rows.push(
+                            v_flex()
+                                .id(ix)
+                                .h(px(52.))
+                                .w_full()
+                                .px_4()
+                                .justify_center()
+                                .gap_0p5()
+                                .border_b_1()
+                                .border_color(cx.theme().border)
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .gap_2()
+                                        .items_center()
+                                        .when(is_new, |e| {
+                                            e.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .font_bold()
+                                                    .text_color(cx.theme().accent_foreground)
+                                                    .bg(cx.theme().accent)
+                                                    .px_1p5()
+                                                    .rounded_md()
+                                                    .child("NEW"),
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .font_bold()
+                                                .text_color(cx.theme().foreground)
+                                                .child(SharedString::from(title)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(SharedString::from(meta)),
+                                ),
+                        );
+                    }
+                    rows
+                }),
+            )
+            .h_full(),
+        )
     }
 }
 
