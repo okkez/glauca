@@ -21,7 +21,7 @@ use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{
     compute_unread_counts, expand_me, group_range, is_item_new_since, move_group_down,
 };
-use glauca_core::types::{ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy};
+use glauca_core::types::{CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy};
 use glauca_core::{db, github};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -45,9 +45,32 @@ const FILTER_DEBOUNCE: Duration = Duration::from_millis(150);
 const GLAUCA_CONTEXT: &str = "Glauca";
 
 /// Predicate for navigation/edit keys: active under the root context but disabled
-/// whenever an `Input` is in the focus path, so letters reach the text box. The
-/// `!Input` term is matched against the full focus chain (see `bind_keys`).
-const NAV_CONTEXT: &str = "Glauca && !Input";
+/// whenever an `Input` is in the focus path (so letters reach the text box) or the
+/// comments overlay is focused (so its single-key controls take over). Both `!`
+/// terms are matched against the full focus chain (see `bind_keys`).
+const NAV_CONTEXT: &str = "Glauca && !Input && !GlaucaComments";
+
+/// Key-binding context for the comments overlay. While its panel is focused, the
+/// overlay's single-key controls (j/k/g/G/s/h/q) fire here instead of the nav keys.
+const COMMENTS_CONTEXT: &str = "GlaucaComments";
+
+/// Pixels scrolled per j/k keypress in the detail pane and comments overlay.
+const DETAIL_SCROLL_STEP: f32 = 48.0;
+
+/// Scroll a tracked `overflow_y_scroll` container by `delta` pixels (positive =
+/// down). gpui's scroll offset goes negative downward, clamped to the content.
+fn scroll_vertically(handle: &ScrollHandle, delta: f32) {
+    let mut off = handle.offset();
+    off.y -= px(delta);
+    let min_y = -handle.max_offset().y;
+    if off.y < min_y {
+        off.y = min_y;
+    }
+    if off.y > px(0.) {
+        off.y = px(0.);
+    }
+    handle.set_offset(off);
+}
 
 gpui::actions!(
     glauca,
@@ -66,15 +89,26 @@ gpui::actions!(
         ReorderDown,
         ReorderUp,
         Quit,
+        OpenInBrowser,
+        OpenComments,
+        CommentsScrollDown,
+        CommentsScrollUp,
+        CommentsTop,
+        CommentsBottom,
+        CommentsToggleSort,
+        CommentsToggleHidden,
+        CommentsClose,
     ]
 );
 
-/// Which pane single-letter navigation keys act on. (The detail pane mirrors the
-/// item cursor, so it needs no focus state of its own.)
+/// Which pane single-letter navigation keys act on. `h`/`l` cycle through the
+/// three panes; in `ItemDetail` j/k scroll the detail body instead of moving the
+/// item cursor (the detail pane mirrors the item cursor for its contents).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
     QueryList,
     ItemList,
+    ItemDetail,
 }
 
 struct GlaucaApp {
@@ -114,6 +148,21 @@ struct GlaucaApp {
     focus_handle: FocusHandle,
     /// Which pane j/k act on.
     focus: Focus,
+
+    /// Comments overlay (View comments). Rendered as a self-managed overlay rather
+    /// than a gpui dialog so async `CommentsLoaded` can repaint it via `cx.notify()`.
+    comments_open: bool,
+    comments: Vec<CommentEntry>,
+    comments_loading: bool,
+    comments_scroll: ScrollHandle,
+    /// Newest-first when true (mirrors the TUI's `s` toggle; defaults to oldest-first).
+    comments_sort_desc: bool,
+    /// Show minimized/hidden comments expanded (TUI's `h` toggle).
+    comments_show_hidden: bool,
+    /// Header line of the overlay (`#<n> <title>` of the item it was opened for).
+    comments_title: SharedString,
+    /// Focus handle for the overlay panel; keys are scoped to `COMMENTS_CONTEXT`.
+    comments_focus_handle: FocusHandle,
     /// Inline filter input. Its `Change` events update `filter` (see `new`).
     filter_input: Entity<InputState>,
     /// Pending debounced re-filter task; replacing it cancels the previous one.
@@ -193,6 +242,14 @@ impl GlaucaApp {
             detail_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             focus: Focus::QueryList,
+            comments_open: false,
+            comments: Vec::new(),
+            comments_loading: false,
+            comments_scroll: ScrollHandle::new(),
+            comments_sort_desc: false,
+            comments_show_hidden: false,
+            comments_title: SharedString::default(),
+            comments_focus_handle: cx.focus_handle(),
             filter_input,
             filter_task: None,
             _subscriptions: vec![subscription],
@@ -295,6 +352,10 @@ impl GlaucaApp {
                     cx.notify();
                 }
             }
+            Focus::ItemDetail => {
+                scroll_vertically(&self.detail_scroll, DETAIL_SCROLL_STEP);
+                cx.notify();
+            }
         }
     }
 
@@ -312,16 +373,28 @@ impl GlaucaApp {
                     cx.notify();
                 }
             }
+            Focus::ItemDetail => {
+                scroll_vertically(&self.detail_scroll, -DETAIL_SCROLL_STEP);
+                cx.notify();
+            }
         }
     }
 
+    /// `h` cycles focus left: ItemDetail → ItemList → QueryList (clamped).
     fn on_focus_left(&mut self, _: &FocusLeft, _window: &mut Window, cx: &mut Context<Self>) {
-        self.focus = Focus::QueryList;
+        self.focus = match self.focus {
+            Focus::ItemDetail => Focus::ItemList,
+            Focus::ItemList | Focus::QueryList => Focus::QueryList,
+        };
         cx.notify();
     }
 
+    /// `l` cycles focus right: QueryList → ItemList → ItemDetail (clamped).
     fn on_focus_right(&mut self, _: &FocusRight, _window: &mut Window, cx: &mut Context<Self>) {
-        self.focus = Focus::ItemList;
+        self.focus = match self.focus {
+            Focus::QueryList => Focus::ItemList,
+            Focus::ItemList | Focus::ItemDetail => Focus::ItemDetail,
+        };
         cx.notify();
     }
 
@@ -332,14 +405,9 @@ impl GlaucaApp {
                 self.select_index(self.entry_cursor);
                 cx.notify();
             }
-            // ItemList → action menu on the selected item.
-            Focus::ItemList => {
-                let item = self
-                    .filtered
-                    .get(self.item_cursor)
-                    .and_then(|&i| self.items.get(i))
-                    .cloned();
-                if let Some(item) = item {
+            // ItemList / ItemDetail → action menu on the selected item.
+            Focus::ItemList | Focus::ItemDetail => {
+                if let Some(item) = self.selected_item() {
                     self.open_action_menu(item, window, cx);
                 }
             }
@@ -351,9 +419,141 @@ impl GlaucaApp {
     }
 
     fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        // Return focus to the root (leaves the filter box if it was focused).
+        // Esc closes the comments overlay first if it is open.
+        if self.comments_open {
+            self.close_comments(window, cx);
+            return;
+        }
+        // Otherwise return focus to the root (leaves the filter box if focused).
         self.focus_handle.focus(window, cx);
         cx.notify();
+    }
+
+    /// The item under the cursor in the (filtered) item list, if any.
+    fn selected_item(&self) -> Option<ItemEntry> {
+        self.filtered
+            .get(self.item_cursor)
+            .and_then(|&i| self.items.get(i))
+            .cloned()
+    }
+
+    /// `o` — open the selected item in the browser (only from the item list,
+    /// mirroring the TUI). Also available via the action menu.
+    fn on_open_in_browser(&mut self, _: &OpenInBrowser, _window: &mut Window, _cx: &mut Context<Self>) {
+        if self.focus == Focus::QueryList {
+            return;
+        }
+        if let Some(item) = self.selected_item() {
+            self.send(EngineCommand::OpenBrowser { item });
+        }
+    }
+
+    /// `c` — open the comments overlay for the selected item.
+    fn on_open_comments(&mut self, _: &OpenComments, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus == Focus::QueryList {
+            return;
+        }
+        if let Some(item) = self.selected_item() {
+            self.open_comments(item, window, cx);
+        }
+    }
+
+    /// Open the comments overlay for `item` and request its comments. Clearing
+    /// `comments` + setting `comments_loading` first means a quick reopen never
+    /// shows the previous item's comments.
+    fn open_comments(&mut self, item: ItemEntry, window: &mut Window, cx: &mut Context<Self>) {
+        self.comments.clear();
+        self.comments_loading = true;
+        self.comments_open = true;
+        self.comments_sort_desc = false;
+        self.comments_show_hidden = false;
+        self.comments_scroll.set_offset(point(px(0.), px(0.)));
+        self.comments_title =
+            SharedString::from(format!("Comments — #{} {}", item.number, item.title));
+        self.send(EngineCommand::LoadComments {
+            owner: item.repo_owner.clone(),
+            repo: item.repo_name.clone(),
+            number: item.number as u64,
+        });
+        self.comments_focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Close the comments overlay and return focus to the root so nav keys work.
+    fn close_comments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.comments_open = false;
+        self.comments_loading = false;
+        self.comments.clear();
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    // ── Comments overlay keys (scoped to COMMENTS_CONTEXT) ───────────────────────
+
+    fn on_comments_scroll_down(
+        &mut self,
+        _: &CommentsScrollDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        scroll_vertically(&self.comments_scroll, DETAIL_SCROLL_STEP);
+        cx.notify();
+    }
+
+    fn on_comments_scroll_up(
+        &mut self,
+        _: &CommentsScrollUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        scroll_vertically(&self.comments_scroll, -DETAIL_SCROLL_STEP);
+        cx.notify();
+    }
+
+    fn on_comments_top(&mut self, _: &CommentsTop, _window: &mut Window, cx: &mut Context<Self>) {
+        self.comments_scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
+    }
+
+    fn on_comments_bottom(
+        &mut self,
+        _: &CommentsBottom,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.comments_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn on_comments_toggle_sort(
+        &mut self,
+        _: &CommentsToggleSort,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.comments_sort_desc = !self.comments_sort_desc;
+        self.comments_scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
+    }
+
+    fn on_comments_toggle_hidden(
+        &mut self,
+        _: &CommentsToggleHidden,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.comments_show_hidden = !self.comments_show_hidden;
+        self.comments_scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
+    }
+
+    fn on_comments_close(
+        &mut self,
+        _: &CommentsClose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_comments(window, cx);
     }
 
     fn on_quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
@@ -705,10 +905,6 @@ impl GlaucaApp {
             dlg.title("Actions").w(px(320.)).content(move |content, _w, _cx| {
                 let mut col = content.gap_2();
                 for (ix, action) in actions.iter().enumerate() {
-                    // View comments is out of MVP scope for now.
-                    if matches!(action, ItemAction::ViewComments) {
-                        continue;
-                    }
                     let label = action.label().to_string();
                     let action = action.clone();
                     let item = item.clone();
@@ -746,7 +942,7 @@ impl GlaucaApp {
             ItemAction::Comment => self.open_comment_dialog(item, window, cx),
             ItemAction::ApprovePR => self.open_approve_dialog(item, window, cx),
             ItemAction::MergePR => self.open_merge_dialog(item, window, cx),
-            ItemAction::ViewComments => {}
+            ItemAction::ViewComments => self.open_comments(item, window, cx),
         }
     }
 
@@ -1016,7 +1212,17 @@ impl GlaucaApp {
             AppMessage::ActionDone(s) => self.status = Some(s),
             AppMessage::ActionError(e) => self.status = Some(format!("Error: {e}")),
 
-            _ => {}
+            // ── Comments overlay ────────────────────────────────────────────────
+            AppMessage::CommentsLoaded(comments) => {
+                if self.comments_open {
+                    self.comments = comments;
+                    self.comments_loading = false;
+                }
+            }
+            AppMessage::CommentsFailed(e) => {
+                self.comments_loading = false;
+                self.status = Some(format!("Failed to load comments: {e}"));
+            }
         }
         // Keep the filtered-index cache consistent with items/filter/stream_filter
         // after any state change (also prevents stale indices into a cleared list).
@@ -1198,6 +1404,13 @@ impl GlaucaApp {
     }
 
     fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Highlight the left border when the detail pane has keyboard focus
+        // (j/k scroll it); otherwise use the neutral divider color.
+        let border = if self.focus == Focus::ItemDetail {
+            cx.theme().primary
+        } else {
+            cx.theme().border
+        };
         let container = v_flex()
             .id("detail-pane")
             .w(px(440.))
@@ -1206,7 +1419,7 @@ impl GlaucaApp {
             .overflow_y_scroll()
             .track_scroll(&self.detail_scroll)
             .border_l_1()
-            .border_color(cx.theme().border)
+            .border_color(border)
             .bg(cx.theme().background);
 
         let Some(item) = self.filtered.get(self.item_cursor).and_then(|&i| self.items.get(i))
@@ -1299,6 +1512,142 @@ impl GlaucaApp {
                 }
             })
     }
+
+    /// Self-managed comments overlay (View comments). Rendered over the panes when
+    /// `comments_open`; repaints when `CommentsLoaded` arrives. Keys are scoped to
+    /// `COMMENTS_CONTEXT` via the focused panel.
+    fn render_comments_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let hidden_count = self.comments.iter().filter(|c| c.is_minimized).count();
+        let sort_label = if self.comments_sort_desc { "newest" } else { "oldest" };
+
+        let body = if self.comments_loading {
+            div()
+                .p_4()
+                .text_color(cx.theme().muted_foreground)
+                .child("Loading comments…")
+                .into_any_element()
+        } else if self.comments.is_empty() {
+            div()
+                .p_4()
+                .text_color(cx.theme().muted_foreground)
+                .child("No comments.")
+                .into_any_element()
+        } else {
+            let mut order: Vec<usize> = (0..self.comments.len()).collect();
+            if self.comments_sort_desc {
+                order.reverse();
+            }
+            let mut list = v_flex()
+                .id("comments-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.comments_scroll)
+                .p_3()
+                .gap_3();
+            for (pos, idx) in order.into_iter().enumerate() {
+                let c = &self.comments[idx];
+                let head = h_flex()
+                    .gap_2()
+                    .text_sm()
+                    .child(
+                        div()
+                            .font_bold()
+                            .text_color(cx.theme().foreground)
+                            .child(SharedString::from(format!("@{}", c.author))),
+                    )
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(c.created_at.clone())),
+                    );
+                let mut block = v_flex().gap_1().child(head);
+                if c.is_minimized && !self.comments_show_hidden {
+                    let reason = c.minimized_reason.clone().unwrap_or_else(|| "minimized".into());
+                    block = block.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(format!(
+                                "▸ hidden ({reason}) — press h to expand"
+                            ))),
+                    );
+                } else {
+                    if c.is_minimized {
+                        let reason =
+                            c.minimized_reason.clone().unwrap_or_else(|| "minimized".into());
+                        block = block.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().accent)
+                                .child(SharedString::from(format!("⚠ hidden ({reason})"))),
+                        );
+                    }
+                    block = block.child(markdown(c.body.clone()).selectable(true));
+                }
+                // Separator above every comment except the first.
+                if pos > 0 {
+                    block = block.pt_3().border_t_1().border_color(cx.theme().border);
+                }
+                list = list.child(block);
+            }
+            list.into_any_element()
+        };
+
+        let footer = format!(
+            "Esc/q: close   j/k: scroll   g/G: top/bottom   s: {sort_label}   h: show/hide ({hidden_count})"
+        );
+
+        // Scrim: full-size, centers the panel, and swallows clicks to the panes.
+        h_flex()
+            .absolute()
+            .inset_0()
+            .p_8()
+            .justify_center()
+            .items_center()
+            .bg(hsla(0., 0., 0., 0.5))
+            .occlude()
+            .child(
+                v_flex()
+                    .id("comments-overlay")
+                    .track_focus(&self.comments_focus_handle)
+                    .key_context(COMMENTS_CONTEXT)
+                    .w(px(640.))
+                    // Definite height (fills the scrim minus its padding) so the
+                    // flex_1 body has room to expand and scroll. With only `max_h`
+                    // the panel collapsed to its content height (tiny popup).
+                    .h_full()
+                    .bg(cx.theme().background)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_lg()
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .w_full()
+                            .flex_shrink_0()
+                            .px_4()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .font_bold()
+                            .text_color(cx.theme().foreground)
+                            .child(self.comments_title.clone()),
+                    )
+                    .child(div().flex_1().min_h_0().child(body))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex_shrink_0()
+                            .px_4()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(footer)),
+                    ),
+            )
+    }
 }
 
 /// A `label: value` row in the detail pane.
@@ -1386,6 +1735,15 @@ impl Render for GlaucaApp {
             .on_action(cx.listener(Self::on_new_query))
             .on_action(cx.listener(Self::on_new_filter_stream))
             .on_action(cx.listener(Self::on_edit_entry))
+            .on_action(cx.listener(Self::on_open_in_browser))
+            .on_action(cx.listener(Self::on_open_comments))
+            .on_action(cx.listener(Self::on_comments_scroll_down))
+            .on_action(cx.listener(Self::on_comments_scroll_up))
+            .on_action(cx.listener(Self::on_comments_top))
+            .on_action(cx.listener(Self::on_comments_bottom))
+            .on_action(cx.listener(Self::on_comments_toggle_sort))
+            .on_action(cx.listener(Self::on_comments_toggle_hidden))
+            .on_action(cx.listener(Self::on_comments_close))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1426,6 +1784,10 @@ impl Render for GlaucaApp {
                     )
                     .child(self.render_detail(cx)),
             )
+            // Comments overlay draws over the 3-pane row (absolute, full-size).
+            .when(self.comments_open, |this| {
+                this.child(self.render_comments_overlay(cx))
+            })
             // gpui-component stores open dialogs/sheets/notifications in `Root`, but
             // `Root`'s own render does NOT paint them — the inner view must mount the
             // overlay layers (see examples/dialog_overlay). Without these, every
@@ -1480,6 +1842,18 @@ fn main() -> Result<()> {
             KeyBinding::new("shift-j", ReorderDown, Some(NAV_CONTEXT)),
             KeyBinding::new("shift-k", ReorderUp, Some(NAV_CONTEXT)),
             KeyBinding::new("q", Quit, Some(NAV_CONTEXT)),
+            KeyBinding::new("o", OpenInBrowser, Some(NAV_CONTEXT)),
+            KeyBinding::new("c", OpenComments, Some(NAV_CONTEXT)),
+            // Comments overlay controls (active only while the overlay is focused).
+            KeyBinding::new("j", CommentsScrollDown, Some(COMMENTS_CONTEXT)),
+            KeyBinding::new("k", CommentsScrollUp, Some(COMMENTS_CONTEXT)),
+            KeyBinding::new("down", CommentsScrollDown, Some(COMMENTS_CONTEXT)),
+            KeyBinding::new("up", CommentsScrollUp, Some(COMMENTS_CONTEXT)),
+            KeyBinding::new("g", CommentsTop, Some(COMMENTS_CONTEXT)),
+            KeyBinding::new("shift-g", CommentsBottom, Some(COMMENTS_CONTEXT)),
+            KeyBinding::new("s", CommentsToggleSort, Some(COMMENTS_CONTEXT)),
+            KeyBinding::new("h", CommentsToggleHidden, Some(COMMENTS_CONTEXT)),
+            KeyBinding::new("q", CommentsClose, Some(COMMENTS_CONTEXT)),
         ]);
 
         cx.spawn(async move |cx| {
