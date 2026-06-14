@@ -329,6 +329,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         review_decision,
         milestone,
         cached_at: String::new(),
+        read: false,
     })
 }
 

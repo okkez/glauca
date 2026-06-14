@@ -59,7 +59,7 @@ pub struct App {
 
     pub items: Vec<ItemEntry>,
     pub item_cursor: usize,
-    pub unread_counts: HashMap<i64, usize>,
+    pub unread_counts: HashMap<(bool, i64), usize>,
     pub active_entry_last_viewed_at: Option<String>,
     pub filter: String,
     /// Active filter stream filter applied before the inline filter (if any).
@@ -181,13 +181,13 @@ impl App {
     }
 
     fn recompute_unread_counts_for_query(&mut self, query_id: i64, items: &[ItemEntry]) {
-        for (entry_id, unread) in glauca_core::logic::compute_unread_counts(
+        for (key, unread) in glauca_core::logic::compute_unread_counts(
             &self.entries,
             query_id,
             items,
             self.current_user.as_deref(),
         ) {
-            self.unread_counts.insert(entry_id, unread);
+            self.unread_counts.insert(key, unread);
         }
     }
 }
@@ -698,7 +698,7 @@ fn prepare_selected_entry_load(app: &mut App) -> Option<SelectedEntryLoad> {
     if let Some(selected) = app.entries.get_mut(app.entry_cursor) {
         selected.set_last_viewed_at(Some(viewed_at.clone()));
     }
-    app.unread_counts.insert(entry.id(), 0);
+    app.unread_counts.insert(entry.unread_key(), 0);
 
     Some(SelectedEntryLoad {
         entry_id: entry.id(),
@@ -1411,6 +1411,7 @@ mod tests {
                 milestone: None,
                 cached_at: String::new(),
                 is_new: false,
+                read: false,
             })
             .collect();
         app
@@ -1525,6 +1526,7 @@ mod tests {
                 milestone: None,
                 cached_at: String::new(),
                 is_new: false,
+                read: false,
             },
             ItemEntry {
                 number: 2,
@@ -1550,6 +1552,7 @@ mod tests {
                 milestone: None,
                 cached_at: String::new(),
                 is_new: false,
+                read: false,
             },
         ];
         app.stream_filter = Some("state:open".into());
@@ -1603,6 +1606,7 @@ mod tests {
                 milestone: None,
                 cached_at: "2026-05-24 10:15:00".into(),
                 is_new: false,
+                read: false,
             },
             ItemEntry {
                 number: 2,
@@ -1628,13 +1632,15 @@ mod tests {
                 milestone: None,
                 cached_at: "2026-05-24 10:45:00".into(),
                 is_new: false,
+                read: false,
             },
         ];
 
         app.recompute_unread_counts_for_query(1, &items);
 
-        assert_eq!(app.unread_counts.get(&1), Some(&2));
-        assert_eq!(app.unread_counts.get(&2), Some(&1));
+        // Query #1 → key (false, 1); filter stream #2 → key (true, 2).
+        assert_eq!(app.unread_counts.get(&(false, 1)), Some(&2));
+        assert_eq!(app.unread_counts.get(&(true, 2)), Some(&1));
     }
 
     // ── App::new defaults ────────────────────────────────────────────────────────

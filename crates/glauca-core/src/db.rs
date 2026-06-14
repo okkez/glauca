@@ -298,19 +298,23 @@ pub struct CachedItem {
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
     pub cached_at: String,
+    /// Whether the user has viewed this item (drives the unread badge together
+    /// with the "new since" check). Preserved across re-syncs.
+    pub read: bool,
 }
 
 /// Insert or replace a cached item for a query.
 pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
     let is_draft_int = item.is_draft as i64;
+    let read_int = item.read as i64;
     sqlx::query!(
         r#"
         INSERT INTO items
             (query_id, kind, repo_owner, repo_name, number, title, url, author,
              state, updated_at, labels, comment_count, requested_reviewers, reviews,
              body, assignees, is_draft, created_at_item, base_ref, head_ref,
-             review_decision, milestone, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             review_decision, milestone, read, cached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
             title               = excluded.title,
@@ -329,8 +333,13 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
             base_ref            = excluded.base_ref,
             head_ref            = excluded.head_ref,
             review_decision     = excluded.review_decision,
-            milestone           = excluded.milestone,
-            cached_at           = excluded.cached_at
+            milestone           = excluded.milestone
+            -- `cached_at` is intentionally NOT updated: it records when an item was
+            -- FIRST cached, so "new since last viewed" (is_item_new_since compares
+            -- cached_at > last_viewed_at) only counts items that newly appeared. If
+            -- it were refreshed on every upsert, a re-sync would stamp every item
+            -- (up to GitHub's 1000-result cap) with `now` and inflate the unread
+            -- count to the total. New rows still get datetime('now') on INSERT.
         "#,
         item.query_id,
         item.kind,
@@ -354,6 +363,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         item.head_ref,
         item.review_decision,
         item.milestone,
+        read_int,
     )
     .execute(pool)
     .await?;
@@ -367,7 +377,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
         SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,
                state, updated_at, labels, comment_count, requested_reviewers, reviews,
                body, assignees, is_draft, created_at_item, base_ref, head_ref,
-               review_decision, milestone, cached_at
+               review_decision, milestone, cached_at, read
         FROM items
         WHERE query_id = ?
         ORDER BY updated_at DESC
@@ -403,8 +413,31 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
             review_decision: r.review_decision,
             milestone: r.milestone,
             cached_at: r.cached_at,
+            read: r.read != 0,
         })
         .collect())
+}
+
+/// Mark a single cached item as read (viewed). Identified by the same unique key
+/// as `upsert_item`'s conflict target.
+pub async fn mark_item_read(
+    pool: &SqlitePool,
+    query_id: i64,
+    repo_owner: &str,
+    repo_name: &str,
+    number: i64,
+) -> Result<()> {
+    sqlx::query!(
+        "UPDATE items SET read = 1 \
+         WHERE query_id = ? AND repo_owner = ? AND repo_name = ? AND number = ?",
+        query_id,
+        repo_owner,
+        repo_name,
+        number,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Check whether the cache for a query is stale (older than `max_age_secs`).
@@ -473,6 +506,7 @@ mod tests {
             review_decision: None,
             milestone: None,
             cached_at: "2026-05-22 00:00:00".into(),
+            read: false,
         }
     }
 
@@ -576,6 +610,7 @@ mod tests {
             review_decision: None,
             milestone: None,
             cached_at: "2026-05-22 00:00:00".into(),
+            read: false,
         };
         upsert_item(&pool, &item).await.expect("upsert item");
 

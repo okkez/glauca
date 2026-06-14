@@ -37,6 +37,13 @@ impl LeftPaneEntry {
         }
     }
 
+    /// Key for the per-entry unread-count map. Query and filter-stream ids come
+    /// from separate tables and can collide as raw i64 (e.g. query #1 and filter
+    /// stream #1), so the kind discriminant is included to keep them distinct.
+    pub fn unread_key(&self) -> (bool, i64) {
+        (self.is_filter_stream(), self.id())
+    }
+
     #[allow(dead_code)]
     pub fn display_label(&self) -> &str {
         match self {
@@ -129,6 +136,9 @@ pub struct ItemEntry {
     pub milestone: Option<String>,
     pub cached_at: String,
     pub is_new: bool,
+    /// Whether the user has viewed this item (persisted per cached row). An item
+    /// that is read is neither counted as unread nor highlighted as new.
+    pub read: bool,
 }
 
 /// A single comment entry fetched from GitHub and displayed in the comments popup.

@@ -33,7 +33,8 @@ pub fn serde_reviews(raw: &str) -> Vec<(String, String)> {
 }
 
 pub fn cached_item_to_item_entry(c: CachedItem, last_viewed_at: Option<&str>) -> ItemEntry {
-    let is_new = is_item_new_since(&c.cached_at, last_viewed_at);
+    // A read item is neither "new" (no highlight) nor counted as unread.
+    let is_new = is_item_new_since(&c.cached_at, last_viewed_at) && !c.read;
     ItemEntry {
         number: c.number,
         title: c.title,
@@ -58,6 +59,7 @@ pub fn cached_item_to_item_entry(c: CachedItem, last_viewed_at: Option<&str>) ->
         milestone: c.milestone,
         cached_at: c.cached_at,
         is_new,
+        read: c.read,
     }
 }
 
@@ -114,7 +116,7 @@ pub fn compute_unread_counts(
     query_id: i64,
     items: &[ItemEntry],
     current_user: Option<&str>,
-) -> Vec<(i64, usize)> {
+) -> Vec<((bool, i64), usize)> {
     let mut out = Vec::new();
     for entry in entries
         .iter()
@@ -123,7 +125,9 @@ pub fn compute_unread_counts(
         let unread = match entry {
             LeftPaneEntry::Query(q) => items
                 .iter()
-                .filter(|item| is_item_new_since(&item.cached_at, q.last_viewed_at.as_deref()))
+                .filter(|item| {
+                    is_item_new_since(&item.cached_at, q.last_viewed_at.as_deref()) && !item.read
+                })
                 .count(),
             LeftPaneEntry::FilterStream(fs) => {
                 let filter = FilterQuery::parse(&expand_me(current_user, &fs.filter));
@@ -131,12 +135,13 @@ pub fn compute_unread_counts(
                     .iter()
                     .filter(|item| {
                         is_item_new_since(&item.cached_at, fs.last_viewed_at.as_deref())
+                            && !item.read
                             && filter.matches(item)
                     })
                     .count()
             }
         };
-        out.push((entry.id(), unread));
+        out.push((entry.unread_key(), unread));
     }
     out
 }

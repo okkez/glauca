@@ -15,7 +15,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
-use chrono::Utc;
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{
@@ -141,7 +140,7 @@ struct GlaucaApp {
     item_cursor: usize,
     /// Inline filter text (mirrors the `filter_input` value; drives `filter_items`).
     filter: String,
-    unread_counts: HashMap<i64, usize>,
+    unread_counts: HashMap<(bool, i64), usize>,
     /// Filter stream filter applied to the item list (None for root queries).
     stream_filter: Option<String>,
     /// `last_viewed_at` of the selected entry at selection time; drives `is_new`.
@@ -373,7 +372,7 @@ impl GlaucaApp {
                 let max = self.filtered_len().saturating_sub(1);
                 if self.item_cursor < max {
                     self.item_cursor += 1;
-                    cx.notify();
+                    self.mark_current_item_read(cx);
                 }
             }
             Focus::ItemDetail => {
@@ -394,7 +393,7 @@ impl GlaucaApp {
             Focus::ItemList => {
                 if self.item_cursor > 0 {
                     self.item_cursor -= 1;
-                    cx.notify();
+                    self.mark_current_item_read(cx);
                 }
             }
             Focus::ItemDetail => {
@@ -899,25 +898,19 @@ impl GlaucaApp {
     /// can skip it from the background-refresh sweep.
     fn select_current_entry(&mut self, always_sync: bool) -> Option<i64> {
         let entry = self.entries.get(self.entry_cursor)?.clone();
-        let viewed_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        // Selecting a query does NOT mark it viewed: the unread badge is kept and
+        // reflects the engine's stored `last_viewed_at` (counts only change as sync
+        // brings newer items). Previously this optimistically set last_viewed_at=now
+        // and zeroed the count, which cleared the badge on every open and left it
+        // diverged from the recomputed value until the next background sync.
         let highlight_since = entry.last_viewed_at().map(str::to_string);
-
         self.stream_filter = entry.stream_filter().map(|s| s.to_string());
         self.active_entry_last_viewed_at = highlight_since.clone();
-        if let Some(selected) = self.entries.get_mut(self.entry_cursor) {
-            selected.set_last_viewed_at(Some(viewed_at.clone()));
-        }
-        self.unread_counts.insert(entry.id(), 0);
 
         let root_id = entry.root_query_id();
         self.send(EngineCommand::LoadCached {
             query_id: root_id,
             highlight_since: highlight_since.clone(),
-        });
-        self.send(EngineCommand::MarkEntryViewed {
-            entry_id: entry.id(),
-            is_filter_stream: entry.is_filter_stream(),
-            viewed_at,
         });
         if entry.is_filter_stream() {
             return None;
@@ -1086,11 +1079,50 @@ impl GlaucaApp {
     }
 
     fn recompute_unread(&mut self, query_id: i64, items: &[ItemEntry]) {
-        for (entry_id, unread) in
+        for (key, unread) in
             compute_unread_counts(&self.entries, query_id, items, self.current_user.as_deref())
         {
-            self.unread_counts.insert(entry_id, unread);
+            self.unread_counts.insert(key, unread);
         }
+    }
+
+    /// Mark the currently-selected item read (it is shown in the detail pane):
+    /// flip its in-memory `read` flag, recompute the current query's unread
+    /// badges, and persist via the engine (fire-and-forget). No-op if there is no
+    /// selection or the item is already read.
+    fn mark_current_item_read(&mut self, cx: &mut Context<Self>) {
+        let Some(&idx) = self.filtered.get(self.item_cursor) else {
+            return;
+        };
+        match self.items.get(idx) {
+            Some(item) if !item.read => {}
+            _ => return,
+        }
+        self.items[idx].read = true;
+        let (repo_owner, repo_name, number) = {
+            let item = &self.items[idx];
+            (item.repo_owner.clone(), item.repo_name.clone(), item.number)
+        };
+        if let Some(query_id) = self.selected_root_query_id() {
+            // Recompute from the live items (compute → then insert, to avoid
+            // borrowing self mutably while reading self.items/entries).
+            let updates = compute_unread_counts(
+                &self.entries,
+                query_id,
+                &self.items,
+                self.current_user.as_deref(),
+            );
+            for (key, unread) in updates {
+                self.unread_counts.insert(key, unread);
+            }
+            self.send(EngineCommand::MarkItemRead {
+                query_id,
+                repo_owner,
+                repo_name,
+                number,
+            });
+        }
+        cx.notify();
     }
 
     /// Apply a single engine message to GUI state. Mirrors the TUI's `run_app`
@@ -1298,7 +1330,7 @@ impl GlaucaApp {
                 LeftPaneEntry::Query(q) => q.label.clone(),
                 LeftPaneEntry::FilterStream(fs) => fs.name.clone(),
             };
-            let unread = self.unread_counts.get(&entry.id()).copied().unwrap_or(0);
+            let unread = self.unread_counts.get(&entry.unread_key()).copied().unwrap_or(0);
 
             let row = h_flex()
                 .id(("entry", i))
@@ -1440,7 +1472,7 @@ impl GlaucaApp {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.focus = Focus::ItemList;
                                     this.item_cursor = ix;
-                                    cx.notify();
+                                    this.mark_current_item_read(cx);
                                 }))
                                 .on_mouse_down(
                                     MouseButton::Right,

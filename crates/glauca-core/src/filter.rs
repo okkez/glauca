@@ -193,6 +193,7 @@ mod tests {
             milestone: None,
             cached_at: String::new(),
             is_new: false,
+            read: false,
         }
     }
 

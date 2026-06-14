@@ -539,6 +539,15 @@ pub enum EngineCommand {
         url: String,
         strategy: MergeStrategy,
     },
+    /// Persist that a single cached item has been read (viewed). Identified by the
+    /// same unique key as the items table. Fire-and-forget; the front-end updates
+    /// its in-memory copy and unread count itself.
+    MarkItemRead {
+        query_id: i64,
+        repo_owner: String,
+        repo_name: String,
+        number: i64,
+    },
 }
 
 /// Async engine shared by the TUI and GUI front-ends. Owns the background worker,
@@ -964,6 +973,26 @@ async fn command_loop(
                         Err(e) => {
                             let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
                         }
+                    }
+                });
+            }
+            EngineCommand::MarkItemRead {
+                query_id,
+                repo_owner,
+                repo_name,
+                number,
+            } => {
+                // Fire-and-forget persistence; the front-end already updated its
+                // in-memory item + unread count.
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        db::mark_item_read(&pool2, query_id, &repo_owner, &repo_name, number).await
+                    {
+                        let _ = tx2
+                            .send(AppMessage::Status(format!("mark read error: {e}")))
+                            .await;
                     }
                 });
             }
