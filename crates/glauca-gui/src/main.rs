@@ -27,6 +27,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::text::markdown;
 use gpui_component::{h_flex, v_flex, ActiveTheme, Root, StyledExt, WindowExt};
 use smol::Timer;
@@ -45,10 +46,11 @@ const FILTER_DEBOUNCE: Duration = Duration::from_millis(150);
 const GLAUCA_CONTEXT: &str = "Glauca";
 
 /// Predicate for navigation/edit keys: active under the root context but disabled
-/// whenever an `Input` is in the focus path (so letters reach the text box) or the
-/// comments overlay is focused (so its single-key controls take over). Both `!`
-/// terms are matched against the full focus chain (see `bind_keys`).
-const NAV_CONTEXT: &str = "Glauca && !Input && !GlaucaComments";
+/// whenever an `Input` is in the focus path (so letters reach the text box), the
+/// comments overlay is focused (its single-key controls take over), or a
+/// `PopupMenu` (right-click / Enter action menu) is open (so its keys don't leak to
+/// the underlying list). The `!` terms are matched against the full focus chain.
+const NAV_CONTEXT: &str = "Glauca && !Input && !GlaucaComments && !PopupMenu";
 
 /// Key-binding context for the comments overlay. While its panel is focused, the
 /// overlay's single-key controls (j/k/g/G/s/h/q) fire here instead of the nav keys.
@@ -111,6 +113,16 @@ enum Focus {
     ItemDetail,
 }
 
+/// What a context/action menu operates on (see `open_menu` / `populate_menu`).
+enum MenuKind {
+    /// Item-pane actions (open / comment / view comments / approve / merge).
+    Item(ItemEntry),
+    /// Left-pane entry actions for the entry at `index`.
+    Entry { index: usize, is_query: bool },
+    /// Empty area of the left pane: only "New query".
+    NewQueryOnly,
+}
+
 struct GlaucaApp {
     engine: Engine,
     /// Cloneable command sender, used from non-async click handlers.
@@ -163,6 +175,15 @@ struct GlaucaApp {
     comments_title: SharedString,
     /// Focus handle for the overlay panel; keys are scoped to `COMMENTS_CONTEXT`.
     comments_focus_handle: FocusHandle,
+
+    /// Open right-click / Enter action menu (a self-managed anchored PopupMenu).
+    menu: Option<Entity<PopupMenu>>,
+    /// Screen position the menu is anchored at.
+    menu_pos: Point<Pixels>,
+    /// Last pointer position (updated on mouse move, no repaint); used to anchor the
+    /// menu when opened via the keyboard (Enter), so it appears near the cursor.
+    last_pointer: Point<Pixels>,
+
     /// Inline filter input. Its `Change` events update `filter` (see `new`).
     filter_input: Entity<InputState>,
     /// Pending debounced re-filter task; replacing it cancels the previous one.
@@ -250,6 +271,9 @@ impl GlaucaApp {
             comments_show_hidden: false,
             comments_title: SharedString::default(),
             comments_focus_handle: cx.focus_handle(),
+            menu: None,
+            menu_pos: point(px(0.), px(0.)),
+            last_pointer: point(px(0.), px(0.)),
             filter_input,
             filter_task: None,
             _subscriptions: vec![subscription],
@@ -405,10 +429,11 @@ impl GlaucaApp {
                 self.select_index(self.entry_cursor);
                 cx.notify();
             }
-            // ItemList / ItemDetail → action menu on the selected item.
+            // ItemList / ItemDetail → action menu on the selected item, anchored
+            // near the last pointer position (same PopupMenu as right-click).
             Focus::ItemList | Focus::ItemDetail => {
                 if let Some(item) = self.selected_item() {
-                    self.open_action_menu(item, window, cx);
+                    self.open_menu(self.last_pointer, MenuKind::Item(item), window, cx);
                 }
             }
         }
@@ -564,14 +589,19 @@ impl GlaucaApp {
         if self.focus != Focus::QueryList {
             return;
         }
-        let cmd = match self.entries.get(self.entry_cursor) {
+        self.delete_entry_at(self.entry_cursor);
+    }
+
+    /// Delete the entry at `index` (query or filter stream). UI updates when the
+    /// QueryDeleted/FilterStreamDeleted confirmation arrives.
+    fn delete_entry_at(&mut self, index: usize) {
+        let cmd = match self.entries.get(index) {
             Some(LeftPaneEntry::Query(q)) => Some(EngineCommand::DeleteQuery { query_id: q.id }),
             Some(LeftPaneEntry::FilterStream(fs)) => {
                 Some(EngineCommand::DeleteFilterStream { id: fs.id })
             }
             None => None,
         };
-        // UI updates when the QueryDeleted/FilterStreamDeleted message arrives.
         if let Some(cmd) = cmd {
             self.send(cmd);
         }
@@ -592,7 +622,12 @@ impl GlaucaApp {
         if self.focus != Focus::QueryList {
             return;
         }
-        let cursor = self.entry_cursor;
+        self.reorder_entry(self.entry_cursor, down);
+    }
+
+    /// Move the entry at `cursor` up/down within its group (index-based; no focus
+    /// guard so right-click can target any row).
+    fn reorder_entry(&mut self, cursor: usize, down: bool) {
         let cmd = match self.entries.get(cursor) {
             Some(LeftPaneEntry::Query(q)) => {
                 let current_id = q.id;
@@ -688,6 +723,11 @@ impl GlaucaApp {
     // ── Entry add / edit dialogs ───────────────────────────────────────────────
 
     fn on_new_query(&mut self, _: &NewQuery, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_query(window, cx);
+    }
+
+    /// Open the "add query" form.
+    fn new_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_query_form(None, String::new(), String::new(), window, cx);
     }
 
@@ -697,7 +737,12 @@ impl GlaucaApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = self.entries.get(self.entry_cursor) else {
+        self.new_filter_stream_under(self.entry_cursor, window, cx);
+    }
+
+    /// Open the "add filter stream" form parented to the entry at `index`'s root query.
+    fn new_filter_stream_under(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.entries.get(index) else {
             return;
         };
         let parent_id = entry.root_query_id();
@@ -706,10 +751,15 @@ impl GlaucaApp {
     }
 
     fn on_edit_entry(&mut self, _: &EditEntry, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(LeftPaneEntry::Query(q)) = self.entries.get(self.entry_cursor) {
+        self.edit_entry_at(self.entry_cursor, window, cx);
+    }
+
+    /// Open the edit form for the entry at `index` (query or filter stream).
+    fn edit_entry_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(LeftPaneEntry::Query(q)) = self.entries.get(index) {
             let (id, name, query) = (q.id, q.label.clone(), q.query_str.clone());
             self.open_query_form(Some(id), name, query, window, cx);
-        } else if let Some(LeftPaneEntry::FilterStream(fs)) = self.entries.get(self.entry_cursor) {
+        } else if let Some(LeftPaneEntry::FilterStream(fs)) = self.entries.get(index) {
             let (id, parent, kind, name, filter) = (
                 fs.id,
                 fs.parent_id,
@@ -893,41 +943,27 @@ impl GlaucaApp {
 
     // ── Item actions ───────────────────────────────────────────────────────────
 
-    /// Show a dialog of available actions for `item` (open / comment / approve /
-    /// merge). Each is a button that closes the menu and dispatches.
-    fn open_action_menu(&mut self, item: ItemEntry, window: &mut Window, cx: &mut Context<Self>) {
-        let actions = ItemAction::available_for(&item.kind);
-        let this = cx.weak_entity();
-        window.open_dialog(cx, move |dlg, _w, _cx| {
-            let actions = actions.clone();
-            let item = item.clone();
-            let this = this.clone();
-            dlg.title("Actions").w(px(320.)).content(move |content, _w, _cx| {
-                let mut col = content.gap_2();
-                for (ix, action) in actions.iter().enumerate() {
-                    let label = action.label().to_string();
-                    let action = action.clone();
-                    let item = item.clone();
-                    let this = this.clone();
-                    col = col.child(
-                        Button::new(("action", ix))
-                            .label(label)
-                            .on_click(move |_, window, cx| {
-                                let action = action.clone();
-                                let item = item.clone();
-                                let this = this.clone();
-                                window.close_dialog(cx);
-                                if let Some(app) = this.upgrade() {
-                                    app.update(cx, |app, cx| {
-                                        app.dispatch_action(action, item, window, cx)
-                                    });
-                                }
-                            }),
-                    );
-                }
-                col
-            })
-        });
+    /// Open a `PopupMenu` (right-click / Enter action menu) anchored at `pos`. The
+    /// menu is a self-managed anchored overlay (see `render`); it focuses itself and
+    /// emits `DismissEvent` on selection/Esc/outside-click, which clears `self.menu`.
+    fn open_menu(
+        &mut self,
+        pos: Point<Pixels>,
+        kind: MenuKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app = cx.entity();
+        let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| populate_menu(menu, &app, kind));
+        cx.subscribe(&menu, |this, _menu, _e: &DismissEvent, cx| {
+            this.menu = None;
+            cx.notify();
+        })
+        .detach();
+        menu.focus_handle(cx).focus(window, cx);
+        self.menu = Some(menu);
+        self.menu_pos = pos;
+        cx.notify();
     }
 
     fn dispatch_action(
@@ -1060,6 +1096,14 @@ impl GlaucaApp {
     /// Apply a single engine message to GUI state. Mirrors the TUI's `run_app`
     /// message handling (crates/glauca-cli/src/tui/mod.rs).
     fn apply(&mut self, msg: AppMessage, _cx: &mut Context<Self>) {
+        // Only rebuild the filtered-index cache when items/filter/stream_filter
+        // actually change. Background sync floods `apply` with messages that don't
+        // touch the visible list (other queries' ItemsLoaded, Status, BgSync*,
+        // EntryViewed, …); recomputing on each would re-scan all items (~thousands)
+        // on the UI thread and make the app sluggish while sync runs. Selection and
+        // filter edits recompute in their own handlers (`select_index`,
+        // `preview_entry`, the filter debounce task).
+        let mut needs_refilter = false;
         match msg {
             AppMessage::ItemsLoaded { query_id, mut items } => {
                 self.recompute_unread(query_id, &items);
@@ -1070,6 +1114,7 @@ impl GlaucaApp {
                             is_item_new_since(&item.cached_at, highlight_since.as_deref());
                     }
                     self.items = items;
+                    needs_refilter = true;
                 }
             }
             AppMessage::EntryViewed { entry_id, viewed_at } => {
@@ -1136,6 +1181,7 @@ impl GlaucaApp {
                         highlight_since,
                     });
                     self.syncing = true;
+                    needs_refilter = true;
                 }
                 self.status = Some("Query updated".into());
             }
@@ -1154,6 +1200,7 @@ impl GlaucaApp {
                 {
                     self.stream_filter = Some(new_filter);
                     self.item_cursor = 0;
+                    needs_refilter = true;
                 }
                 if let Some(root_id) = root_id {
                     let items = self.items.clone();
@@ -1170,6 +1217,7 @@ impl GlaucaApp {
                 if self.entries.is_empty() {
                     self.items.clear();
                     self.stream_filter = None;
+                    needs_refilter = true;
                 } else {
                     self.select_index(self.entry_cursor);
                 }
@@ -1183,6 +1231,7 @@ impl GlaucaApp {
                 if self.entries.is_empty() {
                     self.items.clear();
                     self.stream_filter = None;
+                    needs_refilter = true;
                 } else {
                     self.select_index(self.entry_cursor);
                 }
@@ -1224,9 +1273,9 @@ impl GlaucaApp {
                 self.status = Some(format!("Failed to load comments: {e}"));
             }
         }
-        // Keep the filtered-index cache consistent with items/filter/stream_filter
-        // after any state change (also prevents stale indices into a cleared list).
-        self.recompute_filtered();
+        if needs_refilter {
+            self.recompute_filtered();
+        }
     }
 
     fn render_left(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1244,6 +1293,7 @@ impl GlaucaApp {
         for (i, entry) in self.entries.iter().enumerate() {
             let selected = i == self.entry_cursor;
             let is_stream = entry.is_filter_stream();
+            let is_query = matches!(entry, LeftPaneEntry::Query(_));
             let label = match entry {
                 LeftPaneEntry::Query(q) => q.label.clone(),
                 LeftPaneEntry::FilterStream(fs) => fs.name.clone(),
@@ -1285,12 +1335,38 @@ impl GlaucaApp {
                     this.focus = Focus::QueryList;
                     this.select_index(i);
                     cx.notify();
-                }));
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                        this.focus = Focus::QueryList;
+                        this.entry_cursor = i;
+                        this.open_menu(
+                            ev.position,
+                            MenuKind::Entry { index: i, is_query },
+                            window,
+                            cx,
+                        );
+                    }),
+                );
 
             col = col.child(row);
         }
 
-        col
+        // Empty area below the entries: right-click → New query. Kept as its own
+        // flex_1 element so a right-click on a row hits the row handler, not this.
+        col.child(
+            div()
+                .id("left-empty")
+                .flex_1()
+                .min_h(px(24.))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                        this.open_menu(ev.position, MenuKind::NewQueryOnly, window, cx);
+                    }),
+                ),
+        )
     }
 
     fn render_items(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1366,6 +1442,21 @@ impl GlaucaApp {
                                     this.item_cursor = ix;
                                     cx.notify();
                                 }))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                        this.focus = Focus::ItemList;
+                                        this.item_cursor = ix;
+                                        if let Some(item) = this.selected_item() {
+                                            this.open_menu(
+                                                ev.position,
+                                                MenuKind::Item(item),
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    }),
+                                )
                                 .child(
                                     h_flex()
                                         .w_full()
@@ -1420,7 +1511,15 @@ impl GlaucaApp {
             .track_scroll(&self.detail_scroll)
             .border_l_1()
             .border_color(border)
-            .bg(cx.theme().background);
+            .bg(cx.theme().background)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    if let Some(item) = this.selected_item() {
+                        this.open_menu(ev.position, MenuKind::Item(item), window, cx);
+                    }
+                }),
+            );
 
         let Some(item) = self.filtered.get(self.item_cursor).and_then(|&i| self.items.get(i))
         else {
@@ -1650,6 +1749,70 @@ impl GlaucaApp {
     }
 }
 
+/// Add a menu item whose click runs `f` against the `GlaucaApp` entity. Keeps the
+/// click closures `'static` while still calling back into the view.
+fn app_menu_item<F>(
+    menu: PopupMenu,
+    app: &Entity<GlaucaApp>,
+    label: impl Into<SharedString>,
+    f: F,
+) -> PopupMenu
+where
+    F: Fn(&mut GlaucaApp, &mut Window, &mut Context<GlaucaApp>) + 'static,
+{
+    let app = app.clone();
+    menu.item(
+        PopupMenuItem::new(label.into()).on_click(move |_ev, window, cx| {
+            app.update(cx, |this, cx| f(this, window, cx));
+        }),
+    )
+}
+
+/// Build the action menu for a given `MenuKind`, reusing `dispatch_action` and the
+/// index-based entry helpers. Shared by right-click and the Enter action menu.
+fn populate_menu(mut menu: PopupMenu, app: &Entity<GlaucaApp>, kind: MenuKind) -> PopupMenu {
+    match kind {
+        MenuKind::Item(item) => {
+            for action in ItemAction::available_for(&item.kind) {
+                let item = item.clone();
+                let label = action.label().to_string();
+                menu = app_menu_item(menu, app, label, move |this, window, cx| {
+                    this.dispatch_action(action.clone(), item.clone(), window, cx);
+                });
+            }
+        }
+        MenuKind::Entry { index, is_query } => {
+            menu = app_menu_item(menu, app, "Edit", move |this, window, cx| {
+                this.edit_entry_at(index, window, cx);
+            });
+            menu = app_menu_item(menu, app, "Delete", move |this, _w, _cx| {
+                this.delete_entry_at(index);
+            });
+            menu = app_menu_item(menu, app, "Move up", move |this, _w, _cx| {
+                this.reorder_entry(index, false);
+            });
+            menu = app_menu_item(menu, app, "Move down", move |this, _w, _cx| {
+                this.reorder_entry(index, true);
+            });
+            menu = menu.separator();
+            if is_query {
+                menu = app_menu_item(menu, app, "New filter stream", move |this, window, cx| {
+                    this.new_filter_stream_under(index, window, cx);
+                });
+            }
+            menu = app_menu_item(menu, app, "New query", |this, window, cx| {
+                this.new_query(window, cx);
+            });
+        }
+        MenuKind::NewQueryOnly => {
+            menu = app_menu_item(menu, app, "New query", |this, window, cx| {
+                this.new_query(window, cx);
+            });
+        }
+    }
+    menu
+}
+
 /// A `label: value` row in the detail pane.
 fn detail_field(label: &str, value: &str, cx: &App) -> impl IntoElement {
     h_flex()
@@ -1721,6 +1884,11 @@ impl Render for GlaucaApp {
             .id("glauca-root")
             .key_context(GLAUCA_CONTEXT)
             .track_focus(&self.focus_handle)
+            // Track the pointer (no repaint) so the Enter action menu can anchor
+            // near the cursor.
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _w, _cx| {
+                this.last_pointer = ev.position;
+            }))
             .on_action(cx.listener(Self::on_move_down))
             .on_action(cx.listener(Self::on_move_up))
             .on_action(cx.listener(Self::on_focus_left))
@@ -1787,6 +1955,34 @@ impl Render for GlaucaApp {
             // Comments overlay draws over the 3-pane row (absolute, full-size).
             .when(self.comments_open, |this| {
                 this.child(self.render_comments_overlay(cx))
+            })
+            // Right-click / Enter action menu, anchored at the click/pointer point.
+            // A full-window backdrop swallows clicks and dismisses on outside click.
+            .when_some(self.menu.clone(), |this, menu| {
+                this.child(
+                    deferred(
+                        anchored().child(
+                            div()
+                                .w(window.bounds().size.width)
+                                .h(window.bounds().size.height)
+                                .occlude()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.menu = None;
+                                        cx.notify();
+                                    }),
+                                )
+                                .child(
+                                    anchored()
+                                        .position(self.menu_pos)
+                                        .snap_to_window_with_margin(px(8.))
+                                        .child(menu),
+                                ),
+                        ),
+                    )
+                    .with_priority(1),
+                )
             })
             // gpui-component stores open dialogs/sheets/notifications in `Root`, but
             // `Root`'s own render does NOT paint them — the inner view must mount the
