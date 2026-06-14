@@ -17,11 +17,13 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::Utc;
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit};
-use glauca_core::logic::{compute_unread_counts, filter_items, is_item_new_since};
+use glauca_core::filter::FilterQuery;
+use glauca_core::logic::{compute_unread_counts, expand_me, filter_items, is_item_new_since};
 use glauca_core::types::{ItemEntry, LeftPaneEntry};
 use glauca_core::{db, github};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{h_flex, v_flex, ActiveTheme, Root, StyledExt};
 use smol::Timer;
 use tokio::sync::mpsc::Sender;
@@ -39,6 +41,10 @@ struct GlaucaApp {
     current_user: Option<String>,
 
     items: Vec<ItemEntry>,
+    /// Index into the *filtered* item list of the row shown in the detail pane.
+    item_cursor: usize,
+    /// Inline filter text (mirrors the `filter_input` value; drives `filter_items`).
+    filter: String,
     unread_counts: HashMap<i64, usize>,
     /// Filter stream filter applied to the item list (None for root queries).
     stream_filter: Option<String>,
@@ -52,10 +58,15 @@ struct GlaucaApp {
     status: Option<String>,
 
     left_scroll: ScrollHandle,
+    detail_scroll: ScrollHandle,
+    /// Inline filter input. Its `Change` events update `filter` (see `new`).
+    filter_input: Entity<InputState>,
+    /// Keeps the `filter_input` subscription alive for the view's lifetime.
+    _subscriptions: Vec<Subscription>,
 }
 
 impl GlaucaApp {
-    fn new(engine: Engine, init: EngineInit, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(engine: Engine, init: EngineInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Periodically drain engine messages and repaint while the window lives.
         cx.spawn(async move |this, cx| {
             loop {
@@ -79,6 +90,20 @@ impl GlaucaApp {
         .detach();
 
         let cmd_tx = engine.sender();
+        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("filter…"));
+        // Mirror the input value into `filter` (and reset the item cursor) on every
+        // change so `filter_items` re-runs and the detail pane stays in range.
+        let subscription = cx.subscribe_in(
+            &filter_input,
+            window,
+            |this, input, ev: &InputEvent, _window, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.filter = input.read(cx).value().to_string();
+                    this.item_cursor = 0;
+                    cx.notify();
+                }
+            },
+        );
         let EngineInit {
             entries,
             current_user,
@@ -90,6 +115,8 @@ impl GlaucaApp {
             entry_cursor: 0,
             current_user,
             items: Vec::new(),
+            item_cursor: 0,
+            filter: String::new(),
             unread_counts: HashMap::new(),
             stream_filter: None,
             active_entry_last_viewed_at: None,
@@ -97,6 +124,9 @@ impl GlaucaApp {
             bg_sync_pending: 0,
             status: None,
             left_scroll: ScrollHandle::new(),
+            detail_scroll: ScrollHandle::new(),
+            filter_input,
+            _subscriptions: vec![subscription],
         };
         app.prime();
         app
@@ -150,6 +180,7 @@ impl GlaucaApp {
         }
         self.entry_cursor = index;
         self.items.clear();
+        self.item_cursor = 0;
         self.select_current_entry(true);
     }
 
@@ -317,7 +348,7 @@ impl GlaucaApp {
         let count = filter_items(
             &self.items,
             self.stream_filter.as_deref(),
-            "",
+            &self.filter,
             self.current_user.as_deref(),
         )
         .len();
@@ -345,9 +376,15 @@ impl GlaucaApp {
                     let filtered = filter_items(
                         &this.items,
                         this.stream_filter.as_deref(),
-                        "",
+                        &this.filter,
                         this.current_user.as_deref(),
                     );
+                    // Inline-filter query, used to highlight matching title text.
+                    let fq = FilterQuery::parse(&expand_me(
+                        this.current_user.as_deref(),
+                        &this.filter,
+                    ));
+                    let selected = this.item_cursor;
                     let mut rows = Vec::new();
                     for ix in range {
                         let Some(item) = filtered.get(ix) else {
@@ -366,7 +403,7 @@ impl GlaucaApp {
                             meta.push_str(&item.labels.join(", "));
                         }
                         let is_new = item.is_new;
-                        let title = item.title.clone();
+                        let title_el = highlight_title(&item.title, fq.highlight_ranges(&item.title), cx);
 
                         rows.push(
                             v_flex()
@@ -378,6 +415,15 @@ impl GlaucaApp {
                                 .gap_0p5()
                                 .border_b_1()
                                 .border_color(cx.theme().border)
+                                .cursor_pointer()
+                                .when(ix == selected, |e| e.bg(cx.theme().list_active))
+                                .when(ix != selected, |e| {
+                                    e.hover(|e| e.bg(cx.theme().list_hover))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.item_cursor = ix;
+                                    cx.notify();
+                                }))
                                 .child(
                                     h_flex()
                                         .w_full()
@@ -396,15 +442,7 @@ impl GlaucaApp {
                                                     .child("NEW"),
                                             )
                                         })
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .font_bold()
-                                                .text_color(cx.theme().foreground)
-                                                .child(SharedString::from(title)),
-                                        ),
+                                        .child(title_el),
                                 )
                                 .child(
                                     div()
@@ -421,6 +459,155 @@ impl GlaucaApp {
             )
             .h_full(),
         )
+    }
+
+    fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let filtered = filter_items(
+            &self.items,
+            self.stream_filter.as_deref(),
+            &self.filter,
+            self.current_user.as_deref(),
+        );
+        let container = v_flex()
+            .id("detail-pane")
+            .w(px(440.))
+            .h_full()
+            .flex_shrink_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.detail_scroll)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background);
+
+        let Some(item) = filtered.get(self.item_cursor) else {
+            return container.child(
+                div()
+                    .p_4()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Select an item"),
+            );
+        };
+
+        let location = format!("{}/{}#{}", item.repo_owner, item.repo_name, item.number);
+        let mut state_line = format!("{}  ·  @{}", item.state, item.author.as_deref().unwrap_or("ghost"));
+        if item.is_draft {
+            state_line.push_str("  ·  draft");
+        }
+        if let Some(decision) = &item.review_decision {
+            state_line.push_str("  ·  ");
+            state_line.push_str(decision);
+        }
+
+        container
+            .p_4()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(location)),
+            )
+            .child(
+                div()
+                    .text_lg()
+                    .font_bold()
+                    .text_color(cx.theme().foreground)
+                    .child(SharedString::from(item.title.clone())),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(state_line)),
+            )
+            .when(!item.labels.is_empty(), |e| {
+                e.child(detail_field("labels", &item.labels.join(", "), cx))
+            })
+            .when_some(item.base_ref.as_ref().zip(item.head_ref.as_ref()), |e, (base, head)| {
+                e.child(detail_field("branch", &format!("{head} → {base}"), cx))
+            })
+            .when(!item.assignees.is_empty(), |e| {
+                e.child(detail_field("assignees", &item.assignees.join(", "), cx))
+            })
+            .when(!item.requested_reviewers.is_empty(), |e| {
+                e.child(detail_field(
+                    "reviewers",
+                    &item.requested_reviewers.join(", "),
+                    cx,
+                ))
+            })
+            .when(!item.reviews.is_empty(), |e| {
+                let reviews = item
+                    .reviews
+                    .iter()
+                    .map(|(login, state)| format!("{login}: {state}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                e.child(detail_field("reviews", &reviews, cx))
+            })
+            .when_some(item.milestone.as_ref(), |e, m| {
+                e.child(detail_field("milestone", m, cx))
+            })
+            .child(detail_field("updated", &item.updated_at, cx))
+            .child(detail_field("url", &item.url, cx))
+            .child(
+                // Body as raw text (MVP — Markdown formatting is post-MVP).
+                div()
+                    .mt_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .text_sm()
+                    .text_color(cx.theme().foreground)
+                    .child(SharedString::from(
+                        item.body.clone().unwrap_or_else(|| "(no description)".into()),
+                    )),
+            )
+    }
+}
+
+/// A `label: value` row in the detail pane.
+fn detail_field(label: &str, value: &str, cx: &App) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .gap_2()
+        .text_sm()
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(96.))
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from(label.to_string())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(cx.theme().foreground)
+                .child(SharedString::from(value.to_string())),
+        )
+}
+
+/// Render an item title, emphasising the inline-filter match range if any.
+fn highlight_title(title: &str, range: Option<(usize, usize)>, cx: &App) -> impl IntoElement {
+    let base = h_flex()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .font_bold()
+        .text_color(cx.theme().foreground);
+
+    match range {
+        Some((start, end)) if start < end && end <= title.len() => base
+            .child(SharedString::from(title[..start].to_string()))
+            .child(
+                div()
+                    .bg(cx.theme().accent)
+                    .text_color(cx.theme().accent_foreground)
+                    .child(SharedString::from(title[start..end].to_string())),
+            )
+            .child(SharedString::from(title[end..].to_string())),
+        _ => base.truncate().child(SharedString::from(title.to_string())),
     }
 }
 
@@ -468,7 +655,24 @@ impl Render for GlaucaApp {
                     .flex_1()
                     .min_h_0()
                     .child(self.render_left(cx))
-                    .child(self.render_items(cx)),
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(
+                                // Inline filter input (drives `filter_items`).
+                                div()
+                                    .w_full()
+                                    .flex_shrink_0()
+                                    .p_2()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
+                                    .child(Input::new(&self.filter_input)),
+                            )
+                            .child(self.render_items(cx)),
+                    )
+                    .child(self.render_detail(cx)),
             )
     }
 }
