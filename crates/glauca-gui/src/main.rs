@@ -1342,7 +1342,7 @@ fn highlight_title(title: &str, range: Option<(usize, usize)>, cx: &App) -> impl
 }
 
 impl Render for GlaucaApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let user = match &self.current_user {
             Some(u) => format!("connected as {u}"),
             None => "not authenticated".to_string(),
@@ -1421,6 +1421,14 @@ impl Render for GlaucaApp {
                     )
                     .child(self.render_detail(cx)),
             )
+            // gpui-component stores open dialogs/sheets/notifications in `Root`, but
+            // `Root`'s own render does NOT paint them — the inner view must mount the
+            // overlay layers (see examples/dialog_overlay). Without these, every
+            // `open_dialog` (entry add/edit forms, action menu, comment/approve/merge)
+            // is invisible, which is why the editing keys appeared to do nothing.
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 
