@@ -15,216 +15,17 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-pub mod filter;
 pub mod ui;
 
-use filter::FilterQuery;
+use glauca_core::filter::FilterQuery;
+use glauca_core::logic::{cached_item_to_item_entry, group_range, is_item_new_since, move_group_down};
 
-// ── Display structs used by the TUI ─────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct QueryEntry {
-    pub id: i64,
-    /// Display label shown in the left pane (name if set, otherwise query_str).
-    pub label: String,
-    /// Actual GitHub search query string sent to the API.
-    pub query_str: String,
-    pub kind: String,
-    pub last_viewed_at: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct FilterStreamEntry {
-    pub id: i64,
-    pub parent_id: i64,
-    pub name: String,
-    pub filter: String,
-    pub kind: String,
-    pub last_viewed_at: Option<String>,
-}
-
-/// A single row in the left pane — either a root query or a filter stream.
-#[derive(Clone)]
-pub enum LeftPaneEntry {
-    Query(QueryEntry),
-    FilterStream(FilterStreamEntry),
-}
-
-impl LeftPaneEntry {
-    pub fn id(&self) -> i64 {
-        match self {
-            Self::Query(q) => q.id,
-            Self::FilterStream(fs) => fs.id,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn display_label(&self) -> &str {
-        match self {
-            Self::Query(q) => &q.label,
-            Self::FilterStream(fs) => &fs.name,
-        }
-    }
-
-    pub fn kind(&self) -> &str {
-        match self {
-            Self::Query(q) => &q.kind,
-            Self::FilterStream(fs) => &fs.kind,
-        }
-    }
-
-    /// The root query whose cached items should be loaded.
-    pub fn root_query_id(&self) -> i64 {
-        match self {
-            Self::Query(q) => q.id,
-            Self::FilterStream(fs) => fs.parent_id,
-        }
-    }
-
-    /// The actual GitHub search query string (only meaningful for root queries).
-    pub fn root_query_str(&self) -> Option<&str> {
-        match self {
-            Self::Query(q) => Some(&q.query_str),
-            Self::FilterStream(_) => None,
-        }
-    }
-
-    /// Filter string to apply on top of the inline filter (None for root queries).
-    pub fn stream_filter(&self) -> Option<&str> {
-        match self {
-            Self::Query(_) => None,
-            Self::FilterStream(fs) => Some(&fs.filter),
-        }
-    }
-
-    pub fn is_filter_stream(&self) -> bool {
-        matches!(self, Self::FilterStream(_))
-    }
-
-    pub fn last_viewed_at(&self) -> Option<&str> {
-        match self {
-            Self::Query(q) => q.last_viewed_at.as_deref(),
-            Self::FilterStream(fs) => fs.last_viewed_at.as_deref(),
-        }
-    }
-
-    pub fn set_last_viewed_at(&mut self, last_viewed_at: Option<String>) {
-        match self {
-            Self::Query(q) => q.last_viewed_at = last_viewed_at,
-            Self::FilterStream(fs) => fs.last_viewed_at = last_viewed_at,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn parent_id(&self) -> Option<i64> {
-        match self {
-            Self::Query(_) => None,
-            Self::FilterStream(fs) => Some(fs.parent_id),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ItemEntry {
-    pub number: i64,
-    pub title: String,
-    pub repo_owner: String,
-    pub repo_name: String,
-    pub author: Option<String>,
-    pub state: String,
-    pub updated_at: String,
-    pub labels: Vec<String>,
-    pub url: String,
-    pub comment_count: i64,
-    pub kind: String,
-    pub requested_reviewers: Vec<String>,
-    /// Submitted reviews: login + state (APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED)
-    pub reviews: Vec<(String, String)>,
-    pub body: Option<String>,
-    pub assignees: Vec<String>,
-    pub is_draft: bool,
-    pub created_at_item: Option<String>,
-    pub base_ref: Option<String>,
-    pub head_ref: Option<String>,
-    pub review_decision: Option<String>,
-    pub milestone: Option<String>,
-    pub cached_at: String,
-    pub is_new: bool,
-}
-
-/// A single comment entry fetched from GitHub and displayed in the comments popup.
-#[derive(Clone, Debug)]
-pub struct CommentEntry {
-    pub author: String,
-    pub created_at: String,
-    pub body: String,
-    pub is_minimized: bool,
-    pub minimized_reason: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ItemAction {
-    OpenBrowser,
-    Comment,
-    ViewComments,
-    ApprovePR,
-    MergePR,
-}
-
-impl ItemAction {
-    pub fn label(&self) -> &str {
-        match self {
-            Self::OpenBrowser => "Open in browser",
-            Self::Comment => "Comment",
-            Self::ViewComments => "View comments",
-            Self::ApprovePR => "Approve PR",
-            Self::MergePR => "Merge PR",
-        }
-    }
-
-    pub fn available_for(kind: &str) -> Vec<Self> {
-        match kind {
-            "pull_request" => vec![
-                Self::OpenBrowser,
-                Self::Comment,
-                Self::ViewComments,
-                Self::ApprovePR,
-                Self::MergePR,
-            ],
-            "issue" => vec![Self::OpenBrowser, Self::Comment, Self::ViewComments],
-            _ => vec![],
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum MergeStrategy {
-    Squash,
-    Merge,
-    Rebase,
-}
-
-impl MergeStrategy {
-    pub fn all() -> Vec<Self> {
-        vec![Self::Squash, Self::Merge, Self::Rebase]
-    }
-
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Squash => "Squash",
-            Self::Merge => "Merge",
-            Self::Rebase => "Rebase",
-        }
-    }
-
-    pub fn flag(&self) -> &str {
-        match self {
-            Self::Squash => "--squash",
-            Self::Merge => "--merge",
-            Self::Rebase => "--rebase",
-        }
-    }
-}
+// ── Display/domain types ─────────────────────────────────────────────────────
+// Moved to glauca-core::types (framework 非依存)。TUI からは従来名で使えるよう re-export。
+pub use glauca_core::types::{
+    CommentEntry, FilterStreamEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy,
+    QueryEntry,
+};
 
 // ── Application state ────────────────────────────────────────────────────────
 
@@ -343,43 +144,16 @@ impl App {
     /// Replace `@me` with the authenticated user's login (case-insensitive).
     /// Falls back to `@me` unchanged if the user is not known yet.
     fn expand_me<'a>(&'a self, s: &'a str) -> std::borrow::Cow<'a, str> {
-        if let Some(login) = &self.current_user {
-            // Only replace the token `@me` (whole word match within tokens)
-            if s.contains("@me") {
-                return std::borrow::Cow::Owned(
-                    s.split_whitespace()
-                        .map(|tok| {
-                            if tok.to_lowercase().ends_with(":@me") {
-                                let prefix = &tok[..tok.len() - 3]; // strip "@me"
-                                format!("{}{}", prefix, login)
-                            } else if tok == "@me" {
-                                login.clone()
-                            } else {
-                                tok.to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                );
-            }
-        }
-        std::borrow::Cow::Borrowed(s)
+        glauca_core::logic::expand_me(self.current_user.as_deref(), s)
     }
 
     pub fn filtered_items(&self) -> Vec<&ItemEntry> {
-        let stream_q = self
-            .stream_filter
-            .as_deref()
-            .map(|s| FilterQuery::parse(&self.expand_me(s)));
-        let inline_q = self.parsed_filter();
-
-        self.items
-            .iter()
-            .filter(|i| {
-                stream_q.as_ref().map_or(true, |q| q.matches(i))
-                    && (inline_q.is_empty() || inline_q.matches(i))
-            })
-            .collect()
+        glauca_core::logic::filter_items(
+            &self.items,
+            self.stream_filter.as_deref(),
+            &self.filter,
+            self.current_user.as_deref(),
+        )
     }
 
     pub fn selected_item(&self) -> Option<&ItemEntry> {
@@ -410,28 +184,13 @@ impl App {
     }
 
     fn recompute_unread_counts_for_query(&mut self, query_id: i64, items: &[ItemEntry]) {
-        for entry in self
-            .entries
-            .iter()
-            .filter(|entry| entry.root_query_id() == query_id)
-        {
-            let unread = match entry {
-                LeftPaneEntry::Query(q) => items
-                    .iter()
-                    .filter(|item| is_item_new_since(&item.cached_at, q.last_viewed_at.as_deref()))
-                    .count(),
-                LeftPaneEntry::FilterStream(fs) => {
-                    let filter = FilterQuery::parse(&self.expand_me(&fs.filter));
-                    items
-                        .iter()
-                        .filter(|item| {
-                            is_item_new_since(&item.cached_at, fs.last_viewed_at.as_deref())
-                                && filter.matches(item)
-                        })
-                        .count()
-                }
-            };
-            self.unread_counts.insert(entry.id(), unread);
+        for (entry_id, unread) in glauca_core::logic::compute_unread_counts(
+            &self.entries,
+            query_id,
+            items,
+            self.current_user.as_deref(),
+        ) {
+            self.unread_counts.insert(entry_id, unread);
         }
     }
 }
@@ -1119,41 +878,6 @@ async fn execute_merge(url: &str, strategy: &MergeStrategy) -> anyhow::Result<St
     Ok(format!("PR merged ({})", strategy.label()))
 }
 
-fn is_item_new_since(cached_at: &str, last_viewed_at: Option<&str>) -> bool {
-    last_viewed_at
-        .map(|last_viewed_at| cached_at > last_viewed_at)
-        .unwrap_or(true)
-}
-
-fn cached_item_to_item_entry(c: db::CachedItem, last_viewed_at: Option<&str>) -> ItemEntry {
-    let is_new = is_item_new_since(&c.cached_at, last_viewed_at);
-    ItemEntry {
-        number: c.number,
-        title: c.title,
-        repo_owner: c.repo_owner,
-        repo_name: c.repo_name,
-        author: c.author,
-        state: c.state,
-        updated_at: c.updated_at,
-        labels: serde_labels(&c.labels),
-        url: c.url,
-        comment_count: c.comment_count,
-        kind: c.kind,
-        requested_reviewers: serde_labels(&c.requested_reviewers),
-        reviews: serde_reviews(&c.reviews),
-        body: c.body,
-        assignees: serde_labels(&c.assignees),
-        is_draft: c.is_draft,
-        created_at_item: c.created_at_item,
-        base_ref: c.base_ref,
-        head_ref: c.head_ref,
-        review_decision: c.review_decision,
-        milestone: c.milestone,
-        cached_at: c.cached_at,
-        is_new,
-    }
-}
-
 async fn load_items_task(
     pool: SqlitePool,
     query_id: i64,
@@ -1176,23 +900,6 @@ async fn load_items_task(
     }
 }
 
-fn serde_labels(raw: &str) -> Vec<String> {
-    // Labels are stored as a JSON array string, e.g. '["bug","enhancement"]'
-    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
-}
-
-fn serde_reviews(raw: &str) -> Vec<(String, String)> {
-    // Reviews stored as [{"login":"alice","state":"APPROVED"}]
-    serde_json::from_str::<Vec<serde_json::Value>>(raw)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| {
-            let login = v["login"].as_str()?.to_string();
-            let state = v["state"].as_str()?.to_string();
-            Some((login, state))
-        })
-        .collect()
-}
 
 /// Fetch fresh results from GitHub API page by page, upserting each page immediately
 /// so the TUI can show results as they arrive rather than waiting for all pages.
@@ -1340,37 +1047,6 @@ async fn refresh_timer_task(
 
 /// Returns the contiguous range `[query_idx, next_query_idx)` for the group
 /// starting at `query_idx` (the query entry plus all following filter streams).
-fn group_range(entries: &[LeftPaneEntry], query_idx: usize) -> std::ops::Range<usize> {
-    let end = entries[query_idx + 1..]
-        .iter()
-        .position(|e| matches!(e, LeftPaneEntry::Query(_)))
-        .map(|i| query_idx + 1 + i)
-        .unwrap_or(entries.len());
-    query_idx..end
-}
-
-/// Moves the query group at `query_idx` one position down (past the next query
-/// group). Returns the new index of the moved group, or `None` if it was
-/// already at the bottom.
-fn move_group_down(entries: &mut Vec<LeftPaneEntry>, query_idx: usize) -> Option<usize> {
-    let range_a = group_range(entries, query_idx);
-    let next_query_idx = range_a.end;
-    if next_query_idx >= entries.len() {
-        return None; // already at the bottom
-    }
-    let range_b = group_range(entries, next_query_idx);
-
-    // Drain higher indices first to keep lower indices valid.
-    let group_b: Vec<_> = entries.drain(range_b.clone()).collect();
-    let group_a: Vec<_> = entries.drain(range_a.clone()).collect();
-    let insert_at = range_a.start;
-    let b_len = group_b.len();
-    for (i, item) in group_b.into_iter().chain(group_a).enumerate() {
-        entries.insert(insert_at + i, item);
-    }
-    Some(insert_at + b_len) // new start index of the moved group
-}
-
 struct SelectedEntryLoad {
     entry_id: i64,
     root_id: i64,

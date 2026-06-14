@@ -3,5 +3,8 @@
 // 今後 filter/types/logic/engine を追加していく。
 
 pub mod db;
+pub mod filter;
 pub mod github;
+pub mod logic;
 pub mod model;
+pub mod types;

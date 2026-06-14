@@ -1,3 +1,5 @@
+use crate::types::ItemEntry;
+
 /// Parsed representation of a filter query string.
 ///
 /// Syntax:
@@ -53,7 +55,7 @@ impl FilterQuery {
     }
 
     /// Returns `true` if `item` matches all conditions in this query.
-    pub fn matches(&self, item: &crate::tui::ItemEntry) -> bool {
+    pub fn matches(&self, item: &ItemEntry) -> bool {
         // state filter
         for s in &self.states {
             if !item.state.to_lowercase().contains(s.as_str()) {
@@ -110,16 +112,12 @@ impl FilterQuery {
         true
     }
 
-    /// Returns spans for `text`, highlighting occurrences of plain text tokens.
-    /// Used to highlight matching parts in the item list.
-    pub fn highlight_spans<'a>(
-        &self,
-        text: &'a str,
-        normal: ratatui::style::Style,
-        highlight: ratatui::style::Style,
-    ) -> Vec<ratatui::text::Span<'a>> {
+    /// Byte range `(start, end)` in `text` of the earliest plain-text-token match
+    /// (case-insensitive), corrected to char boundaries. `None` if there is no
+    /// plain text token or no match. Frontends turn this into styled spans.
+    pub fn highlight_ranges(&self, text: &str) -> Option<(usize, usize)> {
         if self.text_tokens.is_empty() {
-            return vec![ratatui::text::Span::styled(text, normal)];
+            return None;
         }
 
         // Find the earliest matching token position (case-insensitive).
@@ -134,23 +132,10 @@ impl FilterQuery {
             }
         }
 
-        match best {
-            None => vec![ratatui::text::Span::styled(text, normal)],
-            Some((start, end)) => {
-                // Ensure byte indices are on char boundaries
-                let start = floor_char_boundary(text, start);
-                let end = ceil_char_boundary(text, end);
-                let mut spans = Vec::new();
-                if start > 0 {
-                    spans.push(ratatui::text::Span::styled(&text[..start], normal));
-                }
-                spans.push(ratatui::text::Span::styled(&text[start..end], highlight));
-                if end < text.len() {
-                    spans.push(ratatui::text::Span::styled(&text[end..], normal));
-                }
-                spans
-            }
-        }
+        best.map(|(start, end)| {
+            // Ensure byte indices are on char boundaries.
+            (floor_char_boundary(text, start), ceil_char_boundary(text, end))
+        })
     }
 }
 
@@ -181,7 +166,6 @@ fn ceil_char_boundary(s: &str, idx: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::ItemEntry;
 
     fn item(title: &str, author: &str, state: &str, labels: &[&str], repo: &str) -> ItemEntry {
         let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
@@ -289,83 +273,50 @@ mod tests {
         assert!(q.matches(&item("anything", "a", "open", &[], "o/r")));
     }
 
+    // ── highlight_ranges ─────────────────────────────────────────────────────────
+
     #[test]
-    fn highlight_spans_no_match_returns_single_span() {
+    fn highlight_ranges_no_match_returns_none() {
         let q = FilterQuery::parse("xyz");
-        let normal = ratatui::style::Style::default();
-        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
-        let spans = q.highlight_spans("Fix the bug", normal, highlight);
-        // No match → single unstyled span with full text.
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content, "Fix the bug");
-        assert_eq!(spans[0].style, normal);
+        assert_eq!(q.highlight_ranges("Fix the bug"), None);
     }
 
     #[test]
-    fn highlight_spans_match_in_middle() {
+    fn highlight_ranges_match_in_middle() {
         let q = FilterQuery::parse("bug");
-        let normal = ratatui::style::Style::default();
-        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
-        let spans = q.highlight_spans("Fix the bug here", normal, highlight);
-        // Three spans: before, match, after.
-        assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].content, "Fix the ");
-        assert_eq!(spans[1].content, "bug");
-        assert_eq!(spans[1].style, highlight);
-        assert_eq!(spans[2].content, " here");
+        // "Fix the " = 8 bytes, "bug" = 3 bytes.
+        assert_eq!(q.highlight_ranges("Fix the bug here"), Some((8, 11)));
     }
 
     #[test]
-    fn highlight_spans_match_at_start() {
+    fn highlight_ranges_match_at_start() {
         let q = FilterQuery::parse("fix");
-        let normal = ratatui::style::Style::default();
-        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
-        let spans = q.highlight_spans("Fix the bug", normal, highlight);
-        // Two spans: match, after (no prefix span).
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content, "Fix");
-        assert_eq!(spans[0].style, highlight);
-        assert_eq!(spans[1].content, " the bug");
+        assert_eq!(q.highlight_ranges("Fix the bug"), Some((0, 3)));
     }
 
     #[test]
-    fn highlight_spans_match_at_end() {
+    fn highlight_ranges_match_at_end() {
         let q = FilterQuery::parse("bug");
-        let normal = ratatui::style::Style::default();
-        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
-        let spans = q.highlight_spans("Fix the bug", normal, highlight);
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content, "Fix the ");
-        assert_eq!(spans[1].content, "bug");
-        assert_eq!(spans[1].style, highlight);
+        assert_eq!(q.highlight_ranges("Fix the bug"), Some((8, 11)));
     }
 
     #[test]
-    fn highlight_spans_empty_query_no_highlight() {
+    fn highlight_ranges_empty_query_none() {
         let q = FilterQuery::parse("");
-        let normal = ratatui::style::Style::default();
-        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
-        let spans = q.highlight_spans("Fix the bug", normal, highlight);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].style, normal);
+        assert_eq!(q.highlight_ranges("Fix the bug"), None);
     }
 
     #[test]
-    fn highlight_spans_structured_token_no_highlight() {
+    fn highlight_ranges_structured_token_none() {
         // state:open is a structured token, not a plain text token → no highlight.
         let q = FilterQuery::parse("state:open");
-        let normal = ratatui::style::Style::default();
-        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
-        let spans = q.highlight_spans("open issue title", normal, highlight);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].style, normal);
+        assert_eq!(q.highlight_ranges("open issue title"), None);
     }
 
     // ── parse edge cases ────────────────────────────────────────────────────────
 
     #[test]
     fn parse_case_insensitive_structured_token() {
-        // Tokens are lowercased before parsing, so State:Open should work.
         let q = FilterQuery::parse("State:Open");
         assert_eq!(q.states, vec!["open"]);
         assert!(q.text_tokens.is_empty());
@@ -373,7 +324,6 @@ mod tests {
 
     #[test]
     fn parse_repeated_state_tokens() {
-        // Both values are collected; matches() ANDs them, so both must hold.
         let q = FilterQuery::parse("state:open state:closed");
         assert_eq!(q.states.len(), 2);
         assert!(q.states.contains(&"open".to_string()));
@@ -394,7 +344,6 @@ mod tests {
     #[test]
     fn plain_text_matches_author() {
         let q = FilterQuery::parse("alice");
-        // Plain text should also match against author login.
         assert!(q.matches(&item("some PR", "alice", "open", &[], "o/r")));
         assert!(!q.matches(&item("some PR", "bob", "open", &[], "o/r")));
     }
@@ -402,7 +351,6 @@ mod tests {
     #[test]
     fn plain_text_matches_label() {
         let q = FilterQuery::parse("bug");
-        // Plain text should also match against labels.
         assert!(q.matches(&item("some PR", "a", "open", &["bug"], "o/r")));
         assert!(!q.matches(&item("some PR", "a", "open", &["enhancement"], "o/r")));
     }
@@ -417,16 +365,14 @@ mod tests {
 
     #[test]
     fn state_filter_case_insensitive() {
-        // Item state is compared case-insensitively.
         let q = FilterQuery::parse("state:open");
         let mut i = item("PR", "a", "open", &[], "o/r");
-        i.state = "Open".to_string(); // stored with capital O
+        i.state = "Open".to_string();
         assert!(q.matches(&i));
     }
 
     #[test]
     fn is_and_state_are_equivalent() {
-        // `is:merged` and `state:merged` should behave the same way.
         let q_is = FilterQuery::parse("is:merged");
         let q_state = FilterQuery::parse("state:merged");
         let merged = item("PR", "a", "merged", &[], "o/r");
@@ -438,30 +384,21 @@ mod tests {
     #[test]
     fn author_filter_case_insensitive() {
         let q = FilterQuery::parse("author:Alice");
-        // parse lowercases the token; item author compared via to_lowercase()
         assert!(q.matches(&item("PR", "alice", "open", &[], "o/r")));
     }
 
-    // ── highlight_spans edge cases ───────────────────────────────────────────────
-
     #[test]
-    fn highlight_spans_case_insensitive_match() {
+    fn highlight_ranges_case_insensitive_match() {
         let q = FilterQuery::parse("fix");
-        let normal = ratatui::style::Style::default();
-        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
-        // "Fix" should still be highlighted even though the token is lowercase "fix".
-        let spans = q.highlight_spans("Fix the bug", normal, highlight);
-        assert!(spans.iter().any(|s| s.style == highlight));
+        // "Fix" should still match even though the token is lowercase "fix".
+        assert_eq!(q.highlight_ranges("Fix the bug"), Some((0, 3)));
     }
 
     #[test]
-    fn highlight_spans_multibyte_text_no_panic() {
+    fn highlight_ranges_multibyte_text_no_panic() {
         // Ensure we don't panic on multibyte (non-ASCII) text.
         let q = FilterQuery::parse("bug");
-        let normal = ratatui::style::Style::default();
-        let highlight = ratatui::style::Style::default().fg(ratatui::style::Color::Yellow);
-        // Should not panic regardless of whether there's a match.
-        let _ = q.highlight_spans("バグ修正 bug fix", normal, highlight);
-        let _ = q.highlight_spans("日本語テスト", normal, highlight);
+        let _ = q.highlight_ranges("バグ修正 bug fix");
+        let _ = q.highlight_ranges("日本語テスト");
     }
 }

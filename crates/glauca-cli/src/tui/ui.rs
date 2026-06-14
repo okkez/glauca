@@ -1,5 +1,6 @@
 use crate::tui::{App, CommentEntry, Focus, InputMode, ItemAction, LeftPaneEntry, MergeStrategy};
 use chrono::{DateTime, Local};
+use glauca_core::filter::FilterQuery;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -7,6 +8,30 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+
+/// Build styled spans for `text`, highlighting the earliest filter-token match
+/// (range computed by `FilterQuery::highlight_ranges`).
+fn highlight_spans<'a>(
+    query: &FilterQuery,
+    text: &'a str,
+    normal: Style,
+    highlight: Style,
+) -> Vec<Span<'a>> {
+    match query.highlight_ranges(text) {
+        None => vec![Span::styled(text, normal)],
+        Some((start, end)) => {
+            let mut spans = Vec::new();
+            if start > 0 {
+                spans.push(Span::styled(&text[..start], normal));
+            }
+            spans.push(Span::styled(&text[start..end], highlight));
+            if end < text.len() {
+                spans.push(Span::styled(&text[end..], normal));
+            }
+            spans
+        }
+    }
+}
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -167,7 +192,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
             let repo = format!("{}/{}", item.repo_owner, item.repo_name);
             let updated = format_local_datetime(&item.updated_at);
             let title_spans =
-                filter_query.highlight_spans(&item.title, match_normal, match_highlight);
+                highlight_spans(&filter_query, &item.title, match_normal, match_highlight);
 
             // Line 1: new●  state●  kind⎇  #number  title
             let mut line1_spans = vec![if item.is_new {
