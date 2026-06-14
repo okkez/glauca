@@ -606,6 +606,22 @@ impl GlaucaApp {
         }
     }
 
+    /// Mark every unread item of the entry at `index` read. For a query that is the
+    /// whole root query; for a filter stream only its matching items (filter expanded
+    /// with the current user here, since the engine does not know `@me`). The engine
+    /// persists and reloads the query, which refreshes the unread badges via the
+    /// `ItemsLoaded` handler — so this works for non-selected entries too.
+    fn mark_all_read_at(&mut self, index: usize) {
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        let query_id = entry.root_query_id();
+        let filter = entry
+            .stream_filter()
+            .map(|f| expand_me(self.current_user.as_deref(), f).into_owned());
+        self.send(EngineCommand::MarkAllRead { query_id, filter });
+    }
+
     fn on_reorder_down(&mut self, _: &ReorderDown, _window: &mut Window, _cx: &mut Context<Self>) {
         self.reorder(true);
     }
@@ -1862,6 +1878,10 @@ fn populate_menu(mut menu: PopupMenu, app: &Entity<GlaucaApp>, kind: MenuKind) -
             });
             menu = app_menu_item(menu, app, "Move down", move |this, _w, _cx| {
                 this.reorder_entry(index, true);
+            });
+            menu = menu.separator();
+            menu = app_menu_item(menu, app, "Mark all as read", move |this, _w, _cx| {
+                this.mark_all_read_at(index);
             });
             menu = menu.separator();
             if is_query {

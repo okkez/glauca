@@ -440,6 +440,15 @@ pub async fn mark_item_read(
     Ok(())
 }
 
+/// Mark every cached item of a query as read. Used by "Mark all as read" on a
+/// root query (filter-stream scope marks matching items individually instead).
+pub async fn mark_all_items_read(pool: &SqlitePool, query_id: i64) -> Result<()> {
+    sqlx::query!("UPDATE items SET read = 1 WHERE query_id = ?", query_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Check whether the cache for a query is stale (older than `max_age_secs`).
 pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64) -> Result<bool> {
     let row = sqlx::query!(

@@ -2,6 +2,7 @@
 // TUI/GUI 双方から利用する。$EDITOR 起動・端末制御などフロントエンド固有の処理は呼び出し側に残し、
 // ここには pool/gh/mpsc チャネルだけで完結するタスクと、それらが受け渡すメッセージ型を集約する。
 
+use crate::filter::FilterQuery;
 use crate::logic::cached_item_to_item_entry;
 use crate::types::{
     CommentEntry, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
@@ -548,6 +549,13 @@ pub enum EngineCommand {
         repo_name: String,
         number: i64,
     },
+    /// Mark every cached item of `query_id` read; when `filter` is Some, only items
+    /// matching the (already `@me`-expanded) filter string. After updating the DB the
+    /// query is reloaded so the front-end recomputes unread counts.
+    MarkAllRead {
+        query_id: i64,
+        filter: Option<String>,
+    },
 }
 
 /// Async engine shared by the TUI and GUI front-ends. Owns the background worker,
@@ -996,6 +1004,46 @@ async fn command_loop(
                     }
                 });
             }
+            EngineCommand::MarkAllRead { query_id, filter } => {
+                // Update the DB, then reload the query so the front-end's
+                // `ItemsLoaded` handler recomputes unread counts for this query's
+                // entries (works whether or not the entry is currently selected).
+                let pool2 = pool.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    let res = match &filter {
+                        None => db::mark_all_items_read(&pool2, query_id).await,
+                        Some(f) => mark_filtered_items_read(&pool2, query_id, f).await,
+                    };
+                    match res {
+                        Ok(()) => load_items_task(pool2, query_id, None, tx2).await,
+                        Err(e) => {
+                            let _ = tx2
+                                .send(AppMessage::Status(format!("mark all read error: {e}")))
+                                .await;
+                        }
+                    }
+                });
+            }
         }
     }
+}
+
+/// Mark every cached item of `query_id` whose fields match `expanded_filter` read.
+/// The filter is parsed application-side (`FilterQuery`) since it is not expressible
+/// in SQL; already-read items are skipped.
+async fn mark_filtered_items_read(
+    pool: &SqlitePool,
+    query_id: i64,
+    expanded_filter: &str,
+) -> anyhow::Result<()> {
+    let fq = FilterQuery::parse(expanded_filter);
+    for c in db::fetch_items(pool, query_id).await? {
+        let item = cached_item_to_item_entry(c, None);
+        if !item.read && fq.matches(&item) {
+            db::mark_item_read(pool, query_id, &item.repo_owner, &item.repo_name, item.number)
+                .await?;
+        }
+    }
+    Ok(())
 }
