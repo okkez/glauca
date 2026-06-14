@@ -1,6 +1,4 @@
-mod db;
-mod github;
-mod model;
+use glauca_core::{db, github};
 mod tui;
 
 #[tokio::main]

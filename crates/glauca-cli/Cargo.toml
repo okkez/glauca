@@ -1,0 +1,28 @@
+[package]
+name = "glauca-cli"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "glauca-cli"
+path = "src/main.rs"
+
+[dependencies]
+glauca-core.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+octocrab.workspace = true
+url.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+chrono.workspace = true
+tui-markdown.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
