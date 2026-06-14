@@ -27,6 +27,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::text::markdown;
 use gpui_component::{h_flex, v_flex, ActiveTheme, Root, StyledExt, WindowExt};
 use smol::Timer;
 use tokio::sync::mpsc::Sender;
@@ -1280,19 +1281,23 @@ impl GlaucaApp {
             })
             .child(detail_field("updated", &item.updated_at, cx))
             .child(detail_field("url", &item.url, cx))
-            .child(
-                // Body as raw text (MVP — Markdown formatting is post-MVP).
-                div()
+            .child({
+                // Body rendered as Markdown via gpui-component's native TextView
+                // (GFM + code highlighting, composites with gpui's GPU layers).
+                // Left non-scrollable so the whole pane scrolls via `detail_scroll`.
+                let body_box = div()
                     .mt_2()
                     .pt_2()
                     .border_t_1()
-                    .border_color(cx.theme().border)
-                    .text_sm()
-                    .text_color(cx.theme().foreground)
-                    .child(SharedString::from(
-                        item.body.clone().unwrap_or_else(|| "(no description)".into()),
-                    )),
-            )
+                    .border_color(cx.theme().border);
+                match item.body.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(body) => body_box.child(markdown(body.to_string()).selectable(true)),
+                    None => body_box
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("(no description)"),
+                }
+            })
     }
 }
 
