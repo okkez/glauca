@@ -85,7 +85,7 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
 fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::QueryList;
     let block = pane_block("Filter Streams", focused)
-        .title_bottom(Line::from(" n:new  f:stream  e:edit  d:del ").right_aligned());
+        .title_bottom(Line::from(" n:new  f:stream  e:edit  d:del  a:read all ").right_aligned());
 
     let items: Vec<ListItem> = app
         .entries
@@ -440,7 +440,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let mode_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  q:quit".to_string(),
+            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  a:mark all read  q:quit".to_string(),
             Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}  q:quit"),
             Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}  q:quit"),
         },

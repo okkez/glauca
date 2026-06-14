@@ -888,6 +888,30 @@ where
                         continue;
                     }
 
+                    // 'a' in query list → mark all items of the selected entry read.
+                    // A query marks its whole root query; a filter stream marks only
+                    // its matching items (filter expanded with the current user here,
+                    // since the engine does not know `@me`). The engine persists and
+                    // reloads the query, which refreshes unread counts via ItemsLoaded.
+                    if key.code == KeyCode::Char('a')
+                        && app.focus == Focus::QueryList
+                        && app.input_mode == InputMode::Normal
+                    {
+                        let cmd = app.entries.get(app.entry_cursor).map(|entry| {
+                            EngineCommand::MarkAllRead {
+                                query_id: entry.root_query_id(),
+                                filter: entry.stream_filter().map(|f| {
+                                    glauca_core::logic::expand_me(app.current_user.as_deref(), f)
+                                        .into_owned()
+                                }),
+                            }
+                        });
+                        if let Some(cmd) = cmd {
+                            engine.send(cmd).await;
+                        }
+                        continue;
+                    }
+
                     // J/K: move selected entry up/down within its group. The DB swap
                     // runs through the engine; the entries vec is reordered on the
                     // QueriesSwapped / FilterStreamsSwapped confirmation message.
