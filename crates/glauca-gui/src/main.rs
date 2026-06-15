@@ -33,6 +33,7 @@ use gpui_component::{h_flex, v_flex, ActiveTheme, Root, Sizable, StyledExt, Wind
 use smol::Timer;
 use tokio::sync::mpsc::Sender;
 
+mod assets;
 mod settings;
 use settings::GuiSettings;
 
@@ -1536,12 +1537,12 @@ impl GlaucaApp {
         let Some(item) = self.filtered.get(ix).and_then(|&i| self.items.get(i)) else {
             return div().into_any_element();
         };
+        // State is shown by the status icon now, so it's dropped from this line.
         let mut meta = format!(
-            "{}/{}#{}  ·  {}  ·  @{}",
+            "{}/{}#{}  ·  @{}",
             item.repo_owner,
             item.repo_name,
             item.number,
-            item.state,
             item.author.as_deref().unwrap_or("ghost"),
         );
         if !item.labels.is_empty() {
@@ -1562,6 +1563,13 @@ impl GlaucaApp {
             .border_color(cx.theme().border)
             .cursor_pointer()
             .when(selected, |e| e.bg(cx.theme().list_active))
+            // Unread rows get a faint background tint (replaces the old NEW
+            // badge); selection still takes precedence.
+            .when(!selected && is_new, |e| {
+                let mut tint = cx.theme().accent;
+                tint.a = 0.10;
+                e.bg(tint)
+            })
             .when(!selected, |e| e.hover(|e| e.bg(cx.theme().list_hover)))
             .on_click({
                 let view = view.clone();
@@ -1591,22 +1599,10 @@ impl GlaucaApp {
                 h_flex()
                     .w_full()
                     .gap_2()
-                    // Top-align so the badge sits beside the first line when the
-                    // title wraps to multiple lines.
+                    // Top-align so the status icon sits beside the first line
+                    // when the title wraps to multiple lines.
                     .items_start()
-                    .when(is_new, |e| {
-                        e.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_xs()
-                                .font_bold()
-                                .text_color(cx.theme().accent_foreground)
-                                .bg(cx.theme().accent)
-                                .px_1p5()
-                                .rounded_md()
-                                .child("NEW"),
-                        )
-                    })
+                    .child(item_state_icon(item, cx))
                     .child(title_el),
             )
             .child(
@@ -1988,6 +1984,38 @@ fn detail_field(label: &str, value: &str, cx: &App) -> impl IntoElement {
         )
 }
 
+/// Status glyph for a list row: a GitHub-style octicon (vendored under
+/// `assets/octicons`, served by [`assets::Assets`]) whose shape encodes
+/// issue-vs-PR and whose color encodes the state (open=green, merged=magenta,
+/// closed=red, draft=muted). gpui paints the SVG as a mask tinted by
+/// `text_color`.
+fn item_state_icon(item: &ItemEntry, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let (path, color) = if item.kind == "pull_request" {
+        if item.is_draft {
+            ("octicons/git-pull-request-draft.svg", theme.muted_foreground)
+        } else {
+            match item.state.as_str() {
+                "merged" => ("octicons/git-merge.svg", theme.magenta),
+                "closed" => ("octicons/git-pull-request-closed.svg", theme.red),
+                _ => ("octicons/git-pull-request.svg", theme.green),
+            }
+        }
+    } else {
+        match item.state.as_str() {
+            "closed" => ("octicons/issue-closed.svg", theme.red),
+            _ => ("octicons/issue-opened.svg", theme.green),
+        }
+    };
+    svg()
+        .path(path)
+        .size_4()
+        .flex_shrink_0()
+        // Nudge down so the icon centers on the first title line.
+        .mt(px(2.))
+        .text_color(color)
+}
+
 /// Render an item title, emphasising the inline-filter match range if any.
 ///
 /// Uses `StyledText` (not flex spans) so the title wraps across lines and the
@@ -2291,8 +2319,10 @@ fn main() -> Result<()> {
         Engine::start(pool, gh).await
     })?;
 
-    gpui_platform::application().run(move |cx| {
-        gpui_component::init(cx);
+    gpui_platform::application()
+        .with_assets(assets::Assets)
+        .run(move |cx| {
+            gpui_component::init(cx);
 
         // Navigation/edit keys are scoped to "Glauca && !Input": a bare "Glauca"
         // binding would still fire while a gpui-component Input is focused, because
