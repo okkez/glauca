@@ -27,10 +27,14 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
-use gpui_component::text::markdown;
+use gpui_component::text::{markdown, TextView, TextViewState};
+use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
 use gpui_component::{h_flex, v_flex, ActiveTheme, Root, Sizable, StyledExt, WindowExt};
 use smol::Timer;
 use tokio::sync::mpsc::Sender;
+
+mod settings;
+use settings::GuiSettings;
 
 /// How often the GUI drains engine messages and repaints.
 const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
@@ -153,7 +157,22 @@ struct GlaucaApp {
     status: Option<String>,
 
     left_scroll: ScrollHandle,
-    detail_scroll: ScrollHandle,
+    /// Virtualized, variable-height state for the center item list. Item rows
+    /// wrap their titles and grow to fit, so `uniform_list` (uniform heights)
+    /// can't be used; `list` measures per-item with overdraw. Kept in sync with
+    /// `filtered.len()` by `recompute_filtered`.
+    items_list: ListState,
+    /// Drag-resizable left/center/right pane widths. Persisted to `GuiSettings`
+    /// on every resize and restored on startup via `pane_sizes`.
+    pane_state: Entity<ResizableState>,
+    /// Saved pane widths (px), left-to-right, used to seed the initial pane
+    /// sizes on startup. Empty on first run (falls back to defaults).
+    pane_sizes: Vec<f32>,
+    /// Parsed/virtualized state for the detail pane's Markdown body. Held as an
+    /// entity so the body renders via a virtualized `gpui::list` (only the
+    /// visible part is laid out), keeping pane-resize repaints cheap. Content is
+    /// synced from the selected item in `render_detail` (a no-op when unchanged).
+    detail_text: Entity<TextViewState>,
     /// Root focus handle — grabbed on startup so single-letter keys work; the
     /// filter Input takes focus on `/` and returns it on Esc.
     focus_handle: FocusHandle,
@@ -242,6 +261,8 @@ impl GlaucaApp {
             entries,
             current_user,
         } = init;
+        let pane_state = cx.new(|_| ResizableState::default());
+        let detail_text = cx.new(|cx| TextViewState::markdown("", cx));
         let mut app = Self {
             engine,
             cmd_tx,
@@ -259,7 +280,10 @@ impl GlaucaApp {
             bg_sync_pending: 0,
             status: None,
             left_scroll: ScrollHandle::new(),
-            detail_scroll: ScrollHandle::new(),
+            items_list: ListState::new(0, ListAlignment::Top, px(120.)),
+            pane_state,
+            pane_sizes: GuiSettings::load().pane_sizes,
+            detail_text,
             focus_handle: cx.focus_handle(),
             focus: Focus::QueryList,
             comments_open: false,
@@ -372,13 +396,13 @@ impl GlaucaApp {
                 let max = self.filtered_len().saturating_sub(1);
                 if self.item_cursor < max {
                     self.item_cursor += 1;
+                    self.items_list.scroll_to_reveal_item(self.item_cursor);
                     self.mark_current_item_read(cx);
                 }
             }
-            Focus::ItemDetail => {
-                scroll_vertically(&self.detail_scroll, DETAIL_SCROLL_STEP);
-                cx.notify();
-            }
+            // The detail body owns its own (virtualized) scroll — use the mouse
+            // wheel / scrollbar. j/k here is a no-op.
+            Focus::ItemDetail => {}
         }
     }
 
@@ -393,13 +417,12 @@ impl GlaucaApp {
             Focus::ItemList => {
                 if self.item_cursor > 0 {
                     self.item_cursor -= 1;
+                    self.items_list.scroll_to_reveal_item(self.item_cursor);
                     self.mark_current_item_read(cx);
                 }
             }
-            Focus::ItemDetail => {
-                scroll_vertically(&self.detail_scroll, -DETAIL_SCROLL_STEP);
-                cx.notify();
-            }
+            // See `on_move_down`: the detail body scrolls via mouse/scrollbar.
+            Focus::ItemDetail => {}
         }
     }
 
@@ -733,6 +756,10 @@ impl GlaucaApp {
         if self.item_cursor >= self.filtered.len() {
             self.item_cursor = self.filtered.len().saturating_sub(1);
         }
+        // Keep the virtualized list's item count in step with `filtered`; a
+        // mismatch makes `list` panic or render stale rows. This is the single
+        // chokepoint every `filtered` mutation flows through.
+        self.items_list.reset(self.filtered.len());
     }
 
     // ── Entry add / edit dialogs ───────────────────────────────────────────────
@@ -1329,11 +1356,11 @@ impl GlaucaApp {
     }
 
     fn render_left(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Width is owned by the enclosing resizable panel; fill it and scroll
+        // vertically within.
         let mut col = v_flex()
             .id("left-pane")
-            .w(px(280.))
-            .h_full()
-            .flex_shrink_0()
+            .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.left_scroll)
             .border_r_1()
@@ -1455,9 +1482,10 @@ impl GlaucaApp {
     }
 
     fn render_items(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // The filtered set is precomputed (`recompute_filtered`); rows are built
-        // lazily per visible range by `uniform_list`. Re-scanning all items here
-        // (or eagerly building every row) is what made filtering/large queries lag.
+        // `filtered` is precomputed (`recompute_filtered`); rows are built lazily
+        // per visible range by `list`, which measures variable-height rows
+        // (wrapped titles) with overdraw. `items_list`'s count is kept in sync
+        // by `recompute_filtered`, so indices here always map into `filtered`.
         let count = self.filtered.len();
 
         let container = v_flex()
@@ -1475,108 +1503,121 @@ impl GlaucaApp {
             );
         }
 
+        // The `list` render closure only receives `&App`, so it reads the view
+        // entity for row data and captures it for click handlers (which mutate
+        // via `update` since `cx.listener` is unavailable here).
+        let view = cx.entity();
+        // Parse the inline filter once per render (used to highlight matching
+        // title text) and share it across all visible rows — re-parsing it per
+        // row is wasted work, especially while a divider drag re-measures the
+        // visible rows every frame.
+        let fq = std::rc::Rc::new(FilterQuery::parse(&expand_me(
+            self.current_user.as_deref(),
+            &self.filter,
+        )));
         container.child(
-            uniform_list(
-                "items-list",
-                count,
-                cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
-                    // Inline-filter query, used to highlight matching title text.
-                    let fq = FilterQuery::parse(&expand_me(
-                        this.current_user.as_deref(),
-                        &this.filter,
-                    ));
-                    let selected = this.item_cursor;
-                    let mut rows = Vec::new();
-                    for ix in range {
-                        let Some(item) = this.filtered.get(ix).and_then(|&i| this.items.get(i))
-                        else {
-                            continue;
-                        };
-                        let mut meta = format!(
-                            "{}/{}#{}  ·  {}  ·  @{}",
-                            item.repo_owner,
-                            item.repo_name,
-                            item.number,
-                            item.state,
-                            item.author.as_deref().unwrap_or("ghost"),
-                        );
-                        if !item.labels.is_empty() {
-                            meta.push_str("  ·  ");
-                            meta.push_str(&item.labels.join(", "));
-                        }
-                        let is_new = item.is_new;
-                        let title_el = highlight_title(&item.title, fq.highlight_ranges(&item.title), cx);
-
-                        rows.push(
-                            v_flex()
-                                .id(ix)
-                                .h(px(52.))
-                                .w_full()
-                                .px_4()
-                                .justify_center()
-                                .gap_0p5()
-                                .border_b_1()
-                                .border_color(cx.theme().border)
-                                .cursor_pointer()
-                                .when(ix == selected, |e| e.bg(cx.theme().list_active))
-                                .when(ix != selected, |e| {
-                                    e.hover(|e| e.bg(cx.theme().list_hover))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.focus = Focus::ItemList;
-                                    this.item_cursor = ix;
-                                    this.mark_current_item_read(cx);
-                                }))
-                                .on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                                        this.focus = Focus::ItemList;
-                                        this.item_cursor = ix;
-                                        if let Some(item) = this.selected_item() {
-                                            this.open_menu(
-                                                ev.position,
-                                                MenuKind::Item(item),
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                    }),
-                                )
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .gap_2()
-                                        .items_center()
-                                        .when(is_new, |e| {
-                                            e.child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .text_xs()
-                                                    .font_bold()
-                                                    .text_color(cx.theme().accent_foreground)
-                                                    .bg(cx.theme().accent)
-                                                    .px_1p5()
-                                                    .rounded_md()
-                                                    .child("NEW"),
-                                            )
-                                        })
-                                        .child(title_el),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(SharedString::from(meta)),
-                                ),
-                        );
-                    }
-                    rows
-                }),
-            )
-            .h_full(),
+            list(self.items_list.clone(), move |ix, _window, cx| {
+                view.read(cx).render_item_row(ix, &fq, &view, cx)
+            })
+            .flex_1(),
         )
+    }
+
+    /// Build one center-list row: optional `NEW` badge, a wrapping (multi-line)
+    /// title, and a single-line meta line. Height is intentionally unconstrained
+    /// so `list` grows the row to fit a wrapped title.
+    fn render_item_row(
+        &self,
+        ix: usize,
+        fq: &FilterQuery,
+        view: &Entity<Self>,
+        cx: &App,
+    ) -> AnyElement {
+        let Some(item) = self.filtered.get(ix).and_then(|&i| self.items.get(i)) else {
+            return div().into_any_element();
+        };
+        let mut meta = format!(
+            "{}/{}#{}  ·  {}  ·  @{}",
+            item.repo_owner,
+            item.repo_name,
+            item.number,
+            item.state,
+            item.author.as_deref().unwrap_or("ghost"),
+        );
+        if !item.labels.is_empty() {
+            meta.push_str("  ·  ");
+            meta.push_str(&item.labels.join(", "));
+        }
+        let is_new = item.is_new;
+        let selected = ix == self.item_cursor;
+        let title_el = highlight_title(&item.title, fq.highlight_ranges(&item.title), cx);
+
+        v_flex()
+            .id(ix)
+            .w_full()
+            .px_4()
+            .py_2()
+            .gap_0p5()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .cursor_pointer()
+            .when(selected, |e| e.bg(cx.theme().list_active))
+            .when(!selected, |e| e.hover(|e| e.bg(cx.theme().list_hover)))
+            .on_click({
+                let view = view.clone();
+                move |_, _window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        this.focus = Focus::ItemList;
+                        this.item_cursor = ix;
+                        this.mark_current_item_read(cx);
+                        cx.notify();
+                    });
+                }
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let view = view.clone();
+                move |ev: &MouseDownEvent, window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        this.focus = Focus::ItemList;
+                        this.item_cursor = ix;
+                        if let Some(item) = this.selected_item() {
+                            this.open_menu(ev.position, MenuKind::Item(item), window, cx);
+                        }
+                        cx.notify();
+                    });
+                }
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    // Top-align so the badge sits beside the first line when the
+                    // title wraps to multiple lines.
+                    .items_start()
+                    .when(is_new, |e| {
+                        e.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .font_bold()
+                                .text_color(cx.theme().accent_foreground)
+                                .bg(cx.theme().accent)
+                                .px_1p5()
+                                .rounded_md()
+                                .child("NEW"),
+                        )
+                    })
+                    .child(title_el),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(meta)),
+            )
+            .into_any_element()
     }
 
     fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1589,11 +1630,7 @@ impl GlaucaApp {
         };
         let container = v_flex()
             .id("detail-pane")
-            .w(px(440.))
-            .h_full()
-            .flex_shrink_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.detail_scroll)
+            .size_full()
             .border_l_1()
             .border_color(border)
             .bg(cx.theme().background)
@@ -1626,7 +1663,11 @@ impl GlaucaApp {
             state_line.push_str(decision);
         }
 
-        container
+        // Pinned header: metadata stays visible while the body scrolls. It can't
+        // share a scroll region with the body because the body owns its own
+        // virtualized scroll (see below), so it's a `flex_none` block on top.
+        let header = v_flex()
+            .flex_none()
             .p_4()
             .gap_2()
             .child(
@@ -1677,24 +1718,47 @@ impl GlaucaApp {
                 e.child(detail_field("milestone", m, cx))
             })
             .child(detail_field("updated", &item.updated_at, cx))
-            .child(detail_field("url", &item.url, cx))
-            .child({
-                // Body rendered as Markdown via gpui-component's native TextView
-                // (GFM + code highlighting, composites with gpui's GPU layers).
-                // Left non-scrollable so the whole pane scrolls via `detail_scroll`.
-                let body_box = div()
-                    .mt_2()
+            .child(detail_field("url", &item.url, cx));
+
+        // Body rendered as Markdown via gpui-component's `TextView`, in its
+        // virtualized `scrollable(true)` mode: only the visible part is laid out
+        // each frame, so resizing the pane (which changes the wrap width) stays
+        // cheap. The body owns its own scroll (mouse wheel / scrollbar). Content
+        // is synced into the retained `detail_text` state; `set_text` is a no-op
+        // unless the selected item's body actually changed.
+        let body = match item.body.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(body) => {
+                self.detail_text
+                    .update(cx, |state, cx| state.set_text(body, cx));
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .px_4()
+                    .pb_4()
                     .pt_2()
                     .border_t_1()
-                    .border_color(cx.theme().border);
-                match item.body.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                    Some(body) => body_box.child(markdown(body.to_string()).selectable(true)),
-                    None => body_box
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("(no description)"),
-                }
-            })
+                    .border_color(cx.theme().border)
+                    .child(
+                        TextView::new(&self.detail_text)
+                            .scrollable(true)
+                            .selectable(true),
+                    )
+                    .into_any_element()
+            }
+            None => div()
+                .flex_none()
+                .px_4()
+                .pb_4()
+                .pt_2()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("(no description)")
+                .into_any_element(),
+        };
+
+        container.child(header).child(body)
     }
 
     /// Self-managed comments overlay (View comments). Rendered over the panes when
@@ -1925,26 +1989,31 @@ fn detail_field(label: &str, value: &str, cx: &App) -> impl IntoElement {
 }
 
 /// Render an item title, emphasising the inline-filter match range if any.
+///
+/// Uses `StyledText` (not flex spans) so the title wraps across lines and the
+/// row grows to fit — the highlight is an overlaid style range on the wrapping
+/// text rather than a separate box that can't break mid-word.
 fn highlight_title(title: &str, range: Option<(usize, usize)>, cx: &App) -> impl IntoElement {
-    let base = h_flex()
+    let theme = cx.theme();
+    let mut text = StyledText::new(SharedString::from(title.to_string()));
+    if let Some((start, end)) = range {
+        if start < end && end <= title.len() {
+            text = text.with_highlights([(
+                start..end,
+                HighlightStyle {
+                    background_color: Some(theme.accent),
+                    color: Some(theme.accent_foreground),
+                    ..Default::default()
+                },
+            )]);
+        }
+    }
+    div()
         .flex_1()
         .min_w_0()
-        .overflow_hidden()
         .font_bold()
-        .text_color(cx.theme().foreground);
-
-    match range {
-        Some((start, end)) if start < end && end <= title.len() => base
-            .child(SharedString::from(title[..start].to_string()))
-            .child(
-                div()
-                    .bg(cx.theme().accent)
-                    .text_color(cx.theme().accent_foreground)
-                    .child(SharedString::from(title[start..end].to_string())),
-            )
-            .child(SharedString::from(title[end..].to_string())),
-        _ => base.truncate().child(SharedString::from(title.to_string())),
-    }
+        .text_color(theme.foreground)
+        .child(text)
 }
 
 /// Rows shown in the Help → Keyboard shortcuts dialog (`key`, `description`). An
@@ -2114,29 +2183,56 @@ impl Render for GlaucaApp {
             .text_color(cx.theme().foreground)
             .child(self.render_menu_bar(cx))
             .child(
-                h_flex()
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.render_left(cx))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(
-                                // Inline filter input (drives `filter_items`).
-                                div()
-                                    .w_full()
-                                    .flex_shrink_0()
-                                    .p_2()
-                                    .border_b_1()
-                                    .border_color(cx.theme().border)
-                                    .child(Input::new(&self.filter_input)),
-                            )
-                            .child(self.render_items(cx)),
-                    )
-                    .child(self.render_detail(cx)),
+                // Drag-resizable 3-pane row. The group container is `size_full`,
+                // so it's wrapped in a `flex_1`/`min_h_0` div to take the height
+                // left under the menu bar. The left/right panes carry explicit
+                // (persisted) widths and MUST be `.flex_none()` — otherwise their
+                // internal `flex_grow: 1` makes them absorb space during a drag,
+                // so resizing the center/right divider would visibly stretch the
+                // *left* pane instead. Only the center stays flexible (it soaks
+                // up whatever the sized panels don't take). Every drag persists
+                // all sizes via `on_resize`.
+                div().w_full().flex_1().min_h_0().child(
+                    h_resizable("panes")
+                        .with_state(&self.pane_state)
+                        .on_resize(|state, _window, cx| {
+                            let pane_sizes =
+                                state.read(cx).sizes().iter().map(|p| f32::from(*p)).collect();
+                            GuiSettings { pane_sizes }.save();
+                        })
+                        .child(
+                            resizable_panel()
+                                .size(px(self.pane_sizes.first().copied().unwrap_or(280.)))
+                                .size_range(px(180.)..px(560.))
+                                .flex_none()
+                                .child(self.render_left(cx)),
+                        )
+                        .child(
+                            resizable_panel().size_range(px(100.)..px(1000.)).child(
+                                v_flex()
+                                    .size_full()
+                                    .min_w_0()
+                                    .child(
+                                        // Inline filter input (drives `filter_items`).
+                                        div()
+                                            .w_full()
+                                            .flex_shrink_0()
+                                            .p_2()
+                                            .border_b_1()
+                                            .border_color(cx.theme().border)
+                                            .child(Input::new(&self.filter_input)),
+                                    )
+                                    .child(self.render_items(cx)),
+                            ),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size(px(self.pane_sizes.get(2).copied().unwrap_or(440.)))
+                                .size_range(px(300.)..px(2400.))
+                                .flex_none()
+                                .child(self.render_detail(cx)),
+                        ),
+                ),
             )
             // Comments overlay draws over the 3-pane row (absolute, full-size).
             .when(self.comments_open, |this| {

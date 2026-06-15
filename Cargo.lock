@@ -2652,10 +2652,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "dirs 5.0.1",
  "glauca-core",
  "gpui",
  "gpui-component",
  "gpui_platform",
+ "serde",
+ "serde_json",
  "smol",
  "tokio",
 ]
