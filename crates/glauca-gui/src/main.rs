@@ -99,6 +99,7 @@ gpui::actions!(
         Quit,
         OpenInBrowser,
         OpenComments,
+        CopyUrl,
         CommentsScrollDown,
         CommentsScrollUp,
         CommentsTop,
@@ -495,6 +496,17 @@ impl GlaucaApp {
         }
         if let Some(item) = self.selected_item() {
             self.send(EngineCommand::OpenBrowser { item });
+        }
+    }
+
+    /// `y` — copy the selected item's URL to the clipboard. Also available via
+    /// the action menu.
+    fn on_copy_url(&mut self, _: &CopyUrl, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus == Focus::QueryList {
+            return;
+        }
+        if let Some(item) = self.selected_item() {
+            cx.write_to_clipboard(ClipboardItem::new_string(item.url));
         }
     }
 
@@ -1018,6 +1030,7 @@ impl GlaucaApp {
             ItemAction::ApprovePR => self.open_approve_dialog(item, window, cx),
             ItemAction::MergePR => self.open_merge_dialog(item, window, cx),
             ItemAction::ViewComments => self.open_comments(item, window, cx),
+            ItemAction::CopyUrl => cx.write_to_clipboard(ClipboardItem::new_string(item.url)),
         }
     }
 
@@ -1831,8 +1844,7 @@ impl GlaucaApp {
             .when_some(item.milestone.as_ref(), |e, m| {
                 e.child(detail_field("milestone", m, cx))
             })
-            .child(detail_field("updated", &item.updated_at, cx))
-            .child(detail_field("url", &item.url, cx));
+            .child(detail_field("updated", &item.updated_at, cx));
 
         // Body rendered as Markdown via gpui-component's `TextView`, in its
         // virtualized `scrollable(true)` mode: only the visible part is laid out
@@ -2326,6 +2338,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Shift+J / Shift+K", "Reorder selected entry down / up"),
     ("o", "Open selected item in browser"),
     ("c", "View comments for selected item"),
+    ("y", "Copy selected item URL to clipboard"),
     ("q", "Quit"),
     ("Comments overlay", ""),
     ("j / k  ·  ↓ / ↑", "Scroll comments"),
@@ -2464,6 +2477,7 @@ impl Render for GlaucaApp {
             .on_action(cx.listener(Self::on_new_filter_stream))
             .on_action(cx.listener(Self::on_edit_entry))
             .on_action(cx.listener(Self::on_open_in_browser))
+            .on_action(cx.listener(Self::on_copy_url))
             .on_action(cx.listener(Self::on_open_comments))
             .on_action(cx.listener(Self::on_comments_scroll_down))
             .on_action(cx.listener(Self::on_comments_scroll_up))
@@ -2630,6 +2644,7 @@ fn main() -> Result<()> {
             KeyBinding::new("q", Quit, Some(NAV_CONTEXT)),
             KeyBinding::new("o", OpenInBrowser, Some(NAV_CONTEXT)),
             KeyBinding::new("c", OpenComments, Some(NAV_CONTEXT)),
+            KeyBinding::new("y", CopyUrl, Some(NAV_CONTEXT)),
             // Comments overlay controls (active only while the overlay is focused).
             KeyBinding::new("j", CommentsScrollDown, Some(COMMENTS_CONTEXT)),
             KeyBinding::new("k", CommentsScrollUp, Some(COMMENTS_CONTEXT)),

@@ -206,6 +206,21 @@ enum Action {
     ConfirmAction,
     ConfirmMergeStrategy,
     OpenBrowser,
+    CopyUrl,
+}
+
+/// Copy `text` to the system clipboard via the OSC 52 terminal escape sequence.
+/// This works without a clipboard tool (xclip/pbcopy) or X11/Wayland, and over
+/// SSH, as long as the terminal emulator supports OSC 52. The sequence is just
+/// an escape code, so writing it mid-session does not disturb the alternate
+/// screen.
+fn copy_to_clipboard_osc52(text: &str) -> std::io::Result<()> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use std::io::Write;
+    let seq = format!("\x1b]52;c;{}\x07", STANDARD.encode(text.as_bytes()));
+    let mut out = io::stdout();
+    out.write_all(seq.as_bytes())?;
+    out.flush()
 }
 
 // ── Key event handler ────────────────────────────────────────────────────────
@@ -334,6 +349,14 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                 && app.selected_item().is_some() =>
         {
             return Action::OpenBrowser;
+        }
+
+        // Copy selected item URL to the clipboard directly
+        KeyCode::Char('y')
+            if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
+                && app.selected_item().is_some() =>
+        {
+            return Action::CopyUrl;
         }
 
         // Enter filter mode (middle pane)
@@ -1179,6 +1202,13 @@ where
                                             app.input_mode = InputMode::MergeMenu;
                                             app.merge_strategy_cursor = 0;
                                         }
+                                        ItemAction::CopyUrl => {
+                                            app.input_mode = InputMode::Normal;
+                                            app.status = Some(match copy_to_clipboard_osc52(&item.url) {
+                                                Ok(()) => "Copied URL to clipboard".into(),
+                                                Err(e) => format!("Copy failed: {e}"),
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -1200,6 +1230,14 @@ where
                         Action::OpenBrowser => {
                             if let Some(item) = app.selected_item().cloned() {
                                 engine.send(EngineCommand::OpenBrowser { item }).await;
+                            }
+                        }
+                        Action::CopyUrl => {
+                            if let Some(item) = app.selected_item().cloned() {
+                                app.status = Some(match copy_to_clipboard_osc52(&item.url) {
+                                    Ok(()) => "Copied URL to clipboard".into(),
+                                    Err(e) => format!("Copy failed: {e}"),
+                                });
                             }
                         }
                         Action::None => {}
@@ -1934,8 +1972,9 @@ mod tests {
             ItemAction::available_for("pull_request"),
             vec![
                 ItemAction::OpenBrowser,
-                ItemAction::Comment,
+                ItemAction::CopyUrl,
                 ItemAction::ViewComments,
+                ItemAction::Comment,
                 ItemAction::ApprovePR,
                 ItemAction::MergePR,
             ]
@@ -1944,8 +1983,9 @@ mod tests {
             ItemAction::available_for("issue"),
             vec![
                 ItemAction::OpenBrowser,
-                ItemAction::Comment,
+                ItemAction::CopyUrl,
                 ItemAction::ViewComments,
+                ItemAction::Comment,
             ]
         );
     }

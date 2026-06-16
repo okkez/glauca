@@ -178,6 +178,7 @@ pub enum ItemAction {
     ViewComments,
     ApprovePR,
     MergePR,
+    CopyUrl,
 }
 
 impl ItemAction {
@@ -188,6 +189,7 @@ impl ItemAction {
             Self::ViewComments => "View comments",
             Self::ApprovePR => "Approve PR",
             Self::MergePR => "Merge PR",
+            Self::CopyUrl => "Copy URL",
         }
     }
 
@@ -195,12 +197,18 @@ impl ItemAction {
         match kind {
             "pull_request" => vec![
                 Self::OpenBrowser,
-                Self::Comment,
+                Self::CopyUrl,
                 Self::ViewComments,
+                Self::Comment,
                 Self::ApprovePR,
                 Self::MergePR,
             ],
-            "issue" => vec![Self::OpenBrowser, Self::Comment, Self::ViewComments],
+            "issue" => vec![
+                Self::OpenBrowser,
+                Self::CopyUrl,
+                Self::ViewComments,
+                Self::Comment,
+            ],
             _ => vec![],
         }
     }
