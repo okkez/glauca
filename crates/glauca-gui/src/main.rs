@@ -1722,8 +1722,9 @@ impl GlaucaApp {
         };
 
         let location = format!("{}/{}#{}", item.repo_owner, item.repo_name, item.number);
-        let author_login = item.author.as_ref().map(|u| u.login.as_str()).unwrap_or("ghost");
-        let mut state_line = format!("{}  ·  @{}", item.state, author_login);
+        // Author moved to its own avatar+login row below; the state line keeps
+        // just state (+ draft / review decision).
+        let mut state_line = item.state.clone();
         if item.is_draft {
             state_line.push_str("  ·  draft");
         }
@@ -1758,6 +1759,9 @@ impl GlaucaApp {
                     .text_color(cx.theme().muted_foreground)
                     .child(SharedString::from(state_line)),
             )
+            .when_some(item.author.clone(), |e, a| {
+                e.child(detail_people_field("author", [user_chip(a, cx)], cx))
+            })
             .when(!item.labels.is_empty(), |e| {
                 e.child(detail_field("labels", &item.labels.join(", "), cx))
             })
@@ -1765,31 +1769,23 @@ impl GlaucaApp {
                 e.child(detail_field("branch", &format!("{head} → {base}"), cx))
             })
             .when(!item.assignees.is_empty(), |e| {
-                let assignees = item
-                    .assignees
-                    .iter()
-                    .map(|u| u.login.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                e.child(detail_field("assignees", &assignees, cx))
+                e.child(detail_people_field(
+                    "assignees",
+                    item.assignees.iter().cloned().map(|u| user_chip(u, cx)),
+                    cx,
+                ))
             })
-            .when(!item.requested_reviewers.is_empty(), |e| {
-                let reviewers = item
-                    .requested_reviewers
-                    .iter()
-                    .map(|u| u.login.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                e.child(detail_field("reviewers", &reviewers, cx))
-            })
-            .when(!item.reviews.is_empty(), |e| {
-                let reviews = item
-                    .reviews
-                    .iter()
-                    .map(|(user, state)| format!("{}: {}", user.login, state))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                e.child(detail_field("reviews", &reviews, cx))
+            .map(|e| {
+                // Unified reviewers row: requested ∪ reviewed, state shown by the
+                // avatar overlay (replaces the old separate reviewers/reviews rows).
+                let reviewers = reviewer_overlays(item);
+                e.when(!reviewers.is_empty(), |e| {
+                    e.child(detail_people_field(
+                        "reviewers",
+                        reviewers.into_iter().map(|(u, s)| reviewer_chip(u, s, cx)),
+                        cx,
+                    ))
+                })
             })
             .when_some(item.milestone.as_ref(), |e, m| {
                 e.child(detail_field("milestone", m, cx))
@@ -2063,6 +2059,55 @@ fn detail_field(label: &str, value: &str, cx: &App) -> impl IntoElement {
                 .text_color(cx.theme().foreground)
                 .child(SharedString::from(value.to_string())),
         )
+}
+
+/// A `label: <chips>` row in the detail pane, where the value is a wrapping row
+/// of people chips (avatar + login). Used for author / assignees / reviewers.
+fn detail_people_field(
+    label: &str,
+    chips: impl IntoIterator<Item = impl IntoElement>,
+    cx: &App,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .gap_2()
+        .text_sm()
+        .items_start()
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(96.))
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from(label.to_string())),
+        )
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .flex_wrap()
+                .gap_2()
+                .children(chips),
+        )
+}
+
+/// A people chip: avatar + login text, shown inline in the detail header.
+fn user_chip(user: UserRef, _cx: &App) -> impl IntoElement {
+    let login = SharedString::from(user.login.clone());
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(user_avatar(&user))
+        .child(login)
+}
+
+/// A reviewer chip: avatar with review-state overlay + login text.
+fn reviewer_chip(user: UserRef, state: ReviewState, cx: &App) -> impl IntoElement {
+    let login = SharedString::from(user.login.clone());
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(reviewer_avatar(&user, state, cx))
+        .child(login)
 }
 
 /// Status glyph for a list row: a GitHub-style octicon (vendored under
