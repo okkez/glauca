@@ -272,6 +272,20 @@ mod tests {
     }
 
     #[test]
+    fn review_state_from_state_maps_all_variants() {
+        assert_eq!(ReviewState::from_state("APPROVED"), ReviewState::Approved);
+        assert_eq!(
+            ReviewState::from_state("CHANGES_REQUESTED"),
+            ReviewState::ChangesRequested
+        );
+        assert_eq!(ReviewState::from_state("COMMENTED"), ReviewState::Commented);
+        assert_eq!(ReviewState::from_state("DISMISSED"), ReviewState::Dismissed);
+        assert_eq!(ReviewState::from_state("PENDING"), ReviewState::Pending);
+        // Unknown / unexpected values fall back to Commented.
+        assert_eq!(ReviewState::from_state("WHATEVER"), ReviewState::Commented);
+    }
+
+    #[test]
     fn reviewer_overlays_unions_reviews_and_pending_requests() {
         let mut item = ItemEntry {
             number: 1,

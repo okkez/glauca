@@ -647,6 +647,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_and_fetch_preserves_private_and_avatar() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        let mut item = make_item(qid, 1, "Fix bug");
+        item.repo_private = true;
+        item.author_avatar_url = Some("https://a/alice.png".into());
+        upsert_item(&pool, &item).await.expect("upsert item");
+
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        assert_eq!(items.len(), 1);
+        assert!(items[0].repo_private);
+        assert_eq!(items[0].author_avatar_url.as_deref(), Some("https://a/alice.png"));
+
+        // Re-syncing the same item refreshes both fields (DO UPDATE SET).
+        item.repo_private = false;
+        item.author_avatar_url = Some("https://a/alice2.png".into());
+        upsert_item(&pool, &item).await.expect("re-upsert item");
+
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].repo_private);
+        assert_eq!(items[0].author_avatar_url.as_deref(), Some("https://a/alice2.png"));
+    }
+
+    #[tokio::test]
     async fn filter_stream_crud() {
         let (pool, _file) = test_pool().await;
 

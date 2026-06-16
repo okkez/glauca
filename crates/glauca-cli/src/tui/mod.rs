@@ -215,12 +215,18 @@ enum Action {
 /// an escape code, so writing it mid-session does not disturb the alternate
 /// screen.
 fn copy_to_clipboard_osc52(text: &str) -> std::io::Result<()> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use std::io::Write;
-    let seq = format!("\x1b]52;c;{}\x07", STANDARD.encode(text.as_bytes()));
+    let seq = osc52_sequence(text);
     let mut out = io::stdout();
     out.write_all(seq.as_bytes())?;
     out.flush()
+}
+
+/// Build the OSC 52 clipboard escape sequence for `text` (pure; the side effect
+/// of writing to the terminal lives in [`copy_to_clipboard_osc52`]).
+fn osc52_sequence(text: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    format!("\x1b]52;c;{}\x07", STANDARD.encode(text.as_bytes()))
 }
 
 // ── Key event handler ────────────────────────────────────────────────────────
@@ -1988,6 +1994,17 @@ mod tests {
                 ItemAction::Comment,
             ]
         );
+    }
+
+    #[test]
+    fn osc52_sequence_wraps_base64() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let url = "https://github.com/owner/repo/pull/1";
+        let seq = osc52_sequence(url);
+        let expected = format!("\x1b]52;c;{}\x07", STANDARD.encode(url.as_bytes()));
+        assert_eq!(seq, expected);
+        assert!(seq.starts_with("\x1b]52;c;"));
+        assert!(seq.ends_with('\x07'));
     }
 
     #[test]

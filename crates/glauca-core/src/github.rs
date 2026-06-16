@@ -468,6 +468,63 @@ mod tests {
     }
 
     #[test]
+    fn node_to_cached_item_parses_avatars_and_private() {
+        let node = serde_json::json!({
+            "__typename": "PullRequest",
+            "number": 8,
+            "title": "Avatars",
+            "state": "OPEN",
+            "url": "https://github.com/owner/repo/pull/8",
+            "updatedAt": "2026-05-23T10:00:00Z",
+            "author": { "__typename": "User", "login": "bob", "avatarUrl": "https://a/bob.png" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo", "isPrivate": true },
+            "comments": { "totalCount": 0 },
+            "assignees": { "nodes": [{ "login": "carol", "avatarUrl": "https://a/carol.png" }] },
+            "reviewRequests": { "nodes": [] },
+            "reviews": {
+                "nodes": [
+                    { "author": { "__typename": "User", "login": "dave", "avatarUrl": "https://a/dave.png" }, "state": "APPROVED" }
+                ]
+            }
+        });
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert!(item.repo_private);
+        assert_eq!(item.author_avatar_url.as_deref(), Some("https://a/bob.png"));
+
+        let assignees = crate::logic::serde_users(&item.assignees);
+        assert_eq!(assignees.len(), 1);
+        assert_eq!(assignees[0].login, "carol");
+        assert_eq!(assignees[0].avatar_url.as_deref(), Some("https://a/carol.png"));
+
+        let reviews = crate::logic::serde_reviews(&item.reviews);
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].0.login, "dave");
+        assert_eq!(reviews[0].0.avatar_url.as_deref(), Some("https://a/dave.png"));
+        assert_eq!(reviews[0].1, "APPROVED");
+    }
+
+    #[test]
+    fn node_to_cached_item_defaults_private_false_and_avatar_none() {
+        // Issue node without isPrivate / avatarUrl → safe defaults.
+        let node = serde_json::json!({
+            "__typename": "Issue",
+            "number": 9,
+            "title": "No avatar",
+            "state": "OPEN",
+            "url": "https://github.com/owner/repo/issues/9",
+            "updatedAt": "2026-05-23T10:00:00Z",
+            "author": { "__typename": "User", "login": "alice" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo" },
+            "comments": { "totalCount": 0 }
+        });
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert!(!item.repo_private);
+        assert_eq!(item.author_avatar_url, None);
+    }
+
+    #[test]
     fn node_to_cached_item_merged_pr() {
         let node = serde_json::json!({
             "__typename": "PullRequest",
