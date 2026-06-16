@@ -19,11 +19,13 @@ use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{
     compute_unread_counts, expand_me, group_range, is_item_new_since, move_group_down,
+    reviewer_overlays, ReviewState,
 };
-use glauca_core::types::{CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy};
+use glauca_core::types::{CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, UserRef};
 use glauca_core::{db, github};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
@@ -1537,18 +1539,22 @@ impl GlaucaApp {
         let Some(item) = self.filtered.get(ix).and_then(|&i| self.items.get(i)) else {
             return div().into_any_element();
         };
-        // State is shown by the status icon now, so it's dropped from this line.
-        let mut meta = format!(
-            "{}/{}#{}  ·  @{}",
-            item.repo_owner,
-            item.repo_name,
-            item.number,
-            item.author.as_deref().unwrap_or("ghost"),
-        );
+        // State is shown by the status icon, and the author by the avatar row
+        // below, so both are dropped from this line.
+        let mut meta = format!("{}/{}#{}", item.repo_owner, item.repo_name, item.number);
         if !item.labels.is_empty() {
             meta.push_str("  ·  ");
             meta.push_str(&item.labels.join(", "));
         }
+
+        // Participants row (above the repo/meta line): author then assignees on
+        // the left, reviewers (with review-state overlays) on the right.
+        let reviewers = reviewer_overlays(item);
+        let assignee_extra = item.assignees.len().saturating_sub(AVATAR_LIMIT);
+        let reviewer_extra = reviewers.len().saturating_sub(AVATAR_LIMIT);
+        let has_participants =
+            item.author.is_some() || !item.assignees.is_empty() || !reviewers.is_empty();
+
         let is_new = item.is_new;
         let selected = ix == self.item_cursor;
         let title_el = highlight_title(&item.title, fq.highlight_ranges(&item.title), cx);
@@ -1605,6 +1611,56 @@ impl GlaucaApp {
                     .child(item_state_icon(item, cx))
                     .child(title_el),
             )
+            .when(has_participants, |e| {
+                e.child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .items_center()
+                        .gap_2()
+                        // Left: author, then assignees (+N overflow).
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .flex_shrink_0()
+                                .when_some(item.author.as_ref(), |e, a| e.child(user_avatar(a)))
+                                // Arrow reads "author → assignee(s)" when both sides exist.
+                                .when(
+                                    item.author.is_some() && !item.assignees.is_empty(),
+                                    |e| {
+                                        e.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("→"),
+                                        )
+                                    },
+                                )
+                                .children(item.assignees.iter().take(AVATAR_LIMIT).map(user_avatar))
+                                .when(assignee_extra > 0, |e| {
+                                    e.child(avatar_overflow(assignee_extra, cx))
+                                }),
+                        )
+                        // Right: reviewers with review-state overlay (+N overflow).
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .flex_shrink_0()
+                                .children(
+                                    reviewers
+                                        .iter()
+                                        .take(AVATAR_LIMIT)
+                                        .map(|(u, s)| reviewer_avatar(u, *s, cx)),
+                                )
+                                .when(reviewer_extra > 0, |e| {
+                                    e.child(avatar_overflow(reviewer_extra, cx))
+                                }),
+                        ),
+                )
+            })
             .child(
                 h_flex()
                     .w_full()
@@ -1666,7 +1722,8 @@ impl GlaucaApp {
         };
 
         let location = format!("{}/{}#{}", item.repo_owner, item.repo_name, item.number);
-        let mut state_line = format!("{}  ·  @{}", item.state, item.author.as_deref().unwrap_or("ghost"));
+        let author_login = item.author.as_ref().map(|u| u.login.as_str()).unwrap_or("ghost");
+        let mut state_line = format!("{}  ·  @{}", item.state, author_login);
         if item.is_draft {
             state_line.push_str("  ·  draft");
         }
@@ -1708,20 +1765,28 @@ impl GlaucaApp {
                 e.child(detail_field("branch", &format!("{head} → {base}"), cx))
             })
             .when(!item.assignees.is_empty(), |e| {
-                e.child(detail_field("assignees", &item.assignees.join(", "), cx))
+                let assignees = item
+                    .assignees
+                    .iter()
+                    .map(|u| u.login.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                e.child(detail_field("assignees", &assignees, cx))
             })
             .when(!item.requested_reviewers.is_empty(), |e| {
-                e.child(detail_field(
-                    "reviewers",
-                    &item.requested_reviewers.join(", "),
-                    cx,
-                ))
+                let reviewers = item
+                    .requested_reviewers
+                    .iter()
+                    .map(|u| u.login.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                e.child(detail_field("reviewers", &reviewers, cx))
             })
             .when(!item.reviews.is_empty(), |e| {
                 let reviews = item
                     .reviews
                     .iter()
-                    .map(|(login, state)| format!("{login}: {state}"))
+                    .map(|(user, state)| format!("{}: {}", user.login, state))
                     .collect::<Vec<_>>()
                     .join(", ");
                 e.child(detail_field("reviews", &reviews, cx))
@@ -2032,6 +2097,79 @@ fn item_state_icon(item: &ItemEntry, cx: &App) -> impl IntoElement {
         .text_color(color)
 }
 
+/// Side length of the participant avatars in the item list.
+const AVATAR_PX: f32 = 24.;
+/// Side length of the review-state badge overlaid on a reviewer avatar.
+const BADGE_PX: f32 = 14.;
+/// Max avatars shown per group (assignees / reviewers) before a `+N` overflow.
+const AVATAR_LIMIT: usize = 5;
+
+/// GitHub serves a 460px avatar PNG by default; downscaling that to the small
+/// list avatar aliases badly (looks grainy). Ask GitHub to resize server-side
+/// to roughly the displayed size (2× for HiDPI sharpness) via the `s=` param.
+fn sized_avatar_url(url: &str) -> String {
+    let px = (AVATAR_PX * 2.0) as u32;
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}s={px}")
+}
+
+/// One participant avatar: the user's GitHub avatar image, falling back to the
+/// login's initials placeholder when there is no avatar URL (teams, or older
+/// cache rows). `name` also drives the alt/initials text.
+fn user_avatar(user: &UserRef) -> Avatar {
+    let mut a = Avatar::new().name(user.login.clone()).with_size(px(AVATAR_PX));
+    if let Some(url) = &user.avatar_url {
+        a = a.src(sized_avatar_url(url));
+    }
+    a
+}
+
+/// Octicon + color for a reviewer's [`ReviewState`], shown as a small badge
+/// overlaid on the reviewer avatar. gpui tints the SVG mask with `text_color`.
+fn review_state_icon(state: ReviewState, cx: &App) -> (&'static str, Hsla) {
+    let theme = cx.theme();
+    match state {
+        ReviewState::Approved => ("octicons/check-circle-fill.svg", theme.green),
+        ReviewState::ChangesRequested => ("octicons/x-circle-fill.svg", theme.red),
+        ReviewState::Commented | ReviewState::Dismissed => {
+            ("octicons/comment.svg", theme.muted_foreground)
+        }
+        ReviewState::Pending => ("octicons/clock.svg", theme.yellow),
+    }
+}
+
+/// A `+N` label for participants beyond [`AVATAR_LIMIT`].
+fn avatar_overflow(n: usize, cx: &App) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(SharedString::from(format!("+{n}")))
+}
+
+/// A reviewer avatar with its review-state octicon overlaid bottom-right
+/// (relative+absolute, mirroring gpui-component's Badge pattern).
+fn reviewer_avatar(user: &UserRef, state: ReviewState, cx: &App) -> impl IntoElement {
+    let (icon, color) = review_state_icon(state, cx);
+    div()
+        .relative()
+        .flex_shrink_0()
+        .size(px(AVATAR_PX))
+        .child(user_avatar(user))
+        .child(
+            svg()
+                .path(icon)
+                .size(px(BADGE_PX))
+                .absolute()
+                .bottom(px(-3.))
+                .right(px(-3.))
+                .text_color(color)
+                // Ring so the badge reads against the avatar behind it.
+                .bg(cx.theme().background)
+                .rounded_full(),
+        )
+}
+
 /// Render an item title, emphasising the inline-filter match range if any.
 ///
 /// Uses `StyledText` (not flex spans) so the title wraps across lines and the
@@ -2322,6 +2460,11 @@ impl Render for GlaucaApp {
 }
 
 fn main() -> Result<()> {
+    // rustls needs a process-level CryptoProvider, but with both aws-lc-rs and
+    // ring in the dependency graph it can't auto-select one. Install ring before
+    // any TLS use (the avatar HTTP client). Ignore the error if already set.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // The engine runs on its own multi-thread tokio runtime; `rt` must outlive
     // the gpui event loop so its background tasks keep being driven.
     let rt = tokio::runtime::Runtime::new()?;
@@ -2338,6 +2481,13 @@ fn main() -> Result<()> {
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
+            // gpui defaults to a NullHttpClient, which can't fetch the remote
+            // GitHub avatar URLs the item-list avatars use (every fetch fails and
+            // the Avatar falls back to its placeholder). Install a real client.
+            match reqwest_client::ReqwestClient::user_agent("glauca-gui") {
+                Ok(client) => cx.set_http_client(std::sync::Arc::new(client)),
+                Err(e) => eprintln!("failed to init HTTP client for avatars: {e}"),
+            }
             gpui_component::init(cx);
 
         // Navigation/edit keys are scoped to "Glauca && !Input": a bare "Glauca"

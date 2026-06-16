@@ -1,4 +1,6 @@
 use crate::types::ItemEntry;
+#[cfg(test)]
+use crate::types::UserRef;
 
 /// Parsed representation of a filter query string.
 ///
@@ -63,7 +65,11 @@ impl FilterQuery {
             }
         }
         // author filter
-        let author_lower = item.author.as_deref().unwrap_or("").to_lowercase();
+        let author_lower = item
+            .author
+            .as_ref()
+            .map(|u| u.login.to_lowercase())
+            .unwrap_or_default();
         for a in &self.authors {
             if !author_lower.contains(a.as_str()) {
                 return false;
@@ -91,7 +97,7 @@ impl FilterQuery {
             let hit = item
                 .requested_reviewers
                 .iter()
-                .any(|login| login.to_lowercase().contains(rv.as_str()));
+                .any(|u| u.login.to_lowercase().contains(rv.as_str()));
             if !hit {
                 return false;
             }
@@ -175,7 +181,7 @@ mod tests {
             repo_owner: owner.to_string(),
             repo_name: name.to_string(),
             repo_private: false,
-            author: Some(author.to_string()),
+            author: Some(UserRef::new(author)),
             state: state.to_string(),
             updated_at: String::new(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
@@ -251,7 +257,7 @@ mod tests {
     #[test]
     fn review_requested_filter() {
         let mut pr = item("PR", "alice", "open", &[], "o/r");
-        pr.requested_reviewers = vec!["bob".into(), "carol".into()];
+        pr.requested_reviewers = vec![UserRef::new("bob"), UserRef::new("carol")];
 
         let q = FilterQuery::parse("review-requested:bob");
         assert!(q.matches(&pr));

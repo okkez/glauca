@@ -1453,7 +1453,7 @@ mod tests {
                 repo_owner: "owner".into(),
                 repo_name: "repo".into(),
                 repo_private: false,
-                author: Some("alice".into()),
+                author: Some(glauca_core::types::UserRef::new("alice")),
                 state: "open".into(),
                 updated_at: String::new(),
                 labels: vec![],

@@ -247,7 +247,11 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
         None => vec![Line::from(Span::raw("No item selected"))],
         Some(item) => {
             let repo = format!("{}/{}", item.repo_owner, item.repo_name);
-            let author = item.author.clone().unwrap_or_else(|| "—".to_string());
+            let author = item
+                .author
+                .as_ref()
+                .map(|u| u.login.clone())
+                .unwrap_or_else(|| "—".to_string());
             let state = item.state.clone();
             let title = item.title.clone();
             let updated_at = format_local_datetime(&item.updated_at);
@@ -270,30 +274,34 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             let assignees = if item.assignees.is_empty() {
                 "—".to_string()
             } else {
-                item.assignees.join(", ")
+                item.assignees
+                    .iter()
+                    .map(|u| u.login.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             let milestone = item.milestone.clone().unwrap_or_else(|| "—".to_string());
 
             // Build combined reviewer list: submitted reviews + pending requests
             let reviewed_logins: std::collections::HashSet<&str> =
-                item.reviews.iter().map(|(l, _)| l.as_str()).collect();
+                item.reviews.iter().map(|(u, _)| u.login.as_str()).collect();
             let reviewer_spans: Vec<Span> = {
                 let mut spans = Vec::new();
-                for (login, state) in &item.reviews {
+                for (user, state) in &item.reviews {
                     let (badge, style) = review_state_badge(state);
                     if !spans.is_empty() {
                         spans.push(Span::raw("  "));
                     }
                     spans.push(Span::styled(badge, style));
-                    spans.push(Span::raw(format!(" {login}")));
+                    spans.push(Span::raw(format!(" {}", user.login)));
                 }
-                for login in &item.requested_reviewers {
-                    if !reviewed_logins.contains(login.as_str()) {
+                for user in &item.requested_reviewers {
+                    if !reviewed_logins.contains(user.login.as_str()) {
                         if !spans.is_empty() {
                             spans.push(Span::raw("  "));
                         }
                         spans.push(Span::styled("○", Style::default().fg(Color::Yellow)));
-                        spans.push(Span::raw(format!(" {login}")));
+                        spans.push(Span::raw(format!(" {}", user.login)));
                     }
                 }
                 if spans.is_empty() {

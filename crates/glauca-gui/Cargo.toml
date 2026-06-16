@@ -18,4 +18,8 @@ serde.workspace = true
 serde_json.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+reqwest_client.workspace = true
 gpui-component.workspace = true
+# reqwest_client uses rustls; both aws-lc-rs and ring are in the graph, so rustls
+# can't auto-pick a CryptoProvider. We install the ring provider at startup.
+rustls = { version = "0.23", features = ["ring"] }

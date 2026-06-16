@@ -110,6 +110,24 @@ impl LeftPaneEntry {
     }
 }
 
+/// A GitHub user reference: login plus an optional avatar URL. `avatar_url` is
+/// `None` for teams (review requests) and may be absent in older cache rows.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct UserRef {
+    pub login: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+impl UserRef {
+    pub fn new(login: impl Into<String>) -> Self {
+        Self {
+            login: login.into(),
+            avatar_url: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ItemEntry {
     pub number: i64,
@@ -118,18 +136,18 @@ pub struct ItemEntry {
     pub repo_name: String,
     /// Whether the repository is private (drives the lock indicator in the item list).
     pub repo_private: bool,
-    pub author: Option<String>,
+    pub author: Option<UserRef>,
     pub state: String,
     pub updated_at: String,
     pub labels: Vec<String>,
     pub url: String,
     pub comment_count: i64,
     pub kind: String,
-    pub requested_reviewers: Vec<String>,
-    /// Submitted reviews: login + state (APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED)
-    pub reviews: Vec<(String, String)>,
+    pub requested_reviewers: Vec<UserRef>,
+    /// Submitted reviews: user + state (APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED)
+    pub reviews: Vec<(UserRef, String)>,
     pub body: Option<String>,
-    pub assignees: Vec<String>,
+    pub assignees: Vec<UserRef>,
     pub is_draft: bool,
     pub created_at_item: Option<String>,
     pub base_ref: Option<String>,

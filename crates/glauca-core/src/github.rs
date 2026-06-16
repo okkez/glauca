@@ -52,12 +52,12 @@ query SearchItems($q: String!, $after: String) {
         url
         createdAt
         updatedAt
-        author { __typename login }
+        author { __typename login avatarUrl }
         labels(first: 20) { nodes { name } }
         repository { owner { login } name isPrivate }
         comments { totalCount }
         body
-        assignees(first: 10) { nodes { login } }
+        assignees(first: 10) { nodes { login avatarUrl } }
         milestone { title }
       }
       ... on PullRequest {
@@ -67,12 +67,12 @@ query SearchItems($q: String!, $after: String) {
         url
         createdAt
         updatedAt
-        author { __typename login }
+        author { __typename login avatarUrl }
         labels(first: 20) { nodes { name } }
         repository { owner { login } name isPrivate }
         comments { totalCount }
         body
-        assignees(first: 10) { nodes { login } }
+        assignees(first: 10) { nodes { login avatarUrl } }
         milestone { title }
         isDraft
         baseRefName
@@ -80,14 +80,14 @@ query SearchItems($q: String!, $after: String) {
         reviewDecision
         reviews(last: 30) {
           nodes {
-            author { __typename login }
+            author { __typename login avatarUrl }
             state
           }
         }
         reviewRequests(first: 20) {
           nodes {
             requestedReviewer {
-              ... on User { login }
+              ... on User { login avatarUrl }
               ... on Team { slug }
             }
           }
@@ -205,6 +205,9 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
             login.to_string()
         }
     });
+    let author_avatar_url = node["author"]["avatarUrl"]
+        .as_str()
+        .map(|s| s.to_string());
     let comment_count = node["comments"]["totalCount"].as_u64().unwrap_or(0) as i64;
 
     let repo_owner = node["repository"]["owner"]["login"].as_str()?.to_string();
@@ -221,7 +224,10 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         })
         .unwrap_or_default();
 
-    let requested_reviewers: Vec<String> = if is_pr {
+    // Reviewers / assignees are stored as JSON object arrays carrying the avatar
+    // URL: [{"login":"alice","avatar_url":"https://…"}]. Teams (review requests)
+    // have only a `slug` and no avatar.
+    let requested_reviewers: Vec<serde_json::Value> = if is_pr {
         node["reviewRequests"]["nodes"]
             .as_array()
             .map(|arr| {
@@ -229,10 +235,9 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
                     .filter_map(|n| {
                         let rv = &n["requestedReviewer"];
                         // User has `login`, Team has `slug`
-                        rv["login"]
-                            .as_str()
-                            .or_else(|| rv["slug"].as_str())
-                            .map(|s| s.to_string())
+                        let login = rv["login"].as_str().or_else(|| rv["slug"].as_str())?;
+                        let avatar_url = rv["avatarUrl"].as_str();
+                        Some(serde_json::json!({"login": login, "avatar_url": avatar_url}))
                     })
                     .collect()
             })
@@ -244,7 +249,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
     // Collect submitted reviews, keeping only the latest state per reviewer.
     // reviews() returns nodes in chronological order so the last entry wins.
     let reviews: Vec<serde_json::Value> = if is_pr {
-        let mut map: Vec<(String, String)> = Vec::new();
+        let mut map: Vec<(String, String, Option<String>)> = Vec::new();
         if let Some(nodes) = node["reviews"]["nodes"].as_array() {
             for r in nodes {
                 if let Some(login) = r["author"]["login"].as_str() {
@@ -253,19 +258,23 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
                     } else {
                         login.to_string()
                     };
+                    let avatar_url = r["author"]["avatarUrl"].as_str().map(|s| s.to_string());
                     if let Some(state) = r["state"].as_str() {
                         // Update in place if already present, otherwise push
-                        if let Some(entry) = map.iter_mut().find(|(l, _)| *l == login) {
+                        if let Some(entry) = map.iter_mut().find(|(l, _, _)| *l == login) {
                             entry.1 = state.to_string();
+                            entry.2 = avatar_url;
                         } else {
-                            map.push((login, state.to_string()));
+                            map.push((login, state.to_string(), avatar_url));
                         }
                     }
                 }
             }
         }
         map.into_iter()
-            .map(|(login, state)| serde_json::json!({"login": login, "state": state}))
+            .map(|(login, state, avatar_url)| {
+                serde_json::json!({"login": login, "state": state, "avatar_url": avatar_url})
+            })
             .collect()
     } else {
         vec![]
@@ -273,13 +282,16 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
 
     let body = node["body"].as_str().map(|s| s.to_string());
     let created_at_item = node["createdAt"].as_str().map(|s| s.to_string());
-    let assignees = node["assignees"]["nodes"]
+    let assignees: Vec<serde_json::Value> = node["assignees"]["nodes"]
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|a| a["login"].as_str())
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
+                .filter_map(|a| {
+                    let login = a["login"].as_str()?;
+                    let avatar_url = a["avatarUrl"].as_str();
+                    Some(serde_json::json!({"login": login, "avatar_url": avatar_url}))
+                })
+                .collect()
         })
         .unwrap_or_default();
     let milestone = node["milestone"]["title"].as_str().map(|s| s.to_string());
@@ -315,6 +327,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         title,
         url,
         author,
+        author_avatar_url,
         state: state.to_string(),
         updated_at,
         labels: serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string()),
@@ -446,7 +459,11 @@ mod tests {
         let item = node_to_cached_item(&node, 1).unwrap();
         assert_eq!(item.kind, "pull_request");
         assert_eq!(item.state, "open");
-        let reviewers: Vec<String> = serde_json::from_str(&item.requested_reviewers).unwrap();
+        // requested_reviewers is now a JSON object array carrying avatar URLs.
+        let reviewers: Vec<String> = crate::logic::serde_users(&item.requested_reviewers)
+            .into_iter()
+            .map(|u| u.login)
+            .collect();
         assert_eq!(reviewers, vec!["carol", "my-team"]);
     }
 

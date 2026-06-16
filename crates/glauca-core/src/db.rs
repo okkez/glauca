@@ -286,6 +286,9 @@ pub struct CachedItem {
     pub title: String,
     pub url: String,
     pub author: Option<String>,
+    /// Author's GitHub avatar URL (drives the item-list avatar icon). Refreshed
+    /// on each re-sync; `None` for older rows or authors without an avatar.
+    pub author_avatar_url: Option<String>,
     pub state: String,
     pub updated_at: String,
     pub labels: String,
@@ -315,15 +318,16 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         r#"
         INSERT INTO items
             (query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
-             state, updated_at, labels, comment_count, requested_reviewers, reviews,
-             body, assignees, is_draft, created_at_item, base_ref, head_ref,
+             author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
+             reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
              review_decision, milestone, read, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
             title               = excluded.title,
             url                 = excluded.url,
             author              = excluded.author,
+            author_avatar_url   = excluded.author_avatar_url,
             state               = excluded.state,
             updated_at          = excluded.updated_at,
             labels              = excluded.labels,
@@ -355,6 +359,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         item.title,
         item.url,
         item.author,
+        item.author_avatar_url,
         item.state,
         item.updated_at,
         item.labels,
@@ -381,8 +386,8 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
     let rows = sqlx::query!(
         r#"
         SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
-               state, updated_at, labels, comment_count, requested_reviewers, reviews,
-               body, assignees, is_draft, created_at_item, base_ref, head_ref,
+               author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
+               reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
                review_decision, milestone, cached_at, read
         FROM items
         WHERE query_id = ?
@@ -405,6 +410,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
             title: r.title,
             url: r.url,
             author: r.author,
+            author_avatar_url: r.author_avatar_url,
             state: r.state,
             updated_at: r.updated_at,
             labels: r.labels,
@@ -508,6 +514,7 @@ mod tests {
             title: title.to_string(),
             url: format!("https://github.com/owner/repo/pull/{number}"),
             author: Some("alice".into()),
+            author_avatar_url: None,
             state: "open".into(),
             updated_at: "2026-05-22T00:00:00Z".into(),
             labels: "[]".into(),
@@ -613,6 +620,7 @@ mod tests {
             title: "Fix bug".into(),
             url: "https://github.com/owner/r/pull/1".into(),
             author: Some("alice".into()),
+            author_avatar_url: None,
             state: "open".into(),
             updated_at: "2026-05-22T00:00:00Z".into(),
             labels: "[]".into(),

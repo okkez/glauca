@@ -33,6 +33,10 @@ octicons! {
     "octicons/git-pull-request-closed.svg" => "../assets/octicons/git-pull-request-closed.svg",
     "octicons/git-pull-request-draft.svg" => "../assets/octicons/git-pull-request-draft.svg",
     "octicons/lock.svg" => "../assets/octicons/lock.svg",
+    "octicons/check-circle-fill.svg" => "../assets/octicons/check-circle-fill.svg",
+    "octicons/x-circle-fill.svg" => "../assets/octicons/x-circle-fill.svg",
+    "octicons/comment.svg" => "../assets/octicons/comment.svg",
+    "octicons/clock.svg" => "../assets/octicons/clock.svg",
 }
 
 impl AssetSource for Assets {

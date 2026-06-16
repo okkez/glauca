@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use crate::db::CachedItem;
 use crate::filter::FilterQuery;
-use crate::types::{ItemEntry, LeftPaneEntry};
+use crate::types::{ItemEntry, LeftPaneEntry, UserRef};
 
 /// An item is "new" if it was cached after the entry was last viewed.
 pub fn is_item_new_since(cached_at: &str, last_viewed_at: Option<&str>) -> bool {
@@ -13,23 +13,81 @@ pub fn is_item_new_since(cached_at: &str, last_viewed_at: Option<&str>) -> bool 
         .unwrap_or(true)
 }
 
-/// Labels / reviewers / assignees are stored as a JSON array string,
-/// e.g. '["bug","enhancement"]'.
+/// Labels are stored as a JSON array string, e.g. '["bug","enhancement"]'.
 pub fn serde_labels(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
-/// Reviews stored as [{"login":"alice","state":"APPROVED"}].
-pub fn serde_reviews(raw: &str) -> Vec<(String, String)> {
+/// Reviewers / assignees are stored as a JSON array of objects, e.g.
+/// '[{"login":"alice","avatar_url":"https://…"}]'. Older cache rows hold a
+/// plain string array ('["alice"]'); fall back to that for backward compat
+/// (those rows render without avatars until the next re-sync).
+pub fn serde_users(raw: &str) -> Vec<UserRef> {
+    if let Ok(users) = serde_json::from_str::<Vec<UserRef>>(raw) {
+        return users;
+    }
+    serde_json::from_str::<Vec<String>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .map(UserRef::new)
+        .collect()
+}
+
+/// Reviews stored as [{"login":"alice","state":"APPROVED","avatar_url":"…"}].
+/// Returns (user, state) pairs; `avatar_url` is optional.
+pub fn serde_reviews(raw: &str) -> Vec<(UserRef, String)> {
     serde_json::from_str::<Vec<serde_json::Value>>(raw)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|v| {
             let login = v["login"].as_str()?.to_string();
             let state = v["state"].as_str()?.to_string();
-            Some((login, state))
+            let avatar_url = v["avatar_url"].as_str().map(|s| s.to_string());
+            Some((UserRef { login, avatar_url }, state))
         })
         .collect()
+}
+
+/// Review state of a reviewer, for the item-list overlay badge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewState {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+    /// Requested as a reviewer but has not submitted a review yet.
+    Pending,
+}
+
+impl ReviewState {
+    /// Map a GitHub review `state` string to a [`ReviewState`]. Unknown values
+    /// fall back to `Commented`.
+    pub fn from_state(state: &str) -> Self {
+        match state {
+            "APPROVED" => ReviewState::Approved,
+            "CHANGES_REQUESTED" => ReviewState::ChangesRequested,
+            "DISMISSED" => ReviewState::Dismissed,
+            "PENDING" => ReviewState::Pending,
+            _ => ReviewState::Commented,
+        }
+    }
+}
+
+/// Reviewers to show on an item, as (user, state): everyone who submitted a
+/// review (with their state) plus requested reviewers who have not yet reviewed
+/// (as `Pending`). Mirrors the TUI detail-pane reviewer logic.
+pub fn reviewer_overlays(item: &ItemEntry) -> Vec<(UserRef, ReviewState)> {
+    let mut out: Vec<(UserRef, ReviewState)> = item
+        .reviews
+        .iter()
+        .map(|(u, state)| (u.clone(), ReviewState::from_state(state)))
+        .collect();
+    for u in &item.requested_reviewers {
+        if !out.iter().any(|(ru, _)| ru.login == u.login) {
+            out.push((u.clone(), ReviewState::Pending));
+        }
+    }
+    out
 }
 
 pub fn cached_item_to_item_entry(c: CachedItem, last_viewed_at: Option<&str>) -> ItemEntry {
@@ -41,17 +99,20 @@ pub fn cached_item_to_item_entry(c: CachedItem, last_viewed_at: Option<&str>) ->
         repo_owner: c.repo_owner,
         repo_name: c.repo_name,
         repo_private: c.repo_private,
-        author: c.author,
+        author: c.author.map(|login| UserRef {
+            login,
+            avatar_url: c.author_avatar_url,
+        }),
         state: c.state,
         updated_at: c.updated_at,
         labels: serde_labels(&c.labels),
         url: c.url,
         comment_count: c.comment_count,
         kind: c.kind,
-        requested_reviewers: serde_labels(&c.requested_reviewers),
+        requested_reviewers: serde_users(&c.requested_reviewers),
         reviews: serde_reviews(&c.reviews),
         body: c.body,
-        assignees: serde_labels(&c.assignees),
+        assignees: serde_users(&c.assignees),
         is_draft: c.is_draft,
         created_at_item: c.created_at_item,
         base_ref: c.base_ref,
@@ -176,4 +237,80 @@ pub fn move_group_down(entries: &mut Vec<LeftPaneEntry>, query_idx: usize) -> Op
         entries.insert(insert_at + i, item);
     }
     Some(insert_at + b_len) // new start index of the moved group
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serde_users_parses_new_object_array() {
+        let users = serde_users(r#"[{"login":"alice","avatar_url":"https://a/x.png"}]"#);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].login, "alice");
+        assert_eq!(users[0].avatar_url.as_deref(), Some("https://a/x.png"));
+    }
+
+    #[test]
+    fn serde_users_falls_back_to_legacy_string_array() {
+        // Old cache rows stored a plain string array; they should still parse
+        // (with no avatar) until the next re-sync.
+        let users = serde_users(r#"["bob","carol"]"#);
+        let logins: Vec<&str> = users.iter().map(|u| u.login.as_str()).collect();
+        assert_eq!(logins, vec!["bob", "carol"]);
+        assert!(users.iter().all(|u| u.avatar_url.is_none()));
+    }
+
+    #[test]
+    fn serde_reviews_extracts_user_state_and_avatar() {
+        let reviews =
+            serde_reviews(r#"[{"login":"alice","state":"APPROVED","avatar_url":"https://a"}]"#);
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].0.login, "alice");
+        assert_eq!(reviews[0].0.avatar_url.as_deref(), Some("https://a"));
+        assert_eq!(reviews[0].1, "APPROVED");
+    }
+
+    #[test]
+    fn reviewer_overlays_unions_reviews_and_pending_requests() {
+        let mut item = ItemEntry {
+            number: 1,
+            title: String::new(),
+            repo_owner: "o".into(),
+            repo_name: "r".into(),
+            repo_private: false,
+            author: None,
+            state: "open".into(),
+            updated_at: String::new(),
+            labels: vec![],
+            url: String::new(),
+            comment_count: 0,
+            kind: "pull_request".into(),
+            requested_reviewers: vec![UserRef::new("carol"), UserRef::new("alice")],
+            reviews: vec![(UserRef::new("alice"), "APPROVED".into())],
+            body: None,
+            assignees: vec![],
+            is_draft: false,
+            created_at_item: None,
+            base_ref: None,
+            head_ref: None,
+            review_decision: None,
+            milestone: None,
+            cached_at: String::new(),
+            is_new: false,
+            read: false,
+        };
+        let overlays = reviewer_overlays(&item);
+        // alice (reviewed) keeps her state; carol (requested only) is pending.
+        assert_eq!(overlays.len(), 2);
+        assert_eq!(overlays[0].0.login, "alice");
+        assert_eq!(overlays[0].1, ReviewState::Approved);
+        assert_eq!(overlays[1].0.login, "carol");
+        assert_eq!(overlays[1].1, ReviewState::Pending);
+
+        // No requested reviewers, no reviews → empty.
+        item.requested_reviewers.clear();
+        item.reviews.clear();
+        assert!(reviewer_overlays(&item).is_empty());
+    }
 }
