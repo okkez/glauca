@@ -32,6 +32,7 @@ octicons! {
     "octicons/git-merge.svg" => "../assets/octicons/git-merge.svg",
     "octicons/git-pull-request-closed.svg" => "../assets/octicons/git-pull-request-closed.svg",
     "octicons/git-pull-request-draft.svg" => "../assets/octicons/git-pull-request-draft.svg",
+    "octicons/lock.svg" => "../assets/octicons/lock.svg",
 }
 
 impl AssetSource for Assets {

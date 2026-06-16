@@ -54,7 +54,7 @@ query SearchItems($q: String!, $after: String) {
         updatedAt
         author { __typename login }
         labels(first: 20) { nodes { name } }
-        repository { owner { login } name }
+        repository { owner { login } name isPrivate }
         comments { totalCount }
         body
         assignees(first: 10) { nodes { login } }
@@ -69,7 +69,7 @@ query SearchItems($q: String!, $after: String) {
         updatedAt
         author { __typename login }
         labels(first: 20) { nodes { name } }
-        repository { owner { login } name }
+        repository { owner { login } name isPrivate }
         comments { totalCount }
         body
         assignees(first: 10) { nodes { login } }
@@ -209,6 +209,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
 
     let repo_owner = node["repository"]["owner"]["login"].as_str()?.to_string();
     let repo_name = node["repository"]["name"].as_str()?.to_string();
+    let repo_private = node["repository"]["isPrivate"].as_bool().unwrap_or(false);
 
     let labels = node["labels"]["nodes"]
         .as_array()
@@ -309,6 +310,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         kind: kind.to_string(),
         repo_owner,
         repo_name,
+        repo_private,
         number,
         title,
         url,

@@ -279,6 +279,9 @@ pub struct CachedItem {
     pub kind: String,
     pub repo_owner: String,
     pub repo_name: String,
+    /// Whether the repository is private (drives the lock indicator in the item
+    /// list). Reflects the current visibility on each re-sync.
+    pub repo_private: bool,
     pub number: i64,
     pub title: String,
     pub url: String,
@@ -307,14 +310,15 @@ pub struct CachedItem {
 pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
     let is_draft_int = item.is_draft as i64;
     let read_int = item.read as i64;
+    let repo_private_int = item.repo_private as i64;
     sqlx::query!(
         r#"
         INSERT INTO items
-            (query_id, kind, repo_owner, repo_name, number, title, url, author,
+            (query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
              state, updated_at, labels, comment_count, requested_reviewers, reviews,
              body, assignees, is_draft, created_at_item, base_ref, head_ref,
              review_decision, milestone, read, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
             title               = excluded.title,
@@ -329,6 +333,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
             body                = excluded.body,
             assignees           = excluded.assignees,
             is_draft            = excluded.is_draft,
+            repo_private        = excluded.repo_private,
             created_at_item     = excluded.created_at_item,
             base_ref            = excluded.base_ref,
             head_ref            = excluded.head_ref,
@@ -345,6 +350,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         item.kind,
         item.repo_owner,
         item.repo_name,
+        repo_private_int,
         item.number,
         item.title,
         item.url,
@@ -374,7 +380,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
 pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedItem>> {
     let rows = sqlx::query!(
         r#"
-        SELECT query_id, kind, repo_owner, repo_name, number, title, url, author,
+        SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
                state, updated_at, labels, comment_count, requested_reviewers, reviews,
                body, assignees, is_draft, created_at_item, base_ref, head_ref,
                review_decision, milestone, cached_at, read
@@ -394,6 +400,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
             kind: r.kind,
             repo_owner: r.repo_owner,
             repo_name: r.repo_name,
+            repo_private: r.repo_private != 0,
             number: r.number,
             title: r.title,
             url: r.url,
@@ -496,6 +503,7 @@ mod tests {
             kind: "pull_request".into(),
             repo_owner: "owner".into(),
             repo_name: "repo".into(),
+            repo_private: false,
             number,
             title: title.to_string(),
             url: format!("https://github.com/owner/repo/pull/{number}"),
@@ -600,6 +608,7 @@ mod tests {
             kind: "pull_request".into(),
             repo_owner: "owner".into(),
             repo_name: "r".into(),
+            repo_private: false,
             number: 1,
             title: "Fix bug".into(),
             url: "https://github.com/owner/r/pull/1".into(),

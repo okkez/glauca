@@ -208,13 +208,17 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
             ]);
             line1_spans.extend(title_spans);
 
-            // Line 2: (indent)  repo  ·  updated_at
-            let line2 = Line::from(vec![
-                Span::raw("        "),
+            // Line 2: (indent)  [🔒]  repo  ·  updated_at
+            let mut line2_spans = vec![Span::raw("        ")];
+            if item.repo_private {
+                line2_spans.push(Span::styled("🔒 ", Style::default().fg(Color::Yellow)));
+            }
+            line2_spans.extend([
                 Span::styled(repo, Style::default().fg(Color::Gray)),
                 Span::styled("  ·  ", Style::default().fg(Color::Gray)),
                 Span::styled(updated, Style::default().fg(Color::Gray)),
             ]);
+            let line2 = Line::from(line2_spans);
 
             ListItem::new(vec![Line::from(line1_spans), line2])
         })

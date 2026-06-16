@@ -116,6 +116,8 @@ pub struct ItemEntry {
     pub title: String,
     pub repo_owner: String,
     pub repo_name: String,
+    /// Whether the repository is private (drives the lock indicator in the item list).
+    pub repo_private: bool,
     pub author: Option<String>,
     pub state: String,
     pub updated_at: String,

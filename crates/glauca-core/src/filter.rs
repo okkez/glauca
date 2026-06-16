@@ -174,6 +174,7 @@ mod tests {
             title: title.to_string(),
             repo_owner: owner.to_string(),
             repo_name: name.to_string(),
+            repo_private: false,
             author: Some(author.to_string()),
             state: state.to_string(),
             updated_at: String::new(),

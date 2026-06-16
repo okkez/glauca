@@ -40,6 +40,7 @@ pub fn cached_item_to_item_entry(c: CachedItem, last_viewed_at: Option<&str>) ->
         title: c.title,
         repo_owner: c.repo_owner,
         repo_name: c.repo_name,
+        repo_private: c.repo_private,
         author: c.author,
         state: c.state,
         updated_at: c.updated_at,

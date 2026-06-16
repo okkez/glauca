@@ -1606,12 +1606,28 @@ impl GlaucaApp {
                     .child(title_el),
             )
             .child(
-                div()
+                h_flex()
                     .w_full()
-                    .truncate()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(meta)),
+                    .gap_1()
+                    .items_center()
+                    // Private repos get a lock glyph ahead of the "owner/name" text.
+                    .when(item.repo_private, |e| {
+                        e.child(
+                            svg()
+                                .path("octicons/lock.svg")
+                                .size_3()
+                                .flex_shrink_0()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                    })
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(meta)),
+                    ),
             )
             .into_any_element()
     }
