@@ -1722,16 +1722,7 @@ impl GlaucaApp {
         };
 
         let location = format!("{}/{}#{}", item.repo_owner, item.repo_name, item.number);
-        // Author moved to its own avatar+login row below; the state line keeps
-        // just state (+ draft / review decision).
-        let mut state_line = item.state.clone();
-        if item.is_draft {
-            state_line.push_str("  ·  draft");
-        }
-        if let Some(decision) = &item.review_decision {
-            state_line.push_str("  ·  ");
-            state_line.push_str(decision);
-        }
+        let (state_path, state_color) = item_state_icon_info(item, cx);
 
         // Pinned header: metadata stays visible while the body scrolls. It can't
         // share a scroll region with the body because the body owns its own
@@ -1740,11 +1731,67 @@ impl GlaucaApp {
             .flex_none()
             .p_4()
             .gap_2()
+            // Location + state line: "[🔒] owner/repo#number   [state icon] State".
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(location)),
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            // Private repos get a lock glyph ahead of the name.
+                            .when(item.repo_private, |e| {
+                                e.child(
+                                    svg()
+                                        .path("octicons/lock.svg")
+                                        .size_3()
+                                        .flex_shrink_0()
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(SharedString::from(location)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .flex_shrink_0()
+                            // GitHub-style state pill: colored, rounded, light text.
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .bg(state_color)
+                                    .text_color(white())
+                                    .child(
+                                        svg()
+                                            .path(state_path)
+                                            .size_3()
+                                            .flex_shrink_0()
+                                            .text_color(white()),
+                                    )
+                                    .child(div().text_xs().child(state_label(item))),
+                            )
+                            .when_some(item.review_decision.clone(), |e, decision| {
+                                e.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(SharedString::from(format!("· {decision}"))),
+                                )
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -1752,12 +1799,6 @@ impl GlaucaApp {
                     .font_bold()
                     .text_color(cx.theme().foreground)
                     .child(SharedString::from(item.title.clone())),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(state_line)),
             )
             .when_some(item.author.clone(), |e, a| {
                 e.child(detail_people_field("author", [user_chip(a, cx)], cx))
@@ -2116,8 +2157,21 @@ fn reviewer_chip(user: UserRef, state: ReviewState, cx: &App) -> impl IntoElemen
 /// closed=red, draft=muted). gpui paints the SVG as a mask tinted by
 /// `text_color`.
 fn item_state_icon(item: &ItemEntry, cx: &App) -> impl IntoElement {
+    let (path, color) = item_state_icon_info(item, cx);
+    svg()
+        .path(path)
+        .size_4()
+        .flex_shrink_0()
+        // Nudge down so the icon centers on the first title line.
+        .mt(px(2.))
+        .text_color(color)
+}
+
+/// Octicon path + color for an item's state, shared by the list-row status icon
+/// and the detail-header state pill.
+fn item_state_icon_info(item: &ItemEntry, cx: &App) -> (&'static str, Hsla) {
     let theme = cx.theme();
-    let (path, color) = if item.kind == "pull_request" {
+    if item.kind == "pull_request" {
         if item.is_draft {
             ("octicons/git-pull-request-draft.svg", theme.muted_foreground)
         } else {
@@ -2132,14 +2186,27 @@ fn item_state_icon(item: &ItemEntry, cx: &App) -> impl IntoElement {
             "closed" => ("octicons/issue-closed.svg", theme.red),
             _ => ("octicons/issue-opened.svg", theme.green),
         }
-    };
-    svg()
-        .path(path)
-        .size_4()
-        .flex_shrink_0()
-        // Nudge down so the icon centers on the first title line.
-        .mt(px(2.))
-        .text_color(color)
+    }
+}
+
+/// GitHub-style state label for the detail-header state pill.
+fn state_label(item: &ItemEntry) -> &'static str {
+    if item.kind == "pull_request" {
+        if item.is_draft {
+            "Draft"
+        } else {
+            match item.state.as_str() {
+                "merged" => "Merged",
+                "closed" => "Closed",
+                _ => "Open",
+            }
+        }
+    } else {
+        match item.state.as_str() {
+            "closed" => "Closed",
+            _ => "Open",
+        }
+    }
 }
 
 /// Side length of the participant avatars in the item list.
