@@ -1313,9 +1313,11 @@ impl GlaucaApp {
         let Some(&idx) = self.filtered.get(self.item_cursor) else {
             return;
         };
-        match self.items.get(idx) {
-            Some(item) if !item.read => {}
-            _ => return,
+        let Some(item) = self.items.get(idx) else {
+            return;
+        };
+        if item.read {
+            return;
         }
         self.items[idx].read = true;
         self.items[idx].is_new = false;
