@@ -208,6 +208,8 @@ enum Action {
     OpenBrowser,
     CopyUrl,
     ReviewOctorus,
+    RefreshList,
+    RefreshItem,
 }
 
 /// Copy `text` to the system clipboard via the OSC 52 terminal escape sequence.
@@ -375,6 +377,18 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                     .unwrap_or(false) =>
         {
             return Action::ReviewOctorus;
+        }
+
+        // Refresh: context-sensitive. On the left pane, re-sync the selected
+        // list (root query); on an item, re-fetch just that item.
+        KeyCode::Char('r') if app.focus == Focus::QueryList => {
+            return Action::RefreshList;
+        }
+        KeyCode::Char('r')
+            if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
+                && app.selected_item().is_some() =>
+        {
+            return Action::RefreshItem;
         }
 
         // Enter filter mode (middle pane)
@@ -827,6 +841,60 @@ async fn select_current_entry(app: &mut App, engine: &Engine, always_sync: bool)
     Some(load.root_id)
 }
 
+/// The query string of the root query with `root_id`, found in the left-pane
+/// entries. Used to re-sync the list backing a filter stream (which has no
+/// query string of its own).
+fn root_query_str(app: &App, root_id: i64) -> Option<String> {
+    app.entries.iter().find_map(|e| match e {
+        LeftPaneEntry::Query(q) if q.id == root_id => Some(q.query_str.clone()),
+        _ => None,
+    })
+}
+
+/// Re-sync the list for the currently selected entry (its root query) without
+/// resetting the cursor/scroll, so a manual refresh keeps the user's place.
+async fn refresh_selected_list(app: &mut App, engine: &Engine) {
+    let Some((root_id, highlight_since)) = app
+        .entries
+        .get(app.entry_cursor)
+        .map(|e| (e.root_query_id(), e.last_viewed_at().map(str::to_string)))
+    else {
+        return;
+    };
+    let Some(query_str) = root_query_str(app, root_id) else {
+        app.status = Some("Nothing to refresh".into());
+        return;
+    };
+    engine
+        .send(EngineCommand::Sync {
+            query_id: root_id,
+            query_str,
+            highlight_since,
+        })
+        .await;
+    app.syncing = true;
+}
+
+/// Re-fetch just the selected item from GitHub into its query's cache.
+async fn refresh_selected_item(app: &mut App, engine: &Engine) {
+    let Some(item) = app.selected_item().cloned() else {
+        return;
+    };
+    let Some(query_id) = app.selected_root_query_id() else {
+        return;
+    };
+    engine
+        .send(EngineCommand::RefreshItem {
+            query_id,
+            repo_owner: item.repo_owner.clone(),
+            repo_name: item.repo_name.clone(),
+            number: item.number,
+            highlight_since: app.active_entry_last_viewed_at.clone(),
+        })
+        .await;
+    app.status = Some(format!("Refreshing #{}…", item.number));
+}
+
 /// Mark the item under the cursor read (it is shown in the detail pane): flip its
 /// in-memory `read`/`is_new`, recompute the current query's unread badges, and
 /// persist via the engine (fire-and-forget). No-op if there is no selection or the
@@ -1275,6 +1343,10 @@ where
                                             app.input_mode = InputMode::Normal;
                                             app.status = Some(run_octorus_review(terminal, &item)?);
                                         }
+                                        ItemAction::RefreshItem => {
+                                            app.input_mode = InputMode::Normal;
+                                            refresh_selected_item(&mut app, &engine).await;
+                                        }
                                     }
                                 }
                             }
@@ -1310,6 +1382,12 @@ where
                             if let Some(item) = app.selected_item().cloned() {
                                 app.status = Some(run_octorus_review(terminal, &item)?);
                             }
+                        }
+                        Action::RefreshList => {
+                            refresh_selected_list(&mut app, &engine).await;
+                        }
+                        Action::RefreshItem => {
+                            refresh_selected_item(&mut app, &engine).await;
                         }
                         Action::None => {}
                     }
@@ -2044,6 +2122,7 @@ mod tests {
             vec![
                 ItemAction::OpenBrowser,
                 ItemAction::CopyUrl,
+                ItemAction::RefreshItem,
                 ItemAction::ViewComments,
                 ItemAction::Comment,
                 ItemAction::ApprovePR,
@@ -2055,10 +2134,17 @@ mod tests {
             vec![
                 ItemAction::OpenBrowser,
                 ItemAction::CopyUrl,
+                ItemAction::RefreshItem,
                 ItemAction::ViewComments,
                 ItemAction::Comment,
             ]
         );
+    }
+
+    #[test]
+    fn refresh_item_available_for_both_kinds() {
+        assert!(ItemAction::available_for("pull_request").contains(&ItemAction::RefreshItem));
+        assert!(ItemAction::available_for("issue").contains(&ItemAction::RefreshItem));
     }
 
     #[test]

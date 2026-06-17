@@ -564,6 +564,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let on_item =
         app.selected_item().is_some() && matches!(app.focus, Focus::ItemList | Focus::ItemDetail);
     let enter_actions_hint = if on_item { "  Enter:actions" } else { "" };
+    let refresh_hint = if on_item { "  r:refresh" } else { "" };
     // octorus review is PR-only.
     let review_hint = if app
         .selected_item()
@@ -578,9 +579,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let mode_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  a:mark all read  q:quit".to_string(),
-            Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}{review_hint}  q:quit"),
-            Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}{review_hint}  q:quit"),
+            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  r:refresh  a:mark all read  q:quit".to_string(),
+            Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}{refresh_hint}{review_hint}  q:quit"),
+            Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}{refresh_hint}{review_hint}  q:quit"),
         },
         InputMode::Filter => "FILTER   Esc:exit  C-u:clear  state:open  author:name  label:bug  repo:owner/name".to_string(),
         InputMode::NewQuery => "NEW QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),

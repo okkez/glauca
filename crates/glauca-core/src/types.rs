@@ -179,6 +179,8 @@ pub enum ItemAction {
     ApprovePR,
     MergePR,
     CopyUrl,
+    /// Re-fetch just this item from GitHub. Offered by both front-ends.
+    RefreshItem,
     /// Launch the external `octorus` (`or`) PR-review TUI for this item. Offered
     /// only by the TUI front-end (see `glauca-cli`'s `item_actions`), never added
     /// to `available_for` so it stays out of the GUI menu.
@@ -194,6 +196,7 @@ impl ItemAction {
             Self::ApprovePR => "Approve PR",
             Self::MergePR => "Merge PR",
             Self::CopyUrl => "Copy URL",
+            Self::RefreshItem => "Refresh item",
             Self::ReviewOctorus => "Review with octorus",
         }
     }
@@ -203,6 +206,7 @@ impl ItemAction {
             "pull_request" => vec![
                 Self::OpenBrowser,
                 Self::CopyUrl,
+                Self::RefreshItem,
                 Self::ViewComments,
                 Self::Comment,
                 Self::ApprovePR,
@@ -211,6 +215,7 @@ impl ItemAction {
             "issue" => vec![
                 Self::OpenBrowser,
                 Self::CopyUrl,
+                Self::RefreshItem,
                 Self::ViewComments,
                 Self::Comment,
             ],

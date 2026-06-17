@@ -102,6 +102,7 @@ gpui::actions!(
         OpenInBrowser,
         OpenComments,
         CopyUrl,
+        Refresh,
         CommentsScrollDown,
         CommentsScrollUp,
         CommentsTop,
@@ -571,6 +572,68 @@ impl GlaucaApp {
         if let Some(item) = self.selected_item() {
             cx.write_to_clipboard(ClipboardItem::new_string(item.url));
         }
+    }
+
+    /// The query string of the root query with `root_id` (found in the left-pane
+    /// entries) — needed to re-sync the list backing a filter stream, which has
+    /// no query string of its own.
+    fn root_query_str_for(&self, root_id: i64) -> Option<String> {
+        self.entries.iter().find_map(|e| match e {
+            LeftPaneEntry::Query(q) if q.id == root_id => Some(q.query_str.clone()),
+            _ => None,
+        })
+    }
+
+    /// `r` — context-sensitive refresh: re-sync the selected list when the left
+    /// pane is focused, otherwise re-fetch just the selected item.
+    fn on_refresh(&mut self, _: &Refresh, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus == Focus::QueryList {
+            self.refresh_selected_list();
+        } else {
+            self.refresh_selected_item();
+        }
+        cx.notify();
+    }
+
+    /// Re-sync the list for the selected entry (its root query) in place, keeping
+    /// the current selection.
+    fn refresh_selected_list(&mut self) {
+        let Some((root_id, highlight_since)) = self
+            .entries
+            .get(self.entry_cursor)
+            .map(|e| (e.root_query_id(), e.last_viewed_at().map(str::to_string)))
+        else {
+            return;
+        };
+        let Some(query_str) = self.root_query_str_for(root_id) else {
+            self.status = Some("Nothing to refresh".into());
+            return;
+        };
+        self.send(EngineCommand::Sync {
+            query_id: root_id,
+            query_str,
+            highlight_since,
+        });
+        self.syncing = true;
+    }
+
+    /// Re-fetch just the selected item from GitHub into its query's cache.
+    fn refresh_selected_item(&mut self) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let Some(query_id) = self.selected_root_query_id() else {
+            return;
+        };
+        let number = item.number;
+        self.send(EngineCommand::RefreshItem {
+            query_id,
+            repo_owner: item.repo_owner,
+            repo_name: item.repo_name,
+            number,
+            highlight_since: self.active_entry_last_viewed_at.clone(),
+        });
+        self.status = Some(format!("Refreshing #{number}…"));
     }
 
     /// `c` — open the comments overlay for the selected item.
@@ -1094,6 +1157,19 @@ impl GlaucaApp {
             ItemAction::MergePR => self.open_merge_dialog(item, window, cx),
             ItemAction::ViewComments => self.open_comments(item, window, cx),
             ItemAction::CopyUrl => cx.write_to_clipboard(ClipboardItem::new_string(item.url)),
+            ItemAction::RefreshItem => {
+                let number = item.number;
+                if let Some(query_id) = self.selected_root_query_id() {
+                    self.send(EngineCommand::RefreshItem {
+                        query_id,
+                        repo_owner: item.repo_owner,
+                        repo_name: item.repo_name,
+                        number,
+                        highlight_since: self.active_entry_last_viewed_at.clone(),
+                    });
+                    self.status = Some(format!("Refreshing #{number}…"));
+                }
+            }
             // octorus is a terminal TUI launched only from the CLI front-end; it
             // is never offered in the GUI menu, so this arm is unreachable.
             ItemAction::ReviewOctorus => {}
@@ -2438,6 +2514,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("o", "Open selected item in browser"),
     ("c", "View comments for selected item"),
     ("y", "Copy selected item URL to clipboard"),
+    ("r", "Refresh selected list (left pane) or item"),
     ("q", "Quit"),
     ("Comments overlay", ""),
     ("j / k  ·  ↓ / ↑", "Scroll comments"),
@@ -2611,6 +2688,7 @@ impl Render for GlaucaApp {
             .on_action(cx.listener(Self::on_edit_entry))
             .on_action(cx.listener(Self::on_open_in_browser))
             .on_action(cx.listener(Self::on_copy_url))
+            .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_open_comments))
             .on_action(cx.listener(Self::on_comments_scroll_down))
             .on_action(cx.listener(Self::on_comments_scroll_up))
@@ -2784,6 +2862,7 @@ fn main() -> Result<()> {
             KeyBinding::new("o", OpenInBrowser, Some(NAV_CONTEXT)),
             KeyBinding::new("c", OpenComments, Some(NAV_CONTEXT)),
             KeyBinding::new("y", CopyUrl, Some(NAV_CONTEXT)),
+            KeyBinding::new("r", Refresh, Some(NAV_CONTEXT)),
             // Comments overlay controls (active only while the overlay is focused).
             KeyBinding::new("j", CommentsScrollDown, Some(COMMENTS_CONTEXT)),
             KeyBinding::new("k", CommentsScrollUp, Some(COMMENTS_CONTEXT)),

@@ -39,11 +39,10 @@ pub async fn get_current_user(client: &Octocrab) -> Option<String> {
 
 // ── GraphQL query ─────────────────────────────────────────────────────────────
 
-const SEARCH_QUERY: &str = "
-query SearchItems($q: String!, $after: String) {
-  search(query: $q, type: ISSUE, first: 100, after: $after) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
+// Issue/PullRequest field selections shared by the list search and the
+// single-item fetch, so both produce the same node shape for
+// `node_to_cached_item`. Kept as one string to avoid the two queries drifting.
+const ITEM_FIELDS: &str = "
       __typename
       ... on Issue {
         number
@@ -93,9 +92,32 @@ query SearchItems($q: String!, $after: String) {
           }
         }
       }
-    }
-  }
-}";
+";
+
+/// GraphQL search query (list fetch), built once from the shared `ITEM_FIELDS`.
+fn search_query() -> String {
+    format!(
+        "
+query SearchItems($q: String!, $after: String) {{
+  search(query: $q, type: ISSUE, first: 100, after: $after) {{
+    pageInfo {{ hasNextPage endCursor }}
+    nodes {{{ITEM_FIELDS}}}
+  }}
+}}"
+    )
+}
+
+/// GraphQL single-item query (refresh one PR/Issue by number).
+fn item_query() -> String {
+    format!(
+        "
+query FetchItem($owner: String!, $name: String!, $number: Int!) {{
+  repository(owner: $owner, name: $name) {{
+    issueOrPullRequest(number: $number) {{{ITEM_FIELDS}}}
+  }}
+}}"
+    )
+}
 
 // ── GraphQL response types ────────────────────────────────────────────────────
 
@@ -156,7 +178,7 @@ pub async fn search_page(
     let effective_query = apply_default_sort(query);
 
     let payload = serde_json::json!({
-        "query": SEARCH_QUERY,
+        "query": search_query(),
         "variables": {
             "q": effective_query,
             "after": after,
@@ -179,6 +201,36 @@ pub async fn search_page(
         has_next_page: conn.page_info.has_next_page,
         end_cursor: conn.page_info.end_cursor,
     })
+}
+
+/// Re-fetch a single PR/Issue by repo + number, returning it tagged with
+/// `query_id` so it can be upserted into that query's cache. `Ok(None)` means
+/// the item no longer exists (e.g. transferred/deleted).
+pub async fn fetch_item(
+    client: &Octocrab,
+    query_id: i64,
+    owner: &str,
+    name: &str,
+    number: i64,
+) -> Result<Option<CachedItem>> {
+    let payload = serde_json::json!({
+        "query": item_query(),
+        "variables": {
+            "owner": owner,
+            "name": name,
+            "number": number,
+        }
+    });
+    let resp: serde_json::Value = client
+        .graphql(&payload)
+        .await
+        .context("GraphQL item fetch failed")?;
+
+    let node = &resp["data"]["repository"]["issueOrPullRequest"];
+    if node.is_null() {
+        return Ok(None);
+    }
+    Ok(node_to_cached_item(node, query_id))
 }
 
 /// Convert a single GraphQL search node (Issue or PullRequest) to a `CachedItem`.

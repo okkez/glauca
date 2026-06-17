@@ -473,6 +473,15 @@ pub enum EngineCommand {
         query_str: String,
         highlight_since: Option<String>,
     },
+    /// Re-fetch a single item from GitHub and upsert it into `query_id`'s cache,
+    /// then reload that query's items. Used by the per-item refresh action.
+    RefreshItem {
+        query_id: i64,
+        repo_owner: String,
+        repo_name: String,
+        number: i64,
+        highlight_since: Option<String>,
+    },
     MarkEntryViewed {
         entry_id: i64,
         is_filter_stream: bool,
@@ -703,6 +712,41 @@ async fn command_loop(
                     {
                         let _ = tx2.send(AppMessage::SyncStarted { query_id }).await;
                         sync_task(pool2, gh2, query_id, query_str, highlight_since, tx2).await;
+                    }
+                });
+            }
+            EngineCommand::RefreshItem {
+                query_id,
+                repo_owner,
+                repo_name,
+                number,
+                highlight_since,
+            } => {
+                // Re-fetch one item, upsert it into this query's cache, reload the
+                // list, and report via Status (a light notice, not the sync spinner).
+                let pool2 = pool.clone();
+                let gh2 = gh.clone();
+                let tx2 = msg_tx.clone();
+                tokio::spawn(async move {
+                    match github::fetch_item(&gh2, query_id, &repo_owner, &repo_name, number).await {
+                        Ok(Some(item)) => {
+                            if let Err(e) = db::upsert_item(&pool2, &item).await {
+                                let _ =
+                                    tx2.send(AppMessage::Status(format!("Refresh failed: {e}"))).await;
+                                return;
+                            }
+                            load_items_task(pool2, query_id, highlight_since, tx2.clone()).await;
+                            let _ = tx2.send(AppMessage::Status(format!("Refreshed #{number}"))).await;
+                        }
+                        Ok(None) => {
+                            let _ = tx2
+                                .send(AppMessage::Status(format!("#{number} no longer exists")))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ =
+                                tx2.send(AppMessage::Status(format!("Refresh failed: {e}"))).await;
+                        }
                     }
                 });
             }
