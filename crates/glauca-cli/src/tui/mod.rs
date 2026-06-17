@@ -777,6 +777,73 @@ where
 
 // ── Query group reordering helpers ───────────────────────────────────────────
 
+/// Position-swap command for moving the entry at `cursor` up (`down=false`) or
+/// down within its group: a query swaps with the adjacent query group, a filter
+/// stream with an adjacent sibling under the same parent. `None` if there is no
+/// neighbor to swap with. The entries vec is reordered later, when the engine
+/// confirms with QueriesSwapped / FilterStreamsSwapped.
+fn reorder_command(entries: &[LeftPaneEntry], cursor: usize, down: bool) -> Option<EngineCommand> {
+    match entries.get(cursor)? {
+        LeftPaneEntry::Query(q) => {
+            let current_id = q.id;
+            if down {
+                let next_query_idx = group_range(entries, cursor).end;
+                match entries.get(next_query_idx)? {
+                    LeftPaneEntry::Query(nq) => Some(EngineCommand::SwapQueryPositions {
+                        upper_id: current_id,
+                        lower_id: nq.id,
+                        active_id: current_id,
+                    }),
+                    _ => None,
+                }
+            } else {
+                let prev_idx = entries[..cursor]
+                    .iter()
+                    .rposition(|e| matches!(e, LeftPaneEntry::Query(_)))?;
+                match &entries[prev_idx] {
+                    LeftPaneEntry::Query(pq) => Some(EngineCommand::SwapQueryPositions {
+                        upper_id: pq.id,
+                        lower_id: current_id,
+                        active_id: current_id,
+                    }),
+                    _ => None,
+                }
+            }
+        }
+        LeftPaneEntry::FilterStream(fs) => {
+            let fs_id = fs.id;
+            let parent_id = fs.parent_id;
+            if down {
+                // Swap with next sibling (same parent, immediately after).
+                match entries.get(cursor + 1) {
+                    Some(LeftPaneEntry::FilterStream(next)) if next.parent_id == parent_id => {
+                        Some(EngineCommand::SwapFilterStreamPositions {
+                            upper_id: fs_id,
+                            lower_id: next.id,
+                            active_id: fs_id,
+                        })
+                    }
+                    _ => None,
+                }
+            } else if cursor > 0 {
+                // Swap with previous sibling (same parent, immediately before).
+                match entries.get(cursor - 1) {
+                    Some(LeftPaneEntry::FilterStream(prev)) if prev.parent_id == parent_id => {
+                        Some(EngineCommand::SwapFilterStreamPositions {
+                            upper_id: prev.id,
+                            lower_id: fs_id,
+                            active_id: fs_id,
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// What `prepare_selected_entry_load` resolves for the selected left-pane entry:
 /// the root query to load items for, plus how to interpret/highlight them.
 struct SelectedEntryLoad {
@@ -1074,77 +1141,8 @@ where
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
                     {
-                        let cursor = app.entry_cursor;
                         let down = key.code == KeyCode::Char('J');
-                        let cmd = match app.entries.get(cursor) {
-                            Some(LeftPaneEntry::Query(q)) => {
-                                let current_id = q.id;
-                                if down {
-                                    let next_query_idx = group_range(&app.entries, cursor).end;
-                                    match app.entries.get(next_query_idx) {
-                                        Some(LeftPaneEntry::Query(nq)) => {
-                                            Some(EngineCommand::SwapQueryPositions {
-                                                upper_id: current_id,
-                                                lower_id: nq.id,
-                                                active_id: current_id,
-                                            })
-                                        }
-                                        _ => None,
-                                    }
-                                } else {
-                                    app.entries[..cursor]
-                                        .iter()
-                                        .rposition(|e| matches!(e, LeftPaneEntry::Query(_)))
-                                        .and_then(|prev_idx| match &app.entries[prev_idx] {
-                                            LeftPaneEntry::Query(pq) => {
-                                                Some(EngineCommand::SwapQueryPositions {
-                                                    upper_id: pq.id,
-                                                    lower_id: current_id,
-                                                    active_id: current_id,
-                                                })
-                                            }
-                                            _ => None,
-                                        })
-                                }
-                            }
-                            Some(LeftPaneEntry::FilterStream(fs)) => {
-                                let fs_id = fs.id;
-                                let parent_id = fs.parent_id;
-                                if down {
-                                    // Swap with next sibling (same parent, immediately after).
-                                    match app.entries.get(cursor + 1) {
-                                        Some(LeftPaneEntry::FilterStream(next))
-                                            if next.parent_id == parent_id =>
-                                        {
-                                            Some(EngineCommand::SwapFilterStreamPositions {
-                                                upper_id: fs_id,
-                                                lower_id: next.id,
-                                                active_id: fs_id,
-                                            })
-                                        }
-                                        _ => None,
-                                    }
-                                } else if cursor > 0 {
-                                    // Swap with previous sibling (same parent, immediately before).
-                                    match app.entries.get(cursor - 1) {
-                                        Some(LeftPaneEntry::FilterStream(prev))
-                                            if prev.parent_id == parent_id =>
-                                        {
-                                            Some(EngineCommand::SwapFilterStreamPositions {
-                                                upper_id: prev.id,
-                                                lower_id: fs_id,
-                                                active_id: fs_id,
-                                            })
-                                        }
-                                        _ => None,
-                                    }
-                                } else {
-                                    None
-                                }
-                            }
-                            None => None,
-                        };
-                        if let Some(cmd) = cmd {
+                        if let Some(cmd) = reorder_command(&app.entries, app.entry_cursor, down) {
                             engine.send(cmd).await;
                         }
                         continue;

@@ -565,13 +565,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         app.selected_item().is_some() && matches!(app.focus, Focus::ItemList | Focus::ItemDetail);
     let enter_actions_hint = if on_item { "  Enter:actions" } else { "" };
     let refresh_hint = if on_item { "  r:refresh" } else { "" };
-    // octorus review is PR-only.
-    let review_hint = if app
+    // octorus review is PR-only (and `on_item` already requires item focus).
+    let selected_is_pr = app
         .selected_item()
         .map(|i| i.kind == "pull_request")
-        .unwrap_or(false)
-        && matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
-    {
+        .unwrap_or(false);
+    let review_hint = if on_item && selected_is_pr {
         "  R:review"
     } else {
         ""
@@ -593,34 +592,19 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::CommentsPopup => "COMMENTS  j/k:scroll  g/G:top/bottom  Esc/q:close".to_string(),
     };
 
-    let status = if let Some(msg) = &app.status {
-        if app.syncing && app.bg_sync_pending > 0 {
-            format!(
-                " {mode_text}  │  ⟳ Syncing…  │  ⟳ Auto ({})  │  {msg}",
-                app.bg_sync_pending
-            )
-        } else if app.syncing {
-            format!(" {mode_text}  │  ⟳ Syncing…  │  {msg}")
-        } else if app.bg_sync_pending > 0 {
-            format!(
-                " {mode_text}  │  ⟳ Auto ({})  │  {msg}",
-                app.bg_sync_pending
-            )
-        } else {
-            format!(" {mode_text}  │  {msg}")
-        }
-    } else if app.syncing && app.bg_sync_pending > 0 {
-        format!(
-            " {mode_text}  │  ⟳ Syncing…  │  ⟳ Auto ({})",
-            app.bg_sync_pending
-        )
-    } else if app.syncing {
-        format!(" {mode_text}  │  ⟳ Syncing…")
-    } else if app.bg_sync_pending > 0 {
-        format!(" {mode_text}  │  ⟳ Auto ({})", app.bg_sync_pending)
-    } else {
-        format!(" {mode_text}")
-    };
+    // Assemble only the segments that apply, in fixed order, then join — instead
+    // of enumerating every on/off combination of syncing / pending / status.
+    let mut segments = vec![mode_text];
+    if app.syncing {
+        segments.push("⟳ Syncing…".to_string());
+    }
+    if app.bg_sync_pending > 0 {
+        segments.push(format!("⟳ Auto ({})", app.bg_sync_pending));
+    }
+    if let Some(msg) = &app.status {
+        segments.push(msg.clone());
+    }
+    let status = format!(" {}", segments.join("  │  "));
 
     let para = Paragraph::new(status)
         .style(Style::default().bg(Color::DarkGray).fg(Color::White))
