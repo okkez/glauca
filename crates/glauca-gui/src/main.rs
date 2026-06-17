@@ -31,13 +31,15 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::text::{markdown, TextView, TextViewState};
 use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
-use gpui_component::{h_flex, v_flex, ActiveTheme, Root, Sizable, StyledExt, WindowExt};
+use gpui_component::{
+    h_flex, v_flex, ActiveTheme, Root, Sizable, StyledExt, Theme, ThemeMode, WindowExt,
+};
 use smol::Timer;
 use tokio::sync::mpsc::Sender;
 
 mod assets;
 mod settings;
-use settings::GuiSettings;
+use settings::{GuiSettings, ThemePreference};
 
 /// How often the GUI drains engine messages and repaints.
 const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
@@ -107,6 +109,9 @@ gpui::actions!(
         CommentsToggleSort,
         CommentsToggleHidden,
         CommentsClose,
+        SetThemeSystem,
+        SetThemeLight,
+        SetThemeDark,
     ]
 );
 
@@ -210,6 +215,9 @@ struct GlaucaApp {
     filter_input: Entity<InputState>,
     /// Pending debounced re-filter task; replacing it cancels the previous one.
     filter_task: Option<Task<()>>,
+    /// Selected color theme. Drives the View menu's active marker and decides
+    /// whether window-appearance changes re-sync the theme (only in `System`).
+    theme_pref: ThemePreference,
     /// Keeps the `filter_input` subscription alive for the view's lifetime.
     _subscriptions: Vec<Subscription>,
 }
@@ -267,6 +275,7 @@ impl GlaucaApp {
         } = init;
         let pane_state = cx.new(|_| ResizableState::default());
         let detail_text = cx.new(|cx| TextViewState::markdown("", cx));
+        let GuiSettings { pane_sizes, theme } = GuiSettings::load();
         let mut app = Self {
             engine,
             cmd_tx,
@@ -286,7 +295,7 @@ impl GlaucaApp {
             left_scroll: ScrollHandle::new(),
             items_list: ListState::new(0, ListAlignment::Top, px(120.)),
             pane_state,
-            pane_sizes: GuiSettings::load().pane_sizes,
+            pane_sizes,
             detail_text,
             focus_handle: cx.focus_handle(),
             focus: Focus::QueryList,
@@ -303,12 +312,66 @@ impl GlaucaApp {
             last_pointer: point(px(0.), px(0.)),
             filter_input,
             filter_task: None,
+            theme_pref: theme,
             _subscriptions: vec![subscription],
         };
+        // Apply the saved theme up front (System follows the OS appearance).
+        app.apply_theme(Some(window), cx);
+        // While following the OS, re-sync whenever its appearance flips. The
+        // closure re-reads `theme_pref` so pinning Light/Dark stops the follow.
+        let this = cx.entity();
+        let appearance_sub = window.observe_window_appearance(move |window, cx| {
+            this.update(cx, |app, cx| {
+                if app.theme_pref == ThemePreference::System {
+                    // Re-apply via `apply_theme` so the GitHub dark overlay is
+                    // re-applied when the OS flips to dark.
+                    app.apply_theme(Some(window), cx);
+                }
+            });
+        });
+        app._subscriptions.push(appearance_sub);
         app.prime();
         // Grab keyboard focus so single-letter navigation works without a click.
         app.focus_handle.focus(window, cx);
         app
+    }
+
+    /// Apply `self.theme_pref` to the global gpui-component theme. `System`
+    /// follows the OS appearance; `Light`/`Dark` pin an explicit mode. When the
+    /// resolved mode is dark, overlay the GitHub-flavored palette (the stock
+    /// dark theme is near-black) — see `apply_github_dark_overlay`.
+    fn apply_theme(&self, window: Option<&mut Window>, cx: &mut App) {
+        match self.theme_pref {
+            ThemePreference::System => Theme::sync_system_appearance(window, cx),
+            ThemePreference::Light => Theme::change(ThemeMode::Light, window, cx),
+            ThemePreference::Dark => Theme::change(ThemeMode::Dark, window, cx),
+        }
+        if cx.theme().mode.is_dark() {
+            apply_github_dark_overlay(cx);
+        }
+    }
+
+    /// Switch the theme from the View menu: apply it, persist the choice
+    /// (preserving the other settings), and repaint.
+    fn set_theme(&mut self, pref: ThemePreference, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme_pref = pref;
+        self.apply_theme(Some(window), cx);
+        let mut settings = GuiSettings::load();
+        settings.theme = pref;
+        settings.save();
+        cx.notify();
+    }
+
+    fn on_set_theme_system(&mut self, _: &SetThemeSystem, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_theme(ThemePreference::System, window, cx);
+    }
+
+    fn on_set_theme_light(&mut self, _: &SetThemeLight, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_theme(ThemePreference::Light, window, cx);
+    }
+
+    fn on_set_theme_dark(&mut self, _: &SetThemeDark, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_theme(ThemePreference::Dark, window, cx);
     }
 
     /// Mirror of the TUI run_app startup: prime unread counts for every root
@@ -1952,7 +2015,9 @@ impl GlaucaApp {
                         block = block.child(
                             div()
                                 .text_xs()
-                                .text_color(cx.theme().accent)
+                                // `yellow` (attention), not `accent`: accent is now
+                                // a muted grey that's too dark for body text.
+                                .text_color(cx.theme().yellow)
                                 .child(SharedString::from(format!("⚠ hidden ({reason})"))),
                         );
                     }
@@ -2041,6 +2106,35 @@ where
             app.update(cx, |this, cx| f(this, window, cx));
         }),
     )
+}
+
+/// Overlay GitHub Dark (Primer "dark default") colors on gpui-component's stock
+/// dark theme, which is near-black and felt too dark. Only the fields the app
+/// actually reads via `cx.theme()` are overridden. Must run *after* the theme
+/// is switched to dark: `Theme::change` / `apply_config` rebuild `colors` from
+/// the base config and would otherwise discard these.
+fn apply_github_dark_overlay(cx: &mut App) {
+    let c = &mut Theme::global_mut(cx).colors;
+    c.background = rgb(0x0d1117).into(); // canvas.default
+    c.foreground = rgb(0xe6edf3).into(); // fg.default
+    c.border = rgb(0x30363d).into(); // border.default
+    c.sidebar = rgb(0x161b22).into(); // canvas.subtle (left pane)
+    c.sidebar_foreground = rgb(0xe6edf3).into();
+    // `accent` is gpui-component's inline-code background and our unread-badge /
+    // row-tint color. A bright blue there is hard to read, so use a neutral grey
+    // (GitHub neutral.muted) — links and the filter-match highlight use `link`
+    // instead so they stay blue.
+    c.accent = rgb(0x373e47).into();
+    c.accent_foreground = rgb(0xe6edf3).into();
+    c.link = rgb(0x2f81f7).into(); // accent.fg — links + filter-match highlight
+    c.primary = rgb(0x2f81f7).into();
+    c.muted_foreground = rgb(0x8b949e).into(); // fg.muted
+    c.list_active = rgb(0x21262d).into(); // selected row
+    c.list_hover = rgb(0x161b22).into(); // hovered row
+    c.green = rgb(0x3fb950).into(); // success (open)
+    c.red = rgb(0xf85149).into(); // danger (closed)
+    c.magenta = rgb(0xa371f7).into(); // done/purple (merged)
+    c.yellow = rgb(0xd29922).into(); // attention (pending review)
 }
 
 /// Build the action menu for a given `MenuKind`, reusing `dispatch_action` and the
@@ -2307,7 +2401,9 @@ fn highlight_title(title: &str, range: Option<(usize, usize)>, cx: &App) -> impl
             text = text.with_highlights([(
                 start..end,
                 HighlightStyle {
-                    background_color: Some(theme.accent),
+                    // `link` (not `accent`) so the match stays a visible blue —
+                    // `accent` is the muted grey used for inline code / badges.
+                    background_color: Some(theme.link),
                     color: Some(theme.accent_foreground),
                     ..Default::default()
                 },
@@ -2370,6 +2466,39 @@ impl GlaucaApp {
                 app_menu_item(menu, &glauca_app, "Quit", |this, w, cx| this.on_quit(&Quit, w, cx))
             });
 
+        // View menu: theme selection (System / Light / Dark). The active choice
+        // is marked with a leading check; the rest are blank-padded to align.
+        let view_app = app.clone();
+        let current_theme = self.theme_pref;
+        let theme_label = move |pref: ThemePreference, text: &str| {
+            let mark = if pref == current_theme { "✓ " } else { "   " };
+            format!("{mark}{text}")
+        };
+        let view_menu = Button::new("menu-view")
+            .small()
+            .ghost()
+            .label("View")
+            .dropdown_menu(move |menu, _w, _cx| {
+                let menu = app_menu_item(
+                    menu,
+                    &view_app,
+                    theme_label(ThemePreference::System, "Theme: System"),
+                    |this, w, cx| this.set_theme(ThemePreference::System, w, cx),
+                );
+                let menu = app_menu_item(
+                    menu,
+                    &view_app,
+                    theme_label(ThemePreference::Light, "Theme: Light"),
+                    |this, w, cx| this.set_theme(ThemePreference::Light, w, cx),
+                );
+                app_menu_item(
+                    menu,
+                    &view_app,
+                    theme_label(ThemePreference::Dark, "Theme: Dark"),
+                    |this, w, cx| this.set_theme(ThemePreference::Dark, w, cx),
+                )
+            });
+
         // Help menu: About (version) and a keyboard-shortcuts reference.
         let help_app = app.clone();
         let help_menu = Button::new("menu-help")
@@ -2395,6 +2524,7 @@ impl GlaucaApp {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(glauca_menu)
+            .child(view_menu)
             .child(help_menu)
     }
 
@@ -2486,6 +2616,9 @@ impl Render for GlaucaApp {
             .on_action(cx.listener(Self::on_comments_toggle_sort))
             .on_action(cx.listener(Self::on_comments_toggle_hidden))
             .on_action(cx.listener(Self::on_comments_close))
+            .on_action(cx.listener(Self::on_set_theme_system))
+            .on_action(cx.listener(Self::on_set_theme_light))
+            .on_action(cx.listener(Self::on_set_theme_dark))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -2504,9 +2637,12 @@ impl Render for GlaucaApp {
                     h_resizable("panes")
                         .with_state(&self.pane_state)
                         .on_resize(|state, _window, cx| {
-                            let pane_sizes =
+                            // Read-modify-write so persisting pane sizes doesn't
+                            // clobber the saved theme (and vice-versa).
+                            let mut settings = GuiSettings::load();
+                            settings.pane_sizes =
                                 state.read(cx).sizes().iter().map(|p| f32::from(*p)).collect();
-                            GuiSettings { pane_sizes }.save();
+                            settings.save();
                         })
                         .child(
                             resizable_panel()
