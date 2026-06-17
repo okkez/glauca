@@ -2,7 +2,6 @@ use crate::db::CachedItem;
 use anyhow::{Context, Result};
 use octocrab::Octocrab;
 use serde::Deserialize;
-use url::Url;
 
 /// Build an authenticated Octocrab instance.
 ///
@@ -414,47 +413,11 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
     })
 }
 
-/// Extract `(owner, name)` from a GitHub repository URL.
-///
-/// Input: `"https://api.github.com/repos/owner/name"`
-pub(crate) fn extract_repo_url(url: &Url) -> (String, String) {
-    let segments: Vec<&str> = url
-        .path_segments()
-        .map(|s| s.collect::<Vec<_>>())
-        .unwrap_or_default();
-    // Path segments: ["repos", "owner", "name"]
-    match segments.as_slice() {
-        [.., owner, name] if !owner.is_empty() && !name.is_empty() => {
-            (owner.to_string(), name.to_string())
-        }
-        _ => (String::new(), String::new()),
-    }
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extract_repo_url_standard() {
-        let url: Url = "https://api.github.com/repos/octocat/hello-world"
-            .parse()
-            .unwrap();
-        assert_eq!(
-            extract_repo_url(&url),
-            ("octocat".to_string(), "hello-world".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_repo_url_nested_path() {
-        let url: Url = "https://api.github.com/repos/org/repo".parse().unwrap();
-        let (owner, name) = extract_repo_url(&url);
-        assert_eq!(owner, "org");
-        assert_eq!(name, "repo");
-    }
 
     #[test]
     fn node_to_cached_item_issue() {
