@@ -132,7 +132,7 @@ impl FilterQuery {
         for tok in &self.text_tokens {
             if let Some(pos) = lower.find(tok.as_str()) {
                 let end = pos + tok.len();
-                if best.is_none() || pos < best.unwrap().0 {
+                if best.is_none_or(|(start, _)| pos < start) {
                     best = Some((pos, end));
                 }
             }

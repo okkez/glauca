@@ -315,13 +315,15 @@ pub async fn sync_task(
                 // Reload from DB after each page so the UI shows results immediately.
                 load_items_task(pool.clone(), query_id, last_viewed_at.clone(), tx.clone()).await;
 
+                // Stop when GitHub reports no further pages, or defensively if
+                // it claims another page but hands back no cursor to fetch it.
                 if !has_next {
                     break;
                 }
-                after = cursor;
-                if after.is_none() {
+                let Some(cursor) = cursor else {
                     break;
-                }
+                };
+                after = Some(cursor);
             }
         }
     }
