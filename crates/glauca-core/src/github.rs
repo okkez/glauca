@@ -22,19 +22,34 @@ pub fn build_client() -> Result<Octocrab> {
     builder.build().map_err(Into::into)
 }
 
-/// Fetch the login name of the authenticated user.
+/// The authenticated user's login, display name, and avatar.
+pub struct CurrentUser {
+    pub login: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+/// Fetch the authenticated user (login + display name + avatar).
 ///
 /// Returns `None` if unauthenticated or the API call fails.
-pub async fn get_current_user(client: &Octocrab) -> Option<String> {
+pub async fn get_current_user(client: &Octocrab) -> Option<CurrentUser> {
     #[derive(Deserialize)]
     struct UserResponse {
         login: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        avatar_url: Option<String>,
     }
     client
         .get::<UserResponse, _, _>("https://api.github.com/user", None::<&()>)
         .await
         .ok()
-        .map(|u| u.login)
+        .map(|u| CurrentUser {
+            login: u.login,
+            name: u.name,
+            avatar_url: u.avatar_url,
+        })
 }
 
 // ── GraphQL query ─────────────────────────────────────────────────────────────

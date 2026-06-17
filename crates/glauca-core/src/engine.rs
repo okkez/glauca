@@ -450,6 +450,10 @@ pub fn spawn_mark_entry_viewed(
 pub struct EngineInit {
     pub entries: Vec<LeftPaneEntry>,
     pub current_user: Option<String>,
+    /// Display name of the authenticated user (GitHub `name`), if set.
+    pub current_user_name: Option<String>,
+    /// Avatar URL of the authenticated user.
+    pub current_user_avatar_url: Option<String>,
 }
 
 /// Commands the front-end sends to the engine. Each is handled asynchronously and,
@@ -607,7 +611,10 @@ impl Engine {
             }
         }
 
-        let current_user = github::get_current_user(&gh).await;
+        let cu = github::get_current_user(&gh).await;
+        let current_user = cu.as_ref().map(|u| u.login.clone());
+        let current_user_name = cu.as_ref().and_then(|u| u.name.clone());
+        let current_user_avatar_url = cu.as_ref().and_then(|u| u.avatar_url.clone());
 
         let (msg_tx, msg_rx) = mpsc::channel::<AppMessage>(32);
         let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
@@ -634,6 +641,8 @@ impl Engine {
             EngineInit {
                 entries,
                 current_user,
+                current_user_name,
+                current_user_avatar_url,
             },
         ))
     }

@@ -144,6 +144,10 @@ struct GlaucaApp {
     entries: Vec<LeftPaneEntry>,
     entry_cursor: usize,
     current_user: Option<String>,
+    /// Display name of the authenticated user (shown in the left-pane header).
+    current_user_name: Option<String>,
+    /// Avatar URL of the authenticated user (shown in the left-pane header).
+    current_user_avatar_url: Option<String>,
 
     items: Vec<ItemEntry>,
     /// Indices into `items` passing the stream + inline filter. Cached so render
@@ -273,6 +277,8 @@ impl GlaucaApp {
         let EngineInit {
             entries,
             current_user,
+            current_user_name,
+            current_user_avatar_url,
         } = init;
         let pane_state = cx.new(|_| ResizableState::default());
         let detail_text = cx.new(|cx| TextViewState::markdown("", cx));
@@ -283,6 +289,8 @@ impl GlaucaApp {
             entries,
             entry_cursor: 0,
             current_user,
+            current_user_name,
+            current_user_avatar_url,
             items: Vec::new(),
             filtered: Vec::new(),
             item_cursor: 0,
@@ -413,6 +421,15 @@ impl GlaucaApp {
 
     fn selected_root_query_id(&self) -> Option<i64> {
         self.entries.get(self.entry_cursor).map(|e| e.root_query_id())
+    }
+
+    /// Display name of the selected left-pane entry (query label or stream name),
+    /// shown in the center pane header.
+    fn selected_entry_label(&self) -> Option<String> {
+        self.entries.get(self.entry_cursor).map(|e| match e {
+            LeftPaneEntry::Query(q) => q.label.clone(),
+            LeftPaneEntry::FilterStream(fs) => fs.name.clone(),
+        })
     }
 
     /// Commit a selection (click / Enter): load cached items, mark the entry
@@ -1514,16 +1531,64 @@ impl GlaucaApp {
     }
 
     fn render_left(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Width is owned by the enclosing resizable panel; fill it and scroll
-        // vertically within.
+        // Full border whose color signals keyboard focus (blue when this pane is
+        // active, neutral otherwise) — see also the center/detail panes.
+        let border = if self.focus == Focus::QueryList {
+            cx.theme().primary
+        } else {
+            cx.theme().border
+        };
+
+        // Fixed header: current user's avatar + login (line 1) + display name
+        // (line 2). Stays pinned while the entry list below scrolls.
+        let mut avatar = Avatar::new().with_size(px(HEADER_AVATAR_PX));
+        if let Some(login) = &self.current_user {
+            avatar = avatar.name(login.clone());
+        }
+        if let Some(url) = &self.current_user_avatar_url {
+            avatar = avatar.src(sized_avatar_url(url, HEADER_AVATAR_PX));
+        }
+        let login_line = self
+            .current_user
+            .clone()
+            .unwrap_or_else(|| "not authenticated".to_string());
+        let header = h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(avatar)
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_color(cx.theme().sidebar_foreground)
+                            .child(SharedString::from(login_line)),
+                    )
+                    .when_some(self.current_user_name.clone(), |e, name| {
+                        e.child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(name)),
+                        )
+                    }),
+            );
+
+        // Scrollable entry list (root queries + filter streams).
         let mut col = v_flex()
             .id("left-pane")
-            .size_full()
+            .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
-            .track_scroll(&self.left_scroll)
-            .border_r_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().sidebar);
+            .track_scroll(&self.left_scroll);
 
         for (i, entry) in self.entries.iter().enumerate() {
             let selected = i == self.entry_cursor;
@@ -1604,12 +1669,9 @@ impl GlaucaApp {
                 ),
         );
 
-        // Status footer (was the single-line top header): connection, sync state,
-        // and the latest status message, stacked over multiple wrapping lines.
-        let user = match &self.current_user {
-            Some(u) => format!("connected as {u}"),
-            None => "not authenticated".to_string(),
-        };
+        // Status footer: sync state and the latest status message (the user
+        // identity now lives in the header). Only shown when there is something
+        // to report.
         let mut sync_bits = Vec::new();
         if self.syncing {
             sync_bits.push("syncing…".to_string());
@@ -1617,26 +1679,35 @@ impl GlaucaApp {
         if self.bg_sync_pending > 0 {
             sync_bits.push(format!("{} bg", self.bg_sync_pending));
         }
+        let has_footer = !sync_bits.is_empty() || self.status.is_some();
+        let footer = has_footer.then(|| {
+            let mut footer = v_flex()
+                .w_full()
+                .flex_shrink_0()
+                .px_3()
+                .py_2()
+                .gap_0p5()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground);
+            if !sync_bits.is_empty() {
+                footer = footer.child(SharedString::from(sync_bits.join("  ")));
+            }
+            if let Some(s) = &self.status {
+                footer = footer.child(SharedString::from(s.clone()));
+            }
+            footer
+        });
 
-        let mut footer = v_flex()
-            .w_full()
-            .flex_shrink_0()
-            .px_3()
-            .py_2()
-            .gap_0p5()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(SharedString::from(user));
-        if !sync_bits.is_empty() {
-            footer = footer.child(SharedString::from(sync_bits.join("  ")));
-        }
-        if let Some(s) = &self.status {
-            footer = footer.child(SharedString::from(s.clone()));
-        }
-
-        col.child(footer)
+        v_flex()
+            .size_full()
+            .border_1()
+            .border_color(border)
+            .bg(cx.theme().sidebar)
+            .child(header)
+            .child(col)
+            .children(footer)
     }
 
     fn render_items(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1844,8 +1915,8 @@ impl GlaucaApp {
     }
 
     fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Highlight the left border when the detail pane has keyboard focus
-        // (j/k scroll it); otherwise use the neutral divider color.
+        // Full border whose color signals keyboard focus (blue when the detail
+        // pane is active — j/k scroll it); otherwise the neutral divider color.
         let border = if self.focus == Focus::ItemDetail {
             cx.theme().primary
         } else {
@@ -1854,7 +1925,7 @@ impl GlaucaApp {
         let container = v_flex()
             .id("detail-pane")
             .size_full()
-            .border_l_1()
+            .border_1()
             .border_color(border)
             .bg(cx.theme().background)
             .on_mouse_down(
@@ -2396,6 +2467,8 @@ fn state_label(item: &ItemEntry) -> &'static str {
 
 /// Side length of the participant avatars in the item list.
 const AVATAR_PX: f32 = 24.;
+/// Larger avatar shown in the left-pane header (current user).
+const HEADER_AVATAR_PX: f32 = 36.;
 /// Side length of the review-state badge overlaid on a reviewer avatar.
 const BADGE_PX: f32 = 14.;
 /// Max avatars shown per group (assignees / reviewers) before a `+N` overflow.
@@ -2404,8 +2477,8 @@ const AVATAR_LIMIT: usize = 5;
 /// GitHub serves a 460px avatar PNG by default; downscaling that to the small
 /// list avatar aliases badly (looks grainy). Ask GitHub to resize server-side
 /// to roughly the displayed size (2× for HiDPI sharpness) via the `s=` param.
-fn sized_avatar_url(url: &str) -> String {
-    let px = (AVATAR_PX * 2.0) as u32;
+fn sized_avatar_url(url: &str, target_px: f32) -> String {
+    let px = (target_px * 2.0) as u32;
     let sep = if url.contains('?') { '&' } else { '?' };
     format!("{url}{sep}s={px}")
 }
@@ -2416,7 +2489,7 @@ fn sized_avatar_url(url: &str) -> String {
 fn user_avatar(user: &UserRef) -> Avatar {
     let mut a = Avatar::new().name(user.login.clone()).with_size(px(AVATAR_PX));
     if let Some(url) = &user.avatar_url {
-        a = a.src(sized_avatar_url(url));
+        a = a.src(sized_avatar_url(url, AVATAR_PX));
     }
     a
 }
@@ -2737,6 +2810,29 @@ impl Render for GlaucaApp {
                                 v_flex()
                                     .size_full()
                                     .min_w_0()
+                                    // Full border whose color signals keyboard focus
+                                    // (blue when the item list is active).
+                                    .border_1()
+                                    .border_color(if self.focus == Focus::ItemList {
+                                        cx.theme().primary
+                                    } else {
+                                        cx.theme().border
+                                    })
+                                    .child(
+                                        // Header: name of the selected query / stream.
+                                        div()
+                                            .w_full()
+                                            .flex_shrink_0()
+                                            .px_3()
+                                            .py_1p5()
+                                            .border_b_1()
+                                            .border_color(cx.theme().border)
+                                            .truncate()
+                                            .text_color(cx.theme().foreground)
+                                            .child(SharedString::from(
+                                                self.selected_entry_label().unwrap_or_default(),
+                                            )),
+                                    )
                                     .child(
                                         // Inline filter input (drives `filter_items`).
                                         div()
