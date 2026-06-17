@@ -207,6 +207,7 @@ enum Action {
     ConfirmMergeStrategy,
     OpenBrowser,
     CopyUrl,
+    ReviewOctorus,
 }
 
 /// Copy `text` to the system clipboard via the OSC 52 terminal escape sequence.
@@ -365,6 +366,17 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             return Action::CopyUrl;
         }
 
+        // Review the selected PR with octorus (`or`). PR-only.
+        KeyCode::Char('R')
+            if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
+                && app
+                    .selected_item()
+                    .map(|i| i.kind == "pull_request")
+                    .unwrap_or(false) =>
+        {
+            return Action::ReviewOctorus;
+        }
+
         // Enter filter mode (middle pane)
         KeyCode::Char('/') if app.focus == Focus::ItemList => {
             app.input_mode = InputMode::Filter;
@@ -378,7 +390,7 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
 fn handle_key_action_menu(app: &mut App, key: KeyEvent) -> Action {
     let available_len = app
         .selected_item()
-        .map(|item| ItemAction::available_for(&item.kind).len())
+        .map(|item| item_actions(&item.kind).len())
         .unwrap_or(0);
 
     match key.code {
@@ -698,6 +710,50 @@ where
     )?;
     terminal.clear()?;
     Ok(())
+}
+
+/// Actions offered for an item in the TUI action menu. This is the TUI's source
+/// of truth (used by the menu render, cursor bounds, and confirm handler): the
+/// shared `ItemAction::available_for` plus the TUI-only `ReviewOctorus` for PRs
+/// (kept out of `available_for` so it never appears in the GUI menu).
+pub(crate) fn item_actions(kind: &str) -> Vec<ItemAction> {
+    let mut actions = ItemAction::available_for(kind);
+    if kind == "pull_request" {
+        actions.push(ItemAction::ReviewOctorus);
+    }
+    actions
+}
+
+/// Launch the external `octorus` (`or`) PR-review TUI for `item`, releasing the
+/// terminal while it runs and restoring it afterwards. Returns a status-line
+/// message. Requires `or` on PATH (`cargo install octorus`) and an authenticated
+/// `gh`.
+fn run_octorus_review<B: ratatui::backend::Backend + io::Write>(
+    terminal: &mut Terminal<B>,
+    item: &ItemEntry,
+) -> anyhow::Result<String>
+where
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    suspend_tui(terminal)?;
+    let result = std::process::Command::new("or")
+        .args([
+            "--repo",
+            &format!("{}/{}", item.repo_owner, item.repo_name),
+            "--pr",
+            &item.number.to_string(),
+        ])
+        .status();
+    restore_tui(terminal)?;
+
+    Ok(match result {
+        Ok(status) if status.success() => "Returned from octorus".into(),
+        Ok(status) => format!("octorus exited with {status}"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            "octorus (`or`) not found — install with `cargo install octorus`".into()
+        }
+        Err(e) => format!("Failed to launch octorus: {e}"),
+    })
 }
 
 // 非同期タスク（run_background_command/execute_*/load_items_task/sync_task/
@@ -1120,7 +1176,7 @@ where
                         }
                         Action::ConfirmAction => {
                             if let Some(item) = app.selected_item().cloned() {
-                                let actions = ItemAction::available_for(&item.kind);
+                                let actions = item_actions(&item.kind);
                                 if let Some(action) = actions.get(app.action_cursor).cloned() {
                                     match action {
                                         ItemAction::OpenBrowser => {
@@ -1215,6 +1271,10 @@ where
                                                 Err(e) => format!("Copy failed: {e}"),
                                             });
                                         }
+                                        ItemAction::ReviewOctorus => {
+                                            app.input_mode = InputMode::Normal;
+                                            app.status = Some(run_octorus_review(terminal, &item)?);
+                                        }
                                     }
                                 }
                             }
@@ -1244,6 +1304,11 @@ where
                                     Ok(()) => "Copied URL to clipboard".into(),
                                     Err(e) => format!("Copy failed: {e}"),
                                 });
+                            }
+                        }
+                        Action::ReviewOctorus => {
+                            if let Some(item) = app.selected_item().cloned() {
+                                app.status = Some(run_octorus_review(terminal, &item)?);
                             }
                         }
                         Action::None => {}
@@ -1994,6 +2059,16 @@ mod tests {
                 ItemAction::Comment,
             ]
         );
+    }
+
+    #[test]
+    fn item_actions_appends_octorus_for_prs_only() {
+        let pr = item_actions("pull_request");
+        assert_eq!(pr.last(), Some(&ItemAction::ReviewOctorus));
+        // Only PRs get it.
+        assert!(!item_actions("issue").contains(&ItemAction::ReviewOctorus));
+        // It is a TUI-only addition, never surfaced by the shared `available_for`.
+        assert!(!ItemAction::available_for("pull_request").contains(&ItemAction::ReviewOctorus));
     }
 
     #[test]

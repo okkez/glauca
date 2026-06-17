@@ -179,6 +179,10 @@ pub enum ItemAction {
     ApprovePR,
     MergePR,
     CopyUrl,
+    /// Launch the external `octorus` (`or`) PR-review TUI for this item. Offered
+    /// only by the TUI front-end (see `glauca-cli`'s `item_actions`), never added
+    /// to `available_for` so it stays out of the GUI menu.
+    ReviewOctorus,
 }
 
 impl ItemAction {
@@ -190,6 +194,7 @@ impl ItemAction {
             Self::ApprovePR => "Approve PR",
             Self::MergePR => "Merge PR",
             Self::CopyUrl => "Copy URL",
+            Self::ReviewOctorus => "Review with octorus",
         }
     }
 

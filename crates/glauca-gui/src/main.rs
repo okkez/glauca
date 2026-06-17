@@ -1094,6 +1094,9 @@ impl GlaucaApp {
             ItemAction::MergePR => self.open_merge_dialog(item, window, cx),
             ItemAction::ViewComments => self.open_comments(item, window, cx),
             ItemAction::CopyUrl => cx.write_to_clipboard(ClipboardItem::new_string(item.url)),
+            // octorus is a terminal TUI launched only from the CLI front-end; it
+            // is never offered in the GUI menu, so this arm is unreachable.
+            ItemAction::ReviewOctorus => {}
         }
     }
 

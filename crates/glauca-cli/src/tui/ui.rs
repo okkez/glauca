@@ -1,4 +1,6 @@
-use crate::tui::{App, CommentEntry, Focus, InputMode, ItemAction, LeftPaneEntry, MergeStrategy};
+use crate::tui::{
+    App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, item_actions,
+};
 use chrono::{DateTime, Local};
 use glauca_core::filter::FilterQuery;
 use ratatui::{
@@ -559,10 +561,17 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let enter_actions_hint = if app.selected_item().is_some()
+    let on_item =
+        app.selected_item().is_some() && matches!(app.focus, Focus::ItemList | Focus::ItemDetail);
+    let enter_actions_hint = if on_item { "  Enter:actions" } else { "" };
+    // octorus review is PR-only.
+    let review_hint = if app
+        .selected_item()
+        .map(|i| i.kind == "pull_request")
+        .unwrap_or(false)
         && matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
     {
-        "  Enter:actions"
+        "  R:review"
     } else {
         ""
     };
@@ -570,8 +579,8 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mode_text = match app.input_mode {
         InputMode::Normal => match app.focus {
             Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  a:mark all read  q:quit".to_string(),
-            Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}  q:quit"),
-            Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}  q:quit"),
+            Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}{review_hint}  q:quit"),
+            Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}{review_hint}  q:quit"),
         },
         InputMode::Filter => "FILTER   Esc:exit  C-u:clear  state:open  author:name  label:bug  repo:owner/name".to_string(),
         InputMode::NewQuery => "NEW QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
@@ -884,7 +893,7 @@ fn draw_action_popup(f: &mut Frame, app: &App, area: Rect) {
         Some(item) => item,
         None => return,
     };
-    let actions = ItemAction::available_for(&item.kind);
+    let actions = item_actions(&item.kind);
     let popup_area = centered_rect_fixed(40, actions.len() as u16 + 3, area);
 
     f.render_widget(Clear, popup_area);
