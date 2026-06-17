@@ -7,5 +7,4 @@ pub mod engine;
 pub mod filter;
 pub mod github;
 pub mod logic;
-pub mod model;
 pub mod types;

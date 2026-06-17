@@ -44,14 +44,6 @@ impl LeftPaneEntry {
         (self.is_filter_stream(), self.id())
     }
 
-    #[allow(dead_code)]
-    pub fn display_label(&self) -> &str {
-        match self {
-            Self::Query(q) => &q.label,
-            Self::FilterStream(fs) => &fs.name,
-        }
-    }
-
     pub fn kind(&self) -> &str {
         match self {
             Self::Query(q) => &q.kind,
@@ -98,14 +90,6 @@ impl LeftPaneEntry {
         match self {
             Self::Query(q) => q.last_viewed_at = last_viewed_at,
             Self::FilterStream(fs) => fs.last_viewed_at = last_viewed_at,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn parent_id(&self) -> Option<i64> {
-        match self {
-            Self::Query(_) => None,
-            Self::FilterStream(fs) => Some(fs.parent_id),
         }
     }
 }

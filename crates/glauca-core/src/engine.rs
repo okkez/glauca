@@ -206,12 +206,35 @@ async fn run_background_command(
     }
 }
 
-pub async fn execute_open_browser(item: &ItemEntry) -> anyhow::Result<String> {
-    let sub = if item.kind == "pull_request" {
+/// `gh` subcommand for an item kind: PRs use `pr`, everything else `issue`.
+fn gh_subcommand(kind: &str) -> &'static str {
+    if kind == "pull_request" {
         "pr"
     } else {
         "issue"
-    };
+    }
+}
+
+/// Spawn a gh action future and report its outcome to the UI as `ActionDone` /
+/// `ActionError`. Shared by the `OpenBrowser`/`Comment`/`Approve`/`Merge` arms.
+fn spawn_action(
+    tx: mpsc::Sender<AppMessage>,
+    fut: impl std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        match fut.await {
+            Ok(msg) => {
+                let _ = tx.send(AppMessage::ActionDone(msg)).await;
+            }
+            Err(e) => {
+                let _ = tx.send(AppMessage::ActionError(e.to_string())).await;
+            }
+        }
+    });
+}
+
+pub async fn execute_open_browser(item: &ItemEntry) -> anyhow::Result<String> {
+    let sub = gh_subcommand(&item.kind);
     let repo = format!("{}/{}", item.repo_owner, item.repo_name);
     let mut cmd = tokio::process::Command::new("gh");
     cmd.args([sub, "view", "--web", &item.number.to_string(), "-R", &repo]);
@@ -220,11 +243,7 @@ pub async fn execute_open_browser(item: &ItemEntry) -> anyhow::Result<String> {
 }
 
 pub async fn execute_comment(url: &str, kind: &str, body: &str) -> anyhow::Result<String> {
-    let sub = if kind == "pull_request" {
-        "pr"
-    } else {
-        "issue"
-    };
+    let sub = gh_subcommand(kind);
     let mut cmd = tokio::process::Command::new("gh");
     cmd.args([sub, "comment", url, "--body", body]);
     run_background_command(cmd, &format!("gh {sub} comment failed")).await?;
@@ -381,6 +400,39 @@ pub async fn sync_worker_task(
     }
 }
 
+/// Enqueue every stale query (optionally skipping one) to the sync worker and
+/// report how many were queued. Shared by the refresh timer and the
+/// `EnqueueStale` command.
+async fn enqueue_stale_queries(
+    pool: &SqlitePool,
+    sync_tx: &mpsc::Sender<SyncJob>,
+    app_tx: &mpsc::Sender<AppMessage>,
+    skip_query_id: Option<i64>,
+) {
+    let queries = db::list_queries(pool).await.unwrap_or_default();
+    let mut count = 0usize;
+    for q in queries {
+        if Some(q.id) == skip_query_id {
+            continue;
+        }
+        if db::is_cache_stale(pool, q.id, CACHE_STALE_SECS)
+            .await
+            .unwrap_or(true)
+        {
+            let _ = sync_tx
+                .send(SyncJob {
+                    query_id: q.id,
+                    query_str: q.query,
+                })
+                .await;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        let _ = app_tx.send(AppMessage::BgSyncQueued(count)).await;
+    }
+}
+
 /// Every `BG_SYNC_INTERVAL_SECS`, enqueues all stale queries to the worker.
 pub async fn refresh_timer_task(
     pool: SqlitePool,
@@ -392,25 +444,7 @@ pub async fn refresh_timer_task(
     interval.tick().await; // skip the immediate first tick
     loop {
         interval.tick().await;
-        let queries = db::list_queries(&pool).await.unwrap_or_default();
-        let mut count = 0usize;
-        for q in queries {
-            if db::is_cache_stale(&pool, q.id, CACHE_STALE_SECS)
-                .await
-                .unwrap_or(true)
-            {
-                let _ = sync_tx
-                    .send(SyncJob {
-                        query_id: q.id,
-                        query_str: q.query,
-                    })
-                    .await;
-                count += 1;
-            }
-        }
-        if count > 0 {
-            let _ = app_tx.send(AppMessage::BgSyncQueued(count)).await;
-        }
+        enqueue_stale_queries(&pool, &sync_tx, &app_tx, None).await;
     }
 }
 
@@ -780,28 +814,7 @@ async fn command_loop(
                 let sync_tx2 = sync_tx.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    let queries = db::list_queries(&pool2).await.unwrap_or_default();
-                    let mut count = 0usize;
-                    for q in queries {
-                        if Some(q.id) == skip_query_id {
-                            continue;
-                        }
-                        if db::is_cache_stale(&pool2, q.id, CACHE_STALE_SECS)
-                            .await
-                            .unwrap_or(true)
-                        {
-                            let _ = sync_tx2
-                                .send(SyncJob {
-                                    query_id: q.id,
-                                    query_str: q.query,
-                                })
-                                .await;
-                            count += 1;
-                        }
-                    }
-                    if count > 0 {
-                        let _ = tx2.send(AppMessage::BgSyncQueued(count)).await;
-                    }
+                    enqueue_stale_queries(&pool2, &sync_tx2, &tx2, skip_query_id).await;
                 });
             }
             EngineCommand::AddQuery { name, query } => {
@@ -989,55 +1002,23 @@ async fn command_loop(
                 });
             }
             EngineCommand::OpenBrowser { item } => {
-                let tx2 = msg_tx.clone();
-                tokio::spawn(async move {
-                    match execute_open_browser(&item).await {
-                        Ok(msg) => {
-                            let _ = tx2.send(AppMessage::ActionDone(msg)).await;
-                        }
-                        Err(e) => {
-                            let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
-                        }
-                    }
+                spawn_action(msg_tx.clone(), async move {
+                    execute_open_browser(&item).await
                 });
             }
             EngineCommand::Comment { url, kind, body } => {
-                let tx2 = msg_tx.clone();
-                tokio::spawn(async move {
-                    match execute_comment(&url, &kind, &body).await {
-                        Ok(msg) => {
-                            let _ = tx2.send(AppMessage::ActionDone(msg)).await;
-                        }
-                        Err(e) => {
-                            let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
-                        }
-                    }
+                spawn_action(msg_tx.clone(), async move {
+                    execute_comment(&url, &kind, &body).await
                 });
             }
             EngineCommand::Approve { url, body } => {
-                let tx2 = msg_tx.clone();
-                tokio::spawn(async move {
-                    match execute_approve(&url, body.as_deref()).await {
-                        Ok(msg) => {
-                            let _ = tx2.send(AppMessage::ActionDone(msg)).await;
-                        }
-                        Err(e) => {
-                            let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
-                        }
-                    }
+                spawn_action(msg_tx.clone(), async move {
+                    execute_approve(&url, body.as_deref()).await
                 });
             }
             EngineCommand::Merge { url, strategy } => {
-                let tx2 = msg_tx.clone();
-                tokio::spawn(async move {
-                    match execute_merge(&url, &strategy).await {
-                        Ok(msg) => {
-                            let _ = tx2.send(AppMessage::ActionDone(msg)).await;
-                        }
-                        Err(e) => {
-                            let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
-                        }
-                    }
+                spawn_action(msg_tx.clone(), async move {
+                    execute_merge(&url, &strategy).await
                 });
             }
             EngineCommand::MarkItemRead {

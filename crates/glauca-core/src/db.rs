@@ -260,24 +260,6 @@ pub async fn mark_filter_stream_viewed(pool: &SqlitePool, stream_id: i64) -> Res
     Ok(())
 }
 
-#[allow(dead_code)]
-pub async fn count_new_items(pool: &SqlitePool, query_id: i64, since: Option<&str>) -> Result<i64> {
-    let count: i64 = if let Some(since) = since {
-        sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM items WHERE query_id = ? AND cached_at > ?",
-            query_id,
-            since,
-        )
-        .fetch_one(pool)
-        .await?
-    } else {
-        sqlx::query_scalar!("SELECT COUNT(*) FROM items WHERE query_id = ?", query_id)
-            .fetch_one(pool)
-            .await?
-    };
-    Ok(count)
-}
-
 pub struct CachedItem {
     pub query_id: i64,
     pub kind: String,
