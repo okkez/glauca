@@ -340,7 +340,9 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                 }
             }
         }
-        // Delete handled in main loop
+        // Deletion sends an async engine command, which this sync handler can't
+        // do, so it's handled in the main loop. Swallow 'd' here so Normal-mode
+        // default handling doesn't also run.
         KeyCode::Char('d')
             if app.focus == Focus::QueryList && key.modifiers.contains(KeyModifiers::NONE) => {}
 
@@ -664,7 +666,7 @@ fn handle_key_edit_filter_stream(app: &mut App, key: KeyEvent) -> Action {
 
 // ── Editor / terminal helpers (TUI-only) ─────────────────────────────────────
 
-/// Suspends TUI is not done here — caller must suspend/restore around this call.
+/// Does NOT suspend/restore the TUI — the caller must do that around this call.
 fn run_editor(initial_content: &str) -> anyhow::Result<Option<String>> {
     let cwd = std::env::current_dir()?;
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -775,8 +777,8 @@ where
 
 // ── Query group reordering helpers ───────────────────────────────────────────
 
-/// Returns the contiguous range `[query_idx, next_query_idx)` for the group
-/// starting at `query_idx` (the query entry plus all following filter streams).
+/// What `prepare_selected_entry_load` resolves for the selected left-pane entry:
+/// the root query to load items for, plus how to interpret/highlight them.
 struct SelectedEntryLoad {
     root_id: i64,
     query_str: Option<String>,
