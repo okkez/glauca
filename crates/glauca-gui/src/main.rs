@@ -2582,17 +2582,20 @@ fn review_decision_icon(decision: &str, cx: &App) -> (&'static str, Hsla, &'stat
     }
 }
 
-/// Octicon + color for a reviewer's [`ReviewState`], shown as a small badge
-/// overlaid on the reviewer avatar. gpui tints the SVG mask with `text_color`.
-fn review_state_icon(state: ReviewState, cx: &App) -> (&'static str, Hsla) {
+/// Octicon, icon color, and badge background for a reviewer's [`ReviewState`],
+/// shown as a small badge overlaid on the reviewer avatar. gpui tints the SVG
+/// mask with `text_color`; the badge background shows through the icon's
+/// knockout — white for the filled check/x (GitHub-style), otherwise the
+/// neutral background as a plain ring.
+fn review_state_icon(state: ReviewState, cx: &App) -> (&'static str, Hsla, Hsla) {
     let theme = cx.theme();
     match state {
-        ReviewState::Approved => ("octicons/check-circle-fill.svg", theme.green),
-        ReviewState::ChangesRequested => ("octicons/x-circle-fill.svg", theme.red),
+        ReviewState::Approved => ("octicons/check-circle-fill.svg", theme.green, white()),
+        ReviewState::ChangesRequested => ("octicons/x-circle-fill.svg", theme.red, white()),
         ReviewState::Commented | ReviewState::Dismissed => {
-            ("octicons/comment.svg", theme.muted_foreground)
+            ("octicons/comment.svg", theme.muted_foreground, theme.background)
         }
-        ReviewState::Pending => ("octicons/clock.svg", theme.yellow),
+        ReviewState::Pending => ("octicons/clock.svg", theme.yellow, theme.background),
     }
 }
 
@@ -2608,7 +2611,7 @@ fn avatar_overflow(n: usize, cx: &App) -> impl IntoElement {
 /// A reviewer avatar with its review-state octicon overlaid bottom-right
 /// (relative+absolute, mirroring gpui-component's Badge pattern).
 fn reviewer_avatar(user: &UserRef, state: ReviewState, cx: &App) -> impl IntoElement {
-    let (icon, color) = review_state_icon(state, cx);
+    let (icon, color, badge_bg) = review_state_icon(state, cx);
     div()
         .relative()
         .flex_shrink_0()
@@ -2622,8 +2625,9 @@ fn reviewer_avatar(user: &UserRef, state: ReviewState, cx: &App) -> impl IntoEle
                 .bottom(px(-3.))
                 .right(px(-3.))
                 .text_color(color)
-                // Ring so the badge reads against the avatar behind it.
-                .bg(cx.theme().background)
+                // Fills the icon's knockout and rings the badge against the
+                // avatar behind it.
+                .bg(badge_bg)
                 .rounded_full(),
         )
 }
