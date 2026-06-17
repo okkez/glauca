@@ -157,7 +157,7 @@ struct GlaucaApp {
     filtered: Vec<usize>,
     /// Index into `filtered` of the row shown in the detail pane.
     item_cursor: usize,
-    /// Inline filter text (mirrors the `filter_input` value; drives `filter_items`).
+    /// Inline filter text (mirrors the `filter_input` value; drives `recompute_filtered`).
     filter: String,
     unread_counts: HashMap<(bool, i64), usize>,
     /// Filter stream filter applied to the item list (None for root queries).
@@ -255,7 +255,7 @@ impl GlaucaApp {
         let cmd_tx = engine.sender();
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("filter…"));
         // Mirror the input value into `filter` (and reset the item cursor) on every
-        // change so `filter_items` re-runs and the detail pane stays in range.
+        // change so `recompute_filtered` re-runs and the detail pane stays in range.
         let subscription = cx.subscribe_in(
             &filter_input,
             window,
@@ -2868,7 +2868,7 @@ impl Render for GlaucaApp {
                                                     )),
                                             )
                                             .child(
-                                                // Inline filter input (drives `filter_items`).
+                                                // Inline filter input (drives `recompute_filtered`).
                                                 div()
                                                     .w_full()
                                                     .flex_shrink_0()
