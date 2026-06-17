@@ -614,262 +614,121 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
 // ── New query modal ───────────────────────────────────────────────────────────
 
-fn draw_new_query_modal(f: &mut Frame, app: &App, area: Rect) {
+/// Draw a centered two-field input modal (a name field plus a second field).
+/// `border_color` tints the border and whichever field is `active_field` (0 or
+/// 1); the active field also shows a trailing `_` cursor. Shared by the
+/// new/edit query and filter-stream modals, which differ only in these strings.
+fn draw_two_field_modal(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    border_color: Color,
+    fields: [(&str, &str); 2],
+    active_field: usize,
+) {
     let popup_area = centered_rect(60, 9, area);
     f.render_widget(Clear, popup_area);
 
     let block = Block::default()
-        .title(" New Query ")
+        .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-
+        .border_style(Style::default().fg(border_color));
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1); 5])
         .split(inner);
 
-    let name_style = if app.modal_field == 0 {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let query_style = if app.modal_field == 1 {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-
-    f.render_widget(
-        Paragraph::new("Display name (optional — leave blank to use query):"),
-        split[0],
-    );
-    f.render_widget(
-        Paragraph::new(format!(
-            "> {}{}",
-            app.new_query_name,
-            if app.modal_field == 0 { "_" } else { "" }
-        ))
-        .style(name_style),
-        split[1],
-    );
-    f.render_widget(
-        Paragraph::new("GitHub search query (e.g. repo:owner/name is:pr is:open):"),
-        split[2],
-    );
-    f.render_widget(
-        Paragraph::new(format!(
-            "> {}{}",
-            app.new_query_input,
-            if app.modal_field == 1 { "_" } else { "" }
-        ))
-        .style(query_style),
-        split[3],
-    );
+    for (i, (label, value)) in fields.iter().enumerate() {
+        let active = active_field == i;
+        let style = if active {
+            Style::default().fg(border_color)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        f.render_widget(Paragraph::new(*label), split[i * 2]);
+        f.render_widget(
+            Paragraph::new(format!("> {}{}", value, if active { "_" } else { "" })).style(style),
+            split[i * 2 + 1],
+        );
+    }
     f.render_widget(
         Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
             .style(Style::default().fg(Color::Gray)),
         split[4],
+    );
+}
+
+fn draw_new_query_modal(f: &mut Frame, app: &App, area: Rect) {
+    draw_two_field_modal(
+        f,
+        area,
+        " New Query ",
+        Color::Yellow,
+        [
+            (
+                "Display name (optional — leave blank to use query):",
+                &app.new_query_name,
+            ),
+            (
+                "GitHub search query (e.g. repo:owner/name is:pr is:open):",
+                &app.new_query_input,
+            ),
+        ],
+        app.modal_field,
     );
 }
 
 fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(60, 9, area);
-    f.render_widget(Clear, popup_area);
-
-    let block = Block::default()
-        .title(" New Filter Stream ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
-
-    let inner = block.inner(popup_area);
-    f.render_widget(block, popup_area);
-
-    let split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let name_style = if app.modal_field == 0 {
-        Style::default().fg(Color::Magenta)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let filter_style = if app.modal_field == 1 {
-        Style::default().fg(Color::Magenta)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-
-    f.render_widget(Paragraph::new("Display name:"), split[0]);
-    f.render_widget(
-        Paragraph::new(format!(
-            "> {}{}",
-            app.new_filter_stream_name,
-            if app.modal_field == 0 { "_" } else { "" }
-        ))
-        .style(name_style),
-        split[1],
-    );
-    f.render_widget(
-        Paragraph::new("Filter (e.g. state:open label:bug):"),
-        split[2],
-    );
-    f.render_widget(
-        Paragraph::new(format!(
-            "> {}{}",
-            app.new_filter_stream_filter,
-            if app.modal_field == 1 { "_" } else { "" }
-        ))
-        .style(filter_style),
-        split[3],
-    );
-    f.render_widget(
-        Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
-            .style(Style::default().fg(Color::Gray)),
-        split[4],
+    draw_two_field_modal(
+        f,
+        area,
+        " New Filter Stream ",
+        Color::Magenta,
+        [
+            ("Display name:", &app.new_filter_stream_name),
+            (
+                "Filter (e.g. state:open label:bug):",
+                &app.new_filter_stream_filter,
+            ),
+        ],
+        app.modal_field,
     );
 }
 
 fn draw_edit_query_modal(f: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(60, 9, area);
-    f.render_widget(Clear, popup_area);
-
-    let block = Block::default()
-        .title(" Edit Query ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    let inner = block.inner(popup_area);
-    f.render_widget(block, popup_area);
-
-    let split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let name_style = if app.modal_field == 0 {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let query_style = if app.modal_field == 1 {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-
-    f.render_widget(
-        Paragraph::new("Display name (empty = use query string as label):"),
-        split[0],
-    );
-    f.render_widget(
-        Paragraph::new(format!(
-            "> {}{}",
-            app.edit_input,
-            if app.modal_field == 0 { "_" } else { "" }
-        ))
-        .style(name_style),
-        split[1],
-    );
-    f.render_widget(Paragraph::new("GitHub search query:"), split[2]);
-    f.render_widget(
-        Paragraph::new(format!(
-            "> {}{}",
-            app.edit_input2,
-            if app.modal_field == 1 { "_" } else { "" }
-        ))
-        .style(query_style),
-        split[3],
-    );
-    f.render_widget(
-        Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
-            .style(Style::default().fg(Color::Gray)),
-        split[4],
+    draw_two_field_modal(
+        f,
+        area,
+        " Edit Query ",
+        Color::Cyan,
+        [
+            (
+                "Display name (empty = use query string as label):",
+                &app.edit_input,
+            ),
+            ("GitHub search query:", &app.edit_input2),
+        ],
+        app.modal_field,
     );
 }
 
 fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(60, 9, area);
-    f.render_widget(Clear, popup_area);
-
-    let block = Block::default()
-        .title(" Edit Filter Stream ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    let inner = block.inner(popup_area);
-    f.render_widget(block, popup_area);
-
-    let split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let name_style = if app.modal_field == 0 {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let filter_style = if app.modal_field == 1 {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-
-    f.render_widget(Paragraph::new("Display name:"), split[0]);
-    f.render_widget(
-        Paragraph::new(format!(
-            "> {}{}",
-            app.edit_input,
-            if app.modal_field == 0 { "_" } else { "" }
-        ))
-        .style(name_style),
-        split[1],
-    );
-    f.render_widget(
-        Paragraph::new("Filter (e.g. state:open label:bug repo:owner/name):"),
-        split[2],
-    );
-    f.render_widget(
-        Paragraph::new(format!(
-            "> {}{}",
-            app.edit_input2,
-            if app.modal_field == 1 { "_" } else { "" }
-        ))
-        .style(filter_style),
-        split[3],
-    );
-    f.render_widget(
-        Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
-            .style(Style::default().fg(Color::Gray)),
-        split[4],
+    draw_two_field_modal(
+        f,
+        area,
+        " Edit Filter Stream ",
+        Color::Cyan,
+        [
+            ("Display name:", &app.edit_input),
+            (
+                "Filter (e.g. state:open label:bug repo:owner/name):",
+                &app.edit_input2,
+            ),
+        ],
+        app.modal_field,
     );
 }
 
