@@ -39,14 +39,14 @@ fn highlight_spans<'a>(
     }
 }
 
-/// Wrap styled `spans` (e.g. a title's highlight fragments) to `max_width`
+/// Wrap styled `spans` (e.g. a title's highlight fragments) to `max_cols`
 /// display columns, returning one span vector per visual line. Breaks on the
-/// last whitespace that fits (word wrap); a single word wider than `max_width`
+/// last whitespace that fits (word wrap); a single word wider than `max_cols`
 /// is hard-broken at the column limit. Display width is measured with
 /// unicode-width so CJK (full-width) characters count as two columns. Each
 /// character keeps its original span style.
-fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span<'static>>> {
-    let max_width = max_width.max(1);
+fn wrap_spans(spans: &[Span], max_cols: usize) -> Vec<Vec<Span<'static>>> {
+    let max_cols = max_cols.max(1);
 
     // Flatten into (char, style) so we can re-break independently of the
     // original fragment boundaries while preserving per-character styling.
@@ -57,19 +57,19 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span<'static>>> {
 
     let mut lines: Vec<Vec<(char, Style)>> = Vec::new();
     let mut cur: Vec<(char, Style)> = Vec::new();
-    let mut cur_w = 0usize;
+    let mut cur_cols = 0usize;
     // Column index (into `cur`) just after the last whitespace, i.e. where the
     // next line would resume if we break on a word boundary.
     let mut last_break: Option<usize> = None;
 
     for (c, style) in chars {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if cur_w + cw > max_width && !cur.is_empty() {
+        let char_cols = UnicodeWidthChar::width(c).unwrap_or(0);
+        if cur_cols + char_cols > max_cols && !cur.is_empty() {
             // A space that overflows is the word boundary itself: end the line
             // here and consume the space (no leading space on the next line).
             if c == ' ' {
                 lines.push(std::mem::take(&mut cur));
-                cur_w = 0;
+                cur_cols = 0;
                 last_break = None;
                 continue;
             }
@@ -82,7 +82,7 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span<'static>>> {
                         cur.pop();
                     }
                     lines.push(std::mem::take(&mut cur));
-                    cur_w = carry
+                    cur_cols = carry
                         .iter()
                         .map(|(c, _)| UnicodeWidthChar::width(*c).unwrap_or(0))
                         .sum();
@@ -91,7 +91,7 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span<'static>>> {
                 // No usable break point: hard-break before this char.
                 _ => {
                     lines.push(std::mem::take(&mut cur));
-                    cur_w = 0;
+                    cur_cols = 0;
                 }
             }
             last_break = None;
@@ -100,7 +100,7 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span<'static>>> {
             last_break = Some(cur.len() + 1);
         }
         cur.push((c, style));
-        cur_w += cw;
+        cur_cols += char_cols;
     }
     if !cur.is_empty() {
         lines.push(cur);

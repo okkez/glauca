@@ -139,8 +139,8 @@ impl App {
 
     /// Replace `@me` with the authenticated user's login (case-insensitive).
     /// Falls back to `@me` unchanged if the user is not known yet.
-    fn expand_me<'a>(&'a self, s: &'a str) -> std::borrow::Cow<'a, str> {
-        glauca_core::logic::expand_me(self.current_user.as_deref(), s)
+    fn expand_me<'a>(&'a self, filter: &'a str) -> std::borrow::Cow<'a, str> {
+        glauca_core::logic::expand_me(self.current_user.as_deref(), filter)
     }
 
     pub fn filtered_items(&self) -> Vec<&ItemEntry> {
