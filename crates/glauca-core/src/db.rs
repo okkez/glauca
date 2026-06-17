@@ -110,24 +110,28 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
 }
 
 /// Swap the `position` values of two filter streams (must share the same parent).
-pub async fn swap_filter_stream_positions(pool: &SqlitePool, id1: i64, id2: i64) -> Result<()> {
-    let pos1 = sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", id1)
+pub async fn swap_filter_stream_positions(
+    pool: &SqlitePool,
+    upper_id: i64,
+    lower_id: i64,
+) -> Result<()> {
+    let upper_pos = sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", upper_id)
         .fetch_one(pool)
         .await?;
-    let pos2 = sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", id2)
+    let lower_pos = sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", lower_id)
         .fetch_one(pool)
         .await?;
     sqlx::query!(
         "UPDATE filter_streams SET position = ? WHERE id = ?",
-        pos2,
-        id1
+        lower_pos,
+        upper_id
     )
     .execute(pool)
     .await?;
     sqlx::query!(
         "UPDATE filter_streams SET position = ? WHERE id = ?",
-        pos1,
-        id2
+        upper_pos,
+        lower_id
     )
     .execute(pool)
     .await?;
@@ -181,17 +185,17 @@ pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
 }
 
 /// Swap the `position` values of two queries so that one moves past the other.
-pub async fn swap_query_positions(pool: &SqlitePool, id1: i64, id2: i64) -> Result<()> {
-    let pos1 = sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", id1)
+pub async fn swap_query_positions(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
+    let upper_pos = sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", upper_id)
         .fetch_one(pool)
         .await?;
-    let pos2 = sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", id2)
+    let lower_pos = sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", lower_id)
         .fetch_one(pool)
         .await?;
-    sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", pos2, id1)
+    sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", lower_pos, upper_id)
         .execute(pool)
         .await?;
-    sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", pos1, id2)
+    sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", upper_pos, lower_id)
         .execute(pool)
         .await?;
     Ok(())

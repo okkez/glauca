@@ -121,7 +121,7 @@ impl FilterQuery {
     /// Byte range `(start, end)` in `text` of the earliest plain-text-token match
     /// (case-insensitive), corrected to char boundaries. `None` if there is no
     /// plain text token or no match. Frontends turn this into styled spans.
-    pub fn highlight_ranges(&self, text: &str) -> Option<(usize, usize)> {
+    pub fn highlight_range(&self, text: &str) -> Option<(usize, usize)> {
         if self.text_tokens.is_empty() {
             return None;
         }
@@ -281,44 +281,44 @@ mod tests {
         assert!(q.matches(&item("anything", "a", "open", &[], "o/r")));
     }
 
-    // ── highlight_ranges ─────────────────────────────────────────────────────────
+    // ── highlight_range ─────────────────────────────────────────────────────────
 
     #[test]
-    fn highlight_ranges_no_match_returns_none() {
+    fn highlight_range_no_match_returns_none() {
         let q = FilterQuery::parse("xyz");
-        assert_eq!(q.highlight_ranges("Fix the bug"), None);
+        assert_eq!(q.highlight_range("Fix the bug"), None);
     }
 
     #[test]
-    fn highlight_ranges_match_in_middle() {
+    fn highlight_range_match_in_middle() {
         let q = FilterQuery::parse("bug");
         // "Fix the " = 8 bytes, "bug" = 3 bytes.
-        assert_eq!(q.highlight_ranges("Fix the bug here"), Some((8, 11)));
+        assert_eq!(q.highlight_range("Fix the bug here"), Some((8, 11)));
     }
 
     #[test]
-    fn highlight_ranges_match_at_start() {
+    fn highlight_range_match_at_start() {
         let q = FilterQuery::parse("fix");
-        assert_eq!(q.highlight_ranges("Fix the bug"), Some((0, 3)));
+        assert_eq!(q.highlight_range("Fix the bug"), Some((0, 3)));
     }
 
     #[test]
-    fn highlight_ranges_match_at_end() {
+    fn highlight_range_match_at_end() {
         let q = FilterQuery::parse("bug");
-        assert_eq!(q.highlight_ranges("Fix the bug"), Some((8, 11)));
+        assert_eq!(q.highlight_range("Fix the bug"), Some((8, 11)));
     }
 
     #[test]
-    fn highlight_ranges_empty_query_none() {
+    fn highlight_range_empty_query_none() {
         let q = FilterQuery::parse("");
-        assert_eq!(q.highlight_ranges("Fix the bug"), None);
+        assert_eq!(q.highlight_range("Fix the bug"), None);
     }
 
     #[test]
-    fn highlight_ranges_structured_token_none() {
+    fn highlight_range_structured_token_none() {
         // state:open is a structured token, not a plain text token → no highlight.
         let q = FilterQuery::parse("state:open");
-        assert_eq!(q.highlight_ranges("open issue title"), None);
+        assert_eq!(q.highlight_range("open issue title"), None);
     }
 
     // ── parse edge cases ────────────────────────────────────────────────────────
@@ -396,17 +396,17 @@ mod tests {
     }
 
     #[test]
-    fn highlight_ranges_case_insensitive_match() {
+    fn highlight_range_case_insensitive_match() {
         let q = FilterQuery::parse("fix");
         // "Fix" should still match even though the token is lowercase "fix".
-        assert_eq!(q.highlight_ranges("Fix the bug"), Some((0, 3)));
+        assert_eq!(q.highlight_range("Fix the bug"), Some((0, 3)));
     }
 
     #[test]
-    fn highlight_ranges_multibyte_text_no_panic() {
+    fn highlight_range_multibyte_text_no_panic() {
         // Ensure we don't panic on multibyte (non-ASCII) text.
         let q = FilterQuery::parse("bug");
-        let _ = q.highlight_ranges("バグ修正 bug fix");
-        let _ = q.highlight_ranges("日本語テスト");
+        let _ = q.highlight_range("バグ修正 bug fix");
+        let _ = q.highlight_range("日本語テスト");
     }
 }

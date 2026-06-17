@@ -14,7 +14,7 @@ pub fn is_item_new_since(cached_at: &str, last_viewed_at: Option<&str>) -> bool 
 }
 
 /// Labels are stored as a JSON array string, e.g. '["bug","enhancement"]'.
-pub fn serde_labels(raw: &str) -> Vec<String> {
+pub fn decode_labels(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
@@ -22,7 +22,7 @@ pub fn serde_labels(raw: &str) -> Vec<String> {
 /// '[{"login":"alice","avatar_url":"https://…"}]'. Older cache rows hold a
 /// plain string array ('["alice"]'); fall back to that for backward compat
 /// (those rows render without avatars until the next re-sync).
-pub fn serde_users(raw: &str) -> Vec<UserRef> {
+pub fn decode_users(raw: &str) -> Vec<UserRef> {
     if let Ok(users) = serde_json::from_str::<Vec<UserRef>>(raw) {
         return users;
     }
@@ -35,7 +35,7 @@ pub fn serde_users(raw: &str) -> Vec<UserRef> {
 
 /// Reviews stored as [{"login":"alice","state":"APPROVED","avatar_url":"…"}].
 /// Returns (user, state) pairs; `avatar_url` is optional.
-pub fn serde_reviews(raw: &str) -> Vec<(UserRef, String)> {
+pub fn decode_reviews(raw: &str) -> Vec<(UserRef, String)> {
     serde_json::from_str::<Vec<serde_json::Value>>(raw)
         .unwrap_or_default()
         .into_iter()
@@ -105,14 +105,14 @@ pub fn cached_item_to_item_entry(c: CachedItem, last_viewed_at: Option<&str>) ->
         }),
         state: c.state,
         updated_at: c.updated_at,
-        labels: serde_labels(&c.labels),
+        labels: decode_labels(&c.labels),
         url: c.url,
         comment_count: c.comment_count,
         kind: c.kind,
-        requested_reviewers: serde_users(&c.requested_reviewers),
-        reviews: serde_reviews(&c.reviews),
+        requested_reviewers: decode_users(&c.requested_reviewers),
+        reviews: decode_reviews(&c.reviews),
         body: c.body,
-        assignees: serde_users(&c.assignees),
+        assignees: decode_users(&c.assignees),
         is_draft: c.is_draft,
         created_at_item: c.created_at_item,
         base_ref: c.base_ref,
@@ -244,27 +244,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serde_users_parses_new_object_array() {
-        let users = serde_users(r#"[{"login":"alice","avatar_url":"https://a/x.png"}]"#);
+    fn decode_users_parses_new_object_array() {
+        let users = decode_users(r#"[{"login":"alice","avatar_url":"https://a/x.png"}]"#);
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].login, "alice");
         assert_eq!(users[0].avatar_url.as_deref(), Some("https://a/x.png"));
     }
 
     #[test]
-    fn serde_users_falls_back_to_legacy_string_array() {
+    fn decode_users_falls_back_to_legacy_string_array() {
         // Old cache rows stored a plain string array; they should still parse
         // (with no avatar) until the next re-sync.
-        let users = serde_users(r#"["bob","carol"]"#);
+        let users = decode_users(r#"["bob","carol"]"#);
         let logins: Vec<&str> = users.iter().map(|u| u.login.as_str()).collect();
         assert_eq!(logins, vec!["bob", "carol"]);
         assert!(users.iter().all(|u| u.avatar_url.is_none()));
     }
 
     #[test]
-    fn serde_reviews_extracts_user_state_and_avatar() {
+    fn decode_reviews_extracts_user_state_and_avatar() {
         let reviews =
-            serde_reviews(r#"[{"login":"alice","state":"APPROVED","avatar_url":"https://a"}]"#);
+            decode_reviews(r#"[{"login":"alice","state":"APPROVED","avatar_url":"https://a"}]"#);
         assert_eq!(reviews.len(), 1);
         assert_eq!(reviews[0].0.login, "alice");
         assert_eq!(reviews[0].0.avatar_url.as_deref(), Some("https://a"));

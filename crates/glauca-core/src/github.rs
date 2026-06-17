@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(item.kind, "pull_request");
         assert_eq!(item.state, "open");
         // requested_reviewers is now a JSON object array carrying avatar URLs.
-        let reviewers: Vec<String> = crate::logic::serde_users(&item.requested_reviewers)
+        let reviewers: Vec<String> = crate::logic::decode_users(&item.requested_reviewers)
             .into_iter()
             .map(|u| u.login)
             .collect();
@@ -559,12 +559,12 @@ mod tests {
         assert!(item.repo_private);
         assert_eq!(item.author_avatar_url.as_deref(), Some("https://a/bob.png"));
 
-        let assignees = crate::logic::serde_users(&item.assignees);
+        let assignees = crate::logic::decode_users(&item.assignees);
         assert_eq!(assignees.len(), 1);
         assert_eq!(assignees[0].login, "carol");
         assert_eq!(assignees[0].avatar_url.as_deref(), Some("https://a/carol.png"));
 
-        let reviews = crate::logic::serde_reviews(&item.reviews);
+        let reviews = crate::logic::decode_reviews(&item.reviews);
         assert_eq!(reviews.len(), 1);
         assert_eq!(reviews[0].0.login, "dave");
         assert_eq!(reviews[0].0.avatar_url.as_deref(), Some("https://a/dave.png"));

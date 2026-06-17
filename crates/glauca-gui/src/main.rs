@@ -1835,7 +1835,7 @@ impl GlaucaApp {
 
         let is_new = item.is_new;
         let selected = ix == self.item_cursor;
-        let title_el = highlight_title(&item.title, fq.highlight_ranges(&item.title), cx);
+        let title_el = highlight_title(&item.title, fq.highlight_range(&item.title), cx);
 
         v_flex()
             .id(ix)

@@ -16,14 +16,14 @@ use unicode_width::UnicodeWidthChar;
 const HIGHLIGHT_SYMBOL: &str = "▶ ";
 
 /// Build styled spans for `text`, highlighting the earliest filter-token match
-/// (range computed by `FilterQuery::highlight_ranges`).
+/// (range computed by `FilterQuery::highlight_range`).
 fn highlight_spans<'a>(
     query: &FilterQuery,
     text: &'a str,
     normal: Style,
     highlight: Style,
 ) -> Vec<Span<'a>> {
-    match query.highlight_ranges(text) {
+    match query.highlight_range(text) {
         None => vec![Span::styled(text, normal)],
         Some((start, end)) => {
             let mut spans = Vec::new();
