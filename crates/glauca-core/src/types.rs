@@ -112,7 +112,7 @@ impl UserRef {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ItemEntry {
     pub number: i64,
     pub title: String,

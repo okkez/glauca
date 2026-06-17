@@ -255,24 +255,29 @@ mod tests {
         assert!(!q.matches(&item("Fix crash", "a", "open", &["enhancement"], "o/r")));
     }
 
-    #[test]
-    fn review_requested_filter() {
+    fn pr_with_reviewers(reviewers: &[&str]) -> ItemEntry {
         let mut pr = item("PR", "alice", "open", &[], "o/r");
-        pr.requested_reviewers = vec![UserRef::new("bob"), UserRef::new("carol")];
+        pr.requested_reviewers = reviewers.iter().map(|r| UserRef::new(*r)).collect();
+        pr
+    }
 
-        let q = FilterQuery::parse("review-requested:bob");
-        assert!(q.matches(&pr));
+    #[test]
+    fn review_requested_matches_a_requested_reviewer() {
+        let pr = pr_with_reviewers(&["bob", "carol"]);
+        assert!(FilterQuery::parse("review-requested:bob").matches(&pr));
+        assert!(FilterQuery::parse("review-requested:carol").matches(&pr));
+    }
 
-        let q = FilterQuery::parse("review-requested:carol");
-        assert!(q.matches(&pr));
+    #[test]
+    fn review_requested_no_match_for_unrequested_login() {
+        let pr = pr_with_reviewers(&["bob", "carol"]);
+        assert!(!FilterQuery::parse("review-requested:dave").matches(&pr));
+    }
 
-        let q = FilterQuery::parse("review-requested:dave");
-        assert!(!q.matches(&pr));
-
-        // item with no reviewers
-        let no_reviewers = item("PR", "alice", "open", &[], "o/r");
-        let q = FilterQuery::parse("review-requested:bob");
-        assert!(!q.matches(&no_reviewers));
+    #[test]
+    fn review_requested_no_match_when_no_reviewers() {
+        let pr = pr_with_reviewers(&[]);
+        assert!(!FilterQuery::parse("review-requested:bob").matches(&pr));
     }
 
     #[test]

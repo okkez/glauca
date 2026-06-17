@@ -287,32 +287,10 @@ mod tests {
 
     #[test]
     fn reviewer_overlays_unions_reviews_and_pending_requests() {
-        let mut item = ItemEntry {
-            number: 1,
-            title: String::new(),
-            repo_owner: "o".into(),
-            repo_name: "r".into(),
-            repo_private: false,
-            author: None,
-            state: "open".into(),
-            updated_at: String::new(),
-            labels: vec![],
-            url: String::new(),
-            comment_count: 0,
-            kind: "pull_request".into(),
+        let item = ItemEntry {
             requested_reviewers: vec![UserRef::new("carol"), UserRef::new("alice")],
             reviews: vec![(UserRef::new("alice"), "APPROVED".into())],
-            body: None,
-            assignees: vec![],
-            is_draft: false,
-            created_at_item: None,
-            base_ref: None,
-            head_ref: None,
-            review_decision: None,
-            milestone: None,
-            cached_at: String::new(),
-            is_new: false,
-            read: false,
+            ..Default::default()
         };
         let overlays = reviewer_overlays(&item);
         // alice (reviewed) keeps her state; carol (requested only) is pending.
@@ -321,10 +299,10 @@ mod tests {
         assert_eq!(overlays[0].1, ReviewState::Approved);
         assert_eq!(overlays[1].0.login, "carol");
         assert_eq!(overlays[1].1, ReviewState::Pending);
+    }
 
-        // No requested reviewers, no reviews → empty.
-        item.requested_reviewers.clear();
-        item.reviews.clear();
-        assert!(reviewer_overlays(&item).is_empty());
+    #[test]
+    fn reviewer_overlays_empty_when_no_reviews_or_requests() {
+        assert!(reviewer_overlays(&ItemEntry::default()).is_empty());
     }
 }

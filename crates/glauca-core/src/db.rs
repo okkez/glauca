@@ -485,7 +485,7 @@ mod tests {
         let file = NamedTempFile::new().expect("tempfile");
         let pool = open_pool(&file.path().to_path_buf())
             .await
-            .expect("open pool");
+            .unwrap_or_else(|e| panic!("open pool: {e:#}"));
         (pool, file)
     }
 
@@ -596,34 +596,7 @@ mod tests {
             .await
             .expect("upsert query");
 
-        let item = CachedItem {
-            query_id: qid,
-            kind: "pull_request".into(),
-            repo_owner: "owner".into(),
-            repo_name: "r".into(),
-            repo_private: false,
-            number: 1,
-            title: "Fix bug".into(),
-            url: "https://github.com/owner/r/pull/1".into(),
-            author: Some("alice".into()),
-            author_avatar_url: None,
-            state: "open".into(),
-            updated_at: "2026-05-22T00:00:00Z".into(),
-            labels: "[]".into(),
-            comment_count: 0,
-            requested_reviewers: "[]".into(),
-            reviews: "[]".into(),
-            body: None,
-            assignees: "[]".into(),
-            is_draft: false,
-            created_at_item: None,
-            base_ref: None,
-            head_ref: None,
-            review_decision: None,
-            milestone: None,
-            cached_at: "2026-05-22 00:00:00".into(),
-            read: false,
-        };
+        let item = make_item(qid, 1, "Fix bug");
         upsert_item(&pool, &item).await.expect("upsert item");
 
         let items = fetch_items(&pool, qid).await.expect("fetch items");
