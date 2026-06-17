@@ -83,6 +83,31 @@ fn scroll_vertically(handle: &ScrollHandle, delta_px: f32) {
     handle.set_offset(off);
 }
 
+/// Wrap a pane's `content` in the standard frame: a neutral 1px border on the
+/// left/right/bottom edges plus a top edge that turns `primary` when `focused`
+/// — the keyboard-focus indicator. gpui colors a border uniformly, so the two
+/// colors are split across an outer (top) element and an inner (other three).
+fn pane_frame(focused: bool, content: impl IntoElement, cx: &App) -> Div {
+    let top = if focused {
+        cx.theme().primary
+    } else {
+        cx.theme().border
+    };
+    v_flex()
+        .size_full()
+        .border_t_1()
+        .border_color(top)
+        .child(
+            v_flex()
+                .size_full()
+                .border_l_1()
+                .border_r_1()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(content),
+        )
+}
+
 gpui::actions!(
     glauca,
     [
@@ -1533,16 +1558,7 @@ impl GlaucaApp {
         }
     }
 
-    fn render_left(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Only the TOP border signals keyboard focus (blue when this pane is
-        // active); the other three edges stay neutral — see the center/detail
-        // panes. gpui colors a border uniformly, so the highlighted top edge
-        // lives on an outer wrapper and the neutral edges on the inner content.
-        let top_border = if self.focus == Focus::QueryList {
-            cx.theme().primary
-        } else {
-            cx.theme().border
-        };
+    fn render_left(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
 
         // Fixed header: current user's avatar + login (line 1) + display name
         // (line 2). Stays pinned while the entry list below scrolls.
@@ -1707,20 +1723,43 @@ impl GlaucaApp {
 
         v_flex()
             .size_full()
-            .border_t_1()
-            .border_color(top_border)
+            .bg(cx.theme().sidebar)
+            .child(header)
+            .child(col)
+            .children(footer)
+    }
+
+    /// Center pane content: the selected entry's name, the inline filter input,
+    /// and the (virtualized) item list. The pane frame is added by the caller.
+    fn render_center(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        v_flex()
+            .size_full()
             .child(
-                v_flex()
-                    .size_full()
-                    .border_l_1()
-                    .border_r_1()
+                // Header: name of the selected query / stream.
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_1p5()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .bg(cx.theme().sidebar)
-                    .child(header)
-                    .child(col)
-                    .children(footer),
+                    .truncate()
+                    .text_color(cx.theme().foreground)
+                    .child(SharedString::from(
+                        self.selected_entry_label().unwrap_or_default(),
+                    )),
             )
+            .child(
+                // Inline filter input (drives `recompute_filtered`).
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .p_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(Input::new(&self.filter_input)),
+            )
+            .child(self.render_items(cx))
     }
 
     fn render_items(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1927,17 +1966,13 @@ impl GlaucaApp {
             .into_any_element()
     }
 
-    fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Neutral left/right/bottom edges; the focus-highlighted top edge is
-        // added by the caller (see the `render_detail` call site) so the early
-        // returns below don't each have to wrap themselves.
+    fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // The pane frame (border + focus highlight) is added by the caller via
+        // `pane_frame`, so the early returns below don't each have to wrap
+        // themselves.
         let container = v_flex()
             .id("detail-pane")
             .size_full()
-            .border_l_1()
-            .border_r_1()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .bg(cx.theme().background)
             .on_mouse_down(
                 MouseButton::Right,
@@ -2830,57 +2865,22 @@ impl Render for GlaucaApp {
                                 .size(px(self.pane_sizes.first().copied().unwrap_or(280.)))
                                 .size_range(px(180.)..px(560.))
                                 .flex_none()
-                                .child(self.render_left(cx)),
+                                .child(pane_frame(
+                                    self.focus == Focus::QueryList,
+                                    self.render_left(cx),
+                                    cx,
+                                )),
                         )
                         .child(
                             resizable_panel().size_range(px(100.)..px(1000.)).child(
-                                // Only the top edge highlights on focus (blue when
-                                // the item list is active); the other three edges
-                                // stay neutral, so they live on the inner content.
-                                v_flex()
-                                    .size_full()
-                                    .border_t_1()
-                                    .border_color(if self.focus == Focus::ItemList {
-                                        cx.theme().primary
-                                    } else {
-                                        cx.theme().border
-                                    })
-                                    .child(
-                                        v_flex()
-                                            .size_full()
-                                            .min_w_0()
-                                            .border_l_1()
-                                            .border_r_1()
-                                            .border_b_1()
-                                            .border_color(cx.theme().border)
-                                            .child(
-                                                // Header: name of the selected query / stream.
-                                                div()
-                                                    .w_full()
-                                                    .flex_shrink_0()
-                                                    .px_3()
-                                                    .py_1p5()
-                                                    .border_b_1()
-                                                    .border_color(cx.theme().border)
-                                                    .truncate()
-                                                    .text_color(cx.theme().foreground)
-                                                    .child(SharedString::from(
-                                                        self.selected_entry_label()
-                                                            .unwrap_or_default(),
-                                                    )),
-                                            )
-                                            .child(
-                                                // Inline filter input (drives `recompute_filtered`).
-                                                div()
-                                                    .w_full()
-                                                    .flex_shrink_0()
-                                                    .p_2()
-                                                    .border_b_1()
-                                                    .border_color(cx.theme().border)
-                                                    .child(Input::new(&self.filter_input)),
-                                            )
-                                            .child(self.render_items(cx)),
-                                    ),
+                                pane_frame(
+                                    self.focus == Focus::ItemList,
+                                    self.render_center(cx),
+                                    cx,
+                                )
+                                // The center pane is the flexible one; allow it to
+                                // shrink below its content width as panels resize.
+                                .min_w_0(),
                             ),
                         )
                         .child(
@@ -2888,19 +2888,11 @@ impl Render for GlaucaApp {
                                 .size(px(self.pane_sizes.get(2).copied().unwrap_or(440.)))
                                 .size_range(px(300.)..px(2400.))
                                 .flex_none()
-                                .child(
-                                    // Only the top edge highlights on focus; the
-                                    // detail pane's other edges are neutral.
-                                    v_flex()
-                                        .size_full()
-                                        .border_t_1()
-                                        .border_color(if self.focus == Focus::ItemDetail {
-                                            cx.theme().primary
-                                        } else {
-                                            cx.theme().border
-                                        })
-                                        .child(self.render_detail(cx)),
-                                ),
+                                .child(pane_frame(
+                                    self.focus == Focus::ItemDetail,
+                                    self.render_detail(cx),
+                                    cx,
+                                )),
                         ),
                 ),
             )
