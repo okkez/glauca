@@ -31,6 +31,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::text::{markdown, TextView, TextViewState};
 use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     h_flex, v_flex, ActiveTheme, Root, Sizable, StyledExt, Theme, ThemeMode, WindowExt,
 };
@@ -1947,7 +1948,6 @@ impl GlaucaApp {
             );
         };
 
-        let location = format!("{}/{}#{}", item.repo_owner, item.repo_name, item.number);
         let (state_path, state_color) = item_state_icon_info(item, cx);
 
         // Pinned header: metadata stays visible while the body scrolls. It can't
@@ -1957,38 +1957,33 @@ impl GlaucaApp {
             .flex_none()
             .p_4()
             .gap_2()
-            // Location + state line: "[🔒] owner/repo#number   [state icon] State".
+            // Title line: author avatar + state pill + (PR) review-decision icon +
+            // the item title (which wraps; the leading items stay on the top line).
             .child(
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .items_center()
+                    .items_start()
+                    // Leading controls kept in a vertically-centered cluster so the
+                    // avatar, state pill, and review icon line up with each other;
+                    // the cluster as a whole sits on the title's first line.
                     .child(
                         h_flex()
-                            .gap_1()
-                            .items_center()
-                            // Private repos get a lock glyph ahead of the name.
-                            .when(item.repo_private, |e| {
-                                e.child(
-                                    svg()
-                                        .path("octicons/lock.svg")
-                                        .size_3()
-                                        .flex_shrink_0()
-                                        .text_color(cx.theme().muted_foreground),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(SharedString::from(location)),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
+                            .gap_2()
                             .items_center()
                             .flex_shrink_0()
+                            .when_some(item.author.clone(), |e, a| {
+                                let login = a.login.clone();
+                                e.child(
+                                    div()
+                                        .id("detail-author")
+                                        .flex_shrink_0()
+                                        .child(user_avatar(&a))
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(login.clone()).build(window, cx)
+                                        }),
+                                )
+                            })
                             // GitHub-style state pill: colored, rounded, light text.
                             .child(
                                 h_flex()
@@ -2009,26 +2004,36 @@ impl GlaucaApp {
                                     )
                                     .child(div().text_xs().child(state_label(item))),
                             )
+                            // Review decision as an icon with a tooltip (PRs only).
                             .when_some(item.review_decision.clone(), |e, decision| {
+                                let (icon, color, label) = review_decision_icon(&decision, cx);
                                 e.child(
                                     div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(SharedString::from(format!("· {decision}"))),
+                                        .id("review-decision")
+                                        .flex_shrink_0()
+                                        .child(
+                                            svg()
+                                                .path(icon)
+                                                .size_5()
+                                                .flex_shrink_0()
+                                                .text_color(color),
+                                        )
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(label).build(window, cx)
+                                        }),
                                 )
                             }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_lg()
+                            .font_bold()
+                            .text_color(cx.theme().foreground)
+                            .child(SharedString::from(item.title.clone())),
                     ),
             )
-            .child(
-                div()
-                    .text_lg()
-                    .font_bold()
-                    .text_color(cx.theme().foreground)
-                    .child(SharedString::from(item.title.clone())),
-            )
-            .when_some(item.author.clone(), |e, a| {
-                e.child(detail_people_field("author", [user_chip(a, cx)], cx))
-            })
             .when(!item.labels.is_empty(), |e| {
                 e.child(detail_field("labels", &item.labels.join(", "), cx))
             })
@@ -2492,6 +2497,18 @@ fn user_avatar(user: &UserRef) -> Avatar {
         a = a.src(sized_avatar_url(url, AVATAR_PX));
     }
     a
+}
+
+/// Octicon, color, and tooltip text for a PR's `reviewDecision` (the raw GitHub
+/// value), shown as an icon in the detail header.
+fn review_decision_icon(decision: &str, cx: &App) -> (&'static str, Hsla, &'static str) {
+    let t = cx.theme();
+    match decision {
+        "APPROVED" => ("octicons/check-circle-fill.svg", t.green, "Approved"),
+        "CHANGES_REQUESTED" => ("octicons/x-circle-fill.svg", t.red, "Changes requested"),
+        "REVIEW_REQUIRED" => ("octicons/clock.svg", t.yellow, "Review required"),
+        _ => ("octicons/comment.svg", t.muted_foreground, "Review"),
+    }
 }
 
 /// Octicon + color for a reviewer's [`ReviewState`], shown as a small badge
