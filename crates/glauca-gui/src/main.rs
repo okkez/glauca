@@ -68,11 +68,11 @@ const COMMENTS_CONTEXT: &str = "GlaucaComments";
 /// Pixels scrolled per j/k keypress in the detail pane and comments overlay.
 const DETAIL_SCROLL_STEP: f32 = 48.0;
 
-/// Scroll a tracked `overflow_y_scroll` container by `delta` pixels (positive =
-/// down). gpui's scroll offset goes negative downward, clamped to the content.
-fn scroll_vertically(handle: &ScrollHandle, delta: f32) {
+/// Scroll a tracked `overflow_y_scroll` container by `delta_px` pixels (positive
+/// = down). gpui's scroll offset goes negative downward, clamped to the content.
+fn scroll_vertically(handle: &ScrollHandle, delta_px: f32) {
     let mut off = handle.offset();
-    off.y -= px(delta);
+    off.y -= px(delta_px);
     let min_y = -handle.max_offset().y;
     if off.y < min_y {
         off.y = min_y;
