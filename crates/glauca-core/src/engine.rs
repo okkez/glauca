@@ -51,7 +51,8 @@ pub enum AppMessage {
     },
     /// N background sync jobs were added to the worker queue.
     BgSyncQueued(usize),
-    /// One background sync job finished (success or skip).
+    /// One background sync job finished (success, skip, or error) — the worker
+    /// emits this regardless of outcome so the UI can decrement its counter.
     BgSyncJobDone,
     /// A GitHub sync actually started for `query_id` (drives the syncing indicator
     /// for paths where the decision is made asynchronously, e.g. sync-if-stale).

@@ -6,7 +6,8 @@ use crate::types::UserRef;
 ///
 /// Syntax:
 ///   - Plain token: matches title, author, labels (case-insensitive substring)
-///   - `state:<open|closed|merged>` or `is:<open|closed|merged>` — filter by state
+///   - `state:<value>` or `is:<value>` — filter by state (case-insensitive
+///     substring; e.g. open/closed/merged — values are not restricted)
 ///   - `author:<login>` — filter by author login
 ///   - `label:<name>` — filter by label (substring)
 ///   - `repo:<owner/name>` — filter by repository (substring)

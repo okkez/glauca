@@ -327,7 +327,6 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
                     };
                     let avatar_url = r["author"]["avatarUrl"].as_str().map(|s| s.to_string());
                     if let Some(state) = r["state"].as_str() {
-                        // Update in place if already present, otherwise push
                         if let Some(entry) = map.iter_mut().find(|(l, _, _)| *l == login) {
                             entry.1 = state.to_string();
                             entry.2 = avatar_url;
