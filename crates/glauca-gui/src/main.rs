@@ -1830,8 +1830,10 @@ impl GlaucaApp {
         let reviewers = reviewer_overlays(item);
         let assignee_extra = item.assignees.len().saturating_sub(AVATAR_LIMIT);
         let reviewer_extra = reviewers.len().saturating_sub(AVATAR_LIMIT);
-        let has_participants =
-            item.author.is_some() || !item.assignees.is_empty() || !reviewers.is_empty();
+        let has_participants = item.author.is_some()
+            || !item.assignees.is_empty()
+            || !reviewers.is_empty()
+            || item.comment_count > 0;
 
         let is_new = item.is_new;
         let selected = ix == self.item_cursor;
@@ -1921,7 +1923,8 @@ impl GlaucaApp {
                                     e.child(avatar_overflow(assignee_extra, cx))
                                 }),
                         )
-                        // Right: reviewers with review-state overlay (+N overflow).
+                        // Right: reviewers with review-state overlay (+N overflow),
+                        // then the comment count (octicon + number) when nonzero.
                         .child(
                             h_flex()
                                 .gap_1()
@@ -1935,6 +1938,29 @@ impl GlaucaApp {
                                 )
                                 .when(reviewer_extra > 0, |e| {
                                     e.child(avatar_overflow(reviewer_extra, cx))
+                                })
+                                .when(item.comment_count > 0, |e| {
+                                    e.child(
+                                        h_flex()
+                                            .gap_0p5()
+                                            .items_center()
+                                            .flex_shrink_0()
+                                            .child(
+                                                svg()
+                                                    .path("octicons/comment.svg")
+                                                    .size_3()
+                                                    .flex_shrink_0()
+                                                    .text_color(cx.theme().muted_foreground),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(SharedString::from(
+                                                        item.comment_count.to_string(),
+                                                    )),
+                                            ),
+                                    )
                                 }),
                         ),
                 )
