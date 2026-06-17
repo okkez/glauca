@@ -2681,6 +2681,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tui-markdown",
+ "unicode-width",
  "url",
 ]
 

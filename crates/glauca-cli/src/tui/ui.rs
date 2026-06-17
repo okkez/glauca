@@ -8,6 +8,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthChar;
+
+/// Selection marker drawn in the item list's left gutter (reserved on every row).
+const HIGHLIGHT_SYMBOL: &str = "▶ ";
 
 /// Build styled spans for `text`, highlighting the earliest filter-token match
 /// (range computed by `FilterQuery::highlight_ranges`).
@@ -31,6 +35,92 @@ fn highlight_spans<'a>(
             spans
         }
     }
+}
+
+/// Wrap styled `spans` (e.g. a title's highlight fragments) to `max_width`
+/// display columns, returning one span vector per visual line. Breaks on the
+/// last whitespace that fits (word wrap); a single word wider than `max_width`
+/// is hard-broken at the column limit. Display width is measured with
+/// unicode-width so CJK (full-width) characters count as two columns. Each
+/// character keeps its original span style.
+fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span<'static>>> {
+    let max_width = max_width.max(1);
+
+    // Flatten into (char, style) so we can re-break independently of the
+    // original fragment boundaries while preserving per-character styling.
+    let chars: Vec<(char, Style)> = spans
+        .iter()
+        .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+        .collect();
+
+    let mut lines: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut cur: Vec<(char, Style)> = Vec::new();
+    let mut cur_w = 0usize;
+    // Column index (into `cur`) just after the last whitespace, i.e. where the
+    // next line would resume if we break on a word boundary.
+    let mut last_break: Option<usize> = None;
+
+    for (c, style) in chars {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if cur_w + cw > max_width && !cur.is_empty() {
+            // A space that overflows is the word boundary itself: end the line
+            // here and consume the space (no leading space on the next line).
+            if c == ' ' {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+                last_break = None;
+                continue;
+            }
+            match last_break {
+                // Break at the last whitespace: carry the trailing word to the
+                // next line, dropping the breaking space.
+                Some(brk) if brk > 0 && brk < cur.len() => {
+                    let carry: Vec<(char, Style)> = cur.split_off(brk);
+                    if cur.last().map(|(c, _)| *c) == Some(' ') {
+                        cur.pop();
+                    }
+                    lines.push(std::mem::take(&mut cur));
+                    cur_w = carry
+                        .iter()
+                        .map(|(c, _)| UnicodeWidthChar::width(*c).unwrap_or(0))
+                        .sum();
+                    cur = carry;
+                }
+                // No usable break point: hard-break before this char.
+                _ => {
+                    lines.push(std::mem::take(&mut cur));
+                    cur_w = 0;
+                }
+            }
+            last_break = None;
+        }
+        if c == ' ' {
+            last_break = Some(cur.len() + 1);
+        }
+        cur.push((c, style));
+        cur_w += cw;
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+
+    // Coalesce consecutive same-style chars back into owned spans.
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut out: Vec<Span<'static>> = Vec::new();
+            for (c, style) in line {
+                match out.last_mut() {
+                    Some(last) if last.style == style => last.content.to_mut().push(c),
+                    _ => out.push(Span::styled(c.to_string(), style)),
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -183,6 +273,14 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         .add_modifier(Modifier::BOLD);
     let match_normal = Style::default().add_modifier(Modifier::BOLD);
 
+    // Width available for a row's content: list width minus the block borders
+    // (left+right) and the highlight-symbol gutter ratatui reserves on every row.
+    let symbol_w: usize = HIGHLIGHT_SYMBOL
+        .chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum();
+    let inner_w = (split[1].width as usize).saturating_sub(2 + symbol_w);
+
     let items: Vec<ListItem> = filtered
         .iter()
         .map(|item| {
@@ -194,21 +292,40 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
             let title_spans =
                 highlight_spans(&filter_query, &item.title, match_normal, match_highlight);
 
-            // Line 1: new●  state●  kind⎇  #number  title
-            let mut line1_spans = vec![if item.is_new {
+            // Line 1 prefix: new●  state●  kind⎇  #number  (title is appended,
+            // wrapped, below). Kept separate so we can measure its width and
+            // align wrapped title continuation lines under the title start.
+            let mut prefix_spans = vec![if item.is_new {
                 Span::styled("● ", Style::default().fg(Color::Yellow))
             } else {
                 Span::raw("  ")
             }];
-            line1_spans.extend([
+            prefix_spans.extend([
                 Span::styled(state_badge, state_style),
                 Span::raw(" "),
                 Span::styled(kind_icon, Style::default().fg(Color::Cyan)),
                 Span::raw(format!(" #{} ", item.number)),
             ]);
-            line1_spans.extend(title_spans);
+            let prefix_w: usize = prefix_spans.iter().map(Span::width).sum();
 
-            // Line 2: (indent)  [🔒]  repo  ·  updated_at
+            // Wrap the title into the remaining width so long titles show in
+            // full across multiple lines instead of being truncated.
+            let title_w = inner_w.saturating_sub(prefix_w).max(8);
+            let wrapped = wrap_spans(&title_spans, title_w);
+
+            let mut lines: Vec<Line> = Vec::with_capacity(wrapped.len() + 1);
+            let indent = " ".repeat(prefix_w);
+            for (i, title_line) in wrapped.into_iter().enumerate() {
+                let mut spans = if i == 0 {
+                    prefix_spans.clone()
+                } else {
+                    vec![Span::raw(indent.clone())]
+                };
+                spans.extend(title_line);
+                lines.push(Line::from(spans));
+            }
+
+            // Last line: (indent)  [🔒]  repo  ·  updated_at
             let mut line2_spans = vec![Span::raw("        ")];
             if item.repo_private {
                 line2_spans.push(Span::styled("🔒 ", Style::default().fg(Color::Yellow)));
@@ -218,9 +335,9 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("  ·  ", Style::default().fg(Color::Gray)),
                 Span::styled(updated, Style::default().fg(Color::Gray)),
             ]);
-            let line2 = Line::from(line2_spans);
+            lines.push(Line::from(line2_spans));
 
-            ListItem::new(vec![Line::from(line1_spans), line2])
+            ListItem::new(lines)
         })
         .collect();
 
@@ -232,7 +349,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight_style(focused))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(HIGHLIGHT_SYMBOL);
 
     f.render_stateful_widget(list, split[1], &mut state);
 }
@@ -1111,4 +1228,63 @@ fn build_comment_lines<'a>(
         }
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Concatenate a wrapped line's spans back into plain text.
+    fn line_text(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn line_width(spans: &[Span]) -> usize {
+        line_text(spans)
+            .chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum()
+    }
+
+    #[test]
+    fn wraps_on_word_boundaries() {
+        let spans = vec![Span::raw("hello world foo bar")];
+        let lines = wrap_spans(&spans, 11);
+        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        assert_eq!(texts, vec!["hello world", "foo bar"]);
+        // No line exceeds the limit.
+        assert!(lines.iter().all(|l| line_width(l) <= 11));
+    }
+
+    #[test]
+    fn hard_breaks_a_word_longer_than_width() {
+        let spans = vec![Span::raw("supercalifragilistic")];
+        let lines = wrap_spans(&spans, 5);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|l| line_width(l) <= 5));
+        // Nothing is dropped.
+        let joined: String = lines.iter().map(|l| line_text(l)).collect();
+        assert_eq!(joined, "supercalifragilistic");
+    }
+
+    #[test]
+    fn counts_full_width_chars_as_two_columns() {
+        // Each CJK char is 2 columns wide; width 4 fits exactly two per line.
+        let spans = vec![Span::raw("あいうえお")];
+        let lines = wrap_spans(&spans, 4);
+        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        assert_eq!(texts, vec!["あい", "うえ", "お"]);
+        assert!(lines.iter().all(|l| line_width(l) <= 4));
+    }
+
+    #[test]
+    fn preserves_per_fragment_styles() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let hl = Style::default().fg(Color::Black).bg(Color::Yellow);
+        let spans = vec![Span::styled("foo ", bold), Span::styled("bar", hl)];
+        let lines = wrap_spans(&spans, 100);
+        assert_eq!(lines.len(), 1);
+        // The highlighted "bar" keeps its own style as a distinct span.
+        assert!(lines[0].iter().any(|s| s.content == "bar" && s.style == hl));
+    }
 }

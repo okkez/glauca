@@ -20,6 +20,7 @@ octocrab.workspace = true
 url.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+unicode-width.workspace = true
 futures.workspace = true
 chrono.workspace = true
 tui-markdown.workspace = true
