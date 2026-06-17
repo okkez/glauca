@@ -1623,6 +1623,21 @@ mod tests {
     use super::*;
     use glauca_core::types::FilterStreamEntry;
 
+    /// A minimal open PR item; tests override only the fields they exercise via
+    /// `ItemEntry { field: …, ..make_item(n, "title") }`.
+    fn make_item(number: i64, title: &str) -> ItemEntry {
+        ItemEntry {
+            number,
+            title: title.to_string(),
+            repo_owner: "owner".into(),
+            repo_name: "repo".into(),
+            author: Some(glauca_core::types::UserRef::new("alice")),
+            state: "open".into(),
+            kind: "pull_request".into(),
+            ..Default::default()
+        }
+    }
+
     fn make_app_with_items(titles: &[&str]) -> App {
         let mut app = App::new(vec![QueryEntry {
             id: 1,
@@ -1634,33 +1649,7 @@ mod tests {
         app.items = titles
             .iter()
             .enumerate()
-            .map(|(i, t)| ItemEntry {
-                number: i as i64 + 1,
-                title: t.to_string(),
-                repo_owner: "owner".into(),
-                repo_name: "repo".into(),
-                repo_private: false,
-                author: Some(glauca_core::types::UserRef::new("alice")),
-                state: "open".into(),
-                updated_at: String::new(),
-                labels: vec![],
-                url: String::new(),
-                comment_count: 0,
-                kind: "pull_request".into(),
-                requested_reviewers: vec![],
-                reviews: vec![],
-                body: None,
-                assignees: vec![],
-                is_draft: false,
-                created_at_item: None,
-                base_ref: None,
-                head_ref: None,
-                review_decision: None,
-                milestone: None,
-                cached_at: String::new(),
-                is_new: false,
-                read: false,
-            })
+            .map(|(i, t)| make_item(i as i64 + 1, t))
             .collect();
         app
     }
@@ -1674,8 +1663,8 @@ mod tests {
         app.filter = "fix".into();
         app.clamp_item_cursor();
 
-        // Cursor should clamp to 1 (last index in filtered list).
-        assert!(app.item_cursor <= app.filtered_items().len().saturating_sub(1));
+        // Cursor should clamp to 1 (last index in the 2-item filtered list).
+        assert_eq!(app.item_cursor, 1);
     }
 
     #[test]
@@ -1699,8 +1688,7 @@ mod tests {
 
     #[test]
     fn selected_item_follows_cursor() {
-        let app = make_app_with_items(&["First", "Second", "Third"]);
-        let mut app = app;
+        let mut app = make_app_with_items(&["First", "Second", "Third"]);
         app.item_cursor = 1;
         assert_eq!(
             app.selected_item().map(|i| i.title.as_str()),
@@ -1750,59 +1738,10 @@ mod tests {
             last_viewed_at: None,
         }]);
         app.items = vec![
+            make_item(1, "Open PR"),
             ItemEntry {
-                number: 1,
-                title: "Open PR".into(),
-                repo_owner: "o".into(),
-                repo_name: "r".into(),
-                repo_private: false,
-                author: None,
-                state: "open".into(),
-                updated_at: String::new(),
-                labels: vec![],
-                url: String::new(),
-                comment_count: 0,
-                kind: "pull_request".into(),
-                requested_reviewers: vec![],
-                reviews: vec![],
-                body: None,
-                assignees: vec![],
-                is_draft: false,
-                created_at_item: None,
-                base_ref: None,
-                head_ref: None,
-                review_decision: None,
-                milestone: None,
-                cached_at: String::new(),
-                is_new: false,
-                read: false,
-            },
-            ItemEntry {
-                number: 2,
-                title: "Closed PR".into(),
-                repo_owner: "o".into(),
-                repo_name: "r".into(),
-                repo_private: false,
-                author: None,
                 state: "closed".into(),
-                updated_at: String::new(),
-                labels: vec![],
-                url: String::new(),
-                comment_count: 0,
-                kind: "pull_request".into(),
-                requested_reviewers: vec![],
-                reviews: vec![],
-                body: None,
-                assignees: vec![],
-                is_draft: false,
-                created_at_item: None,
-                base_ref: None,
-                head_ref: None,
-                review_decision: None,
-                milestone: None,
-                cached_at: String::new(),
-                is_new: false,
-                read: false,
+                ..make_item(2, "Closed PR")
             },
         ];
         app.stream_filter = Some("state:open".into());
@@ -1833,58 +1772,12 @@ mod tests {
         ];
         let items = vec![
             ItemEntry {
-                number: 1,
-                title: "Older open".into(),
-                repo_owner: "o".into(),
-                repo_name: "r".into(),
-                repo_private: false,
-                author: None,
-                state: "open".into(),
-                updated_at: String::new(),
-                labels: vec![],
-                url: String::new(),
-                comment_count: 0,
-                kind: "pull_request".into(),
-                requested_reviewers: vec![],
-                reviews: vec![],
-                body: None,
-                assignees: vec![],
-                is_draft: false,
-                created_at_item: None,
-                base_ref: None,
-                head_ref: None,
-                review_decision: None,
-                milestone: None,
                 cached_at: "2026-05-24 10:15:00".into(),
-                is_new: false,
-                read: false,
+                ..make_item(1, "Older open")
             },
             ItemEntry {
-                number: 2,
-                title: "Newest open".into(),
-                repo_owner: "o".into(),
-                repo_name: "r".into(),
-                repo_private: false,
-                author: None,
-                state: "open".into(),
-                updated_at: String::new(),
-                labels: vec![],
-                url: String::new(),
-                comment_count: 0,
-                kind: "pull_request".into(),
-                requested_reviewers: vec![],
-                reviews: vec![],
-                body: None,
-                assignees: vec![],
-                is_draft: false,
-                created_at_item: None,
-                base_ref: None,
-                head_ref: None,
-                review_decision: None,
-                milestone: None,
                 cached_at: "2026-05-24 10:45:00".into(),
-                is_new: false,
-                read: false,
+                ..make_item(2, "Newest open")
             },
         ];
 
