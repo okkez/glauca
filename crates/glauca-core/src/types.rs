@@ -166,7 +166,7 @@ pub enum ItemAction {
     /// Re-fetch just this item from GitHub. Offered by both front-ends.
     RefreshItem,
     /// Launch the external `octorus` (`or`) PR-review TUI for this item. Offered
-    /// only by the TUI front-end (see `glauca-cli`'s `item_actions`), never added
+    /// only by the TUI front-end (see `glauca-tui`'s `item_actions`), never added
     /// to `available_for` so it stays out of the GUI menu.
     ReviewOctorus,
 }

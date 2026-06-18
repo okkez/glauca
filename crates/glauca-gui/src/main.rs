@@ -1438,7 +1438,7 @@ impl GlaucaApp {
     }
 
     /// Apply a single engine message to GUI state. Mirrors the TUI's `run_app`
-    /// message handling (crates/glauca-cli/src/tui/mod.rs).
+    /// message handling (crates/glauca-tui/src/tui/mod.rs).
     fn apply(&mut self, msg: AppMessage, _cx: &mut Context<Self>) {
         // Only rebuild the filtered-index cache when items/filter/stream_filter
         // actually change. Background sync floods `apply` with messages that don't

@@ -2662,30 +2662,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glauca-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "clap",
- "crossterm 0.28.1",
- "dirs 5.0.1",
- "futures",
- "glauca-core",
- "octocrab",
- "ratatui",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "tokio",
- "tui-markdown",
- "unicode-width",
- "url",
-]
-
-[[package]]
 name = "glauca-core"
 version = "0.1.0"
 dependencies = [
@@ -2717,6 +2693,30 @@ dependencies = [
  "serde_json",
  "smol",
  "tokio",
+]
+
+[[package]]
+name = "glauca-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "clap",
+ "crossterm 0.28.1",
+ "dirs 5.0.1",
+ "futures",
+ "glauca-core",
+ "octocrab",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tui-markdown",
+ "unicode-width",
+ "url",
 ]
 
 [[package]]

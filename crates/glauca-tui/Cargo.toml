@@ -1,10 +1,10 @@
 [package]
-name = "glauca-cli"
+name = "glauca-tui"
 edition.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "glauca-cli"
+name = "glauca-tui"
 path = "src/main.rs"
 
 [dependencies]
