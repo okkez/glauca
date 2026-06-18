@@ -13,7 +13,7 @@ use std::{
 
 pub mod ui;
 
-use glauca_core::engine::{AppMessage, Engine, EngineCommand};
+use glauca_core::engine::{AppMessage, Engine, EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{group_range, is_item_new_since, move_group_down};
 
@@ -45,6 +45,9 @@ pub enum InputMode {
     EditFilterStream,
     ActionMenu,
     MergeMenu,
+    /// Review-event selection (Comment / Approve / Request changes), shown after
+    /// the review-comment editor closes so the submit can be confirmed/cancelled.
+    ReviewMenu,
     /// Comments popup (fetched via API, displayed in-TUI).
     CommentsPopup,
 }
@@ -76,6 +79,10 @@ pub struct App {
     pub modal_field: usize,
     pub action_cursor: usize,
     pub merge_strategy_cursor: usize,
+    /// Selection cursor for the review-event menu (`ReviewEvent::all()` order).
+    pub review_event_cursor: usize,
+    /// Review comment captured from the editor, pending the review-event choice.
+    pub review_body: Option<String>,
     /// Comments fetched for the comments popup.
     pub comments: Vec<CommentEntry>,
     /// True while comments are being fetched from the API.
@@ -120,6 +127,8 @@ impl App {
             modal_field: 0,
             action_cursor: 0,
             merge_strategy_cursor: 0,
+            review_event_cursor: 0,
+            review_body: None,
             comments: Vec::new(),
             comments_loading: false,
             comments_scroll: 0,
@@ -205,6 +214,7 @@ enum Action {
     SaveEditFilterStream,
     ConfirmAction,
     ConfirmMergeStrategy,
+    ConfirmReviewEvent,
     OpenBrowser,
     CopyUrl,
     ReviewOctorus,
@@ -243,6 +253,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         InputMode::EditFilterStream => handle_key_edit_filter_stream(app, key),
         InputMode::ActionMenu => handle_key_action_menu(app, key),
         InputMode::MergeMenu => handle_key_merge_menu(app, key),
+        InputMode::ReviewMenu => handle_key_review_menu(app, key),
         InputMode::CommentsPopup => handle_key_comments_popup(app, key),
         InputMode::Normal => handle_key_normal(app, key),
     }
@@ -445,6 +456,32 @@ fn handle_key_merge_menu(app: &mut App, key: KeyEvent) -> Action {
             app.merge_strategy_cursor = app.merge_strategy_cursor.saturating_sub(1);
         }
         KeyCode::Enter => return Action::ConfirmMergeStrategy,
+        _ => {}
+    }
+
+    Action::None
+}
+
+fn handle_key_review_menu(app: &mut App, key: KeyEvent) -> Action {
+    let max = ReviewEvent::all().len().saturating_sub(1);
+
+    match key.code {
+        // The editor already ran, so there is nothing to return to: Esc aborts
+        // the whole review.
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.review_body = None;
+            app.status = Some("Review cancelled".into());
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.review_event_cursor < max {
+                app.review_event_cursor += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.review_event_cursor = app.review_event_cursor.saturating_sub(1);
+        }
+        KeyCode::Enter => return Action::ConfirmReviewEvent,
         _ => {}
     }
 
@@ -1297,31 +1334,25 @@ where
                                             app.input_mode = InputMode::Normal;
                                             suspend_tui(terminal)?;
                                             let editor_result = run_editor(
-                                                "# Optional review comment (leave empty to approve without body)\n# Lines starting with '#' are ignored.\n",
+                                                "# Review comment (required for Comment / Request changes; optional for Approve)\n# Lines starting with '#' are ignored.\n",
                                             );
                                             restore_tui(terminal)?;
 
                                             match editor_result {
-                                                Ok(Some(body)) => {
-                                                    let body_final = body
-                                                        .lines()
-                                                        .filter(|line| !line.starts_with('#'))
-                                                        .collect::<Vec<_>>()
-                                                        .join("\n");
-                                                    let body_final = if body_final.trim().is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(body_final)
-                                                    };
-                                                    engine
-                                                        .send(EngineCommand::Approve {
-                                                            url: item.url.clone(),
-                                                            body: body_final,
-                                                        })
-                                                        .await;
-                                                }
-                                                Ok(None) => {
-                                                    app.status = Some("Approval cancelled".into());
+                                                Ok(body_opt) => {
+                                                    // Strip comment lines; empty → no body. Then
+                                                    // confirm the review event before submitting.
+                                                    app.review_body = body_opt.and_then(|body| {
+                                                        let stripped = body
+                                                            .lines()
+                                                            .filter(|line| !line.starts_with('#'))
+                                                            .collect::<Vec<_>>()
+                                                            .join("\n");
+                                                        let stripped = stripped.trim().to_string();
+                                                        (!stripped.is_empty()).then_some(stripped)
+                                                    });
+                                                    app.review_event_cursor = 0;
+                                                    app.input_mode = InputMode::ReviewMenu;
                                                 }
                                                 Err(e) => {
                                                     app.status = Some(format!("Editor error: {e}"));
@@ -1362,6 +1393,31 @@ where
                                             strategy,
                                         })
                                         .await;
+                                }
+                            }
+                        }
+                        Action::ConfirmReviewEvent => {
+                            if let Some(item) = app.selected_item().cloned() {
+                                if let Some(event) =
+                                    ReviewEvent::all().get(app.review_event_cursor).copied()
+                                {
+                                    // gh requires a body for comment / request-changes.
+                                    if event.requires_body() && app.review_body.is_none() {
+                                        app.status = Some(
+                                            "Review comment required for Comment / Request changes"
+                                                .into(),
+                                        );
+                                    } else {
+                                        app.input_mode = InputMode::Normal;
+                                        let body = app.review_body.take();
+                                        engine
+                                            .send(EngineCommand::SubmitReview {
+                                                url: item.url.clone(),
+                                                event,
+                                                body,
+                                            })
+                                            .await;
+                                    }
                                 }
                             }
                         }

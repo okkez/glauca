@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
-use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit};
+use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{
     compute_unread_counts, expand_me, group_range, is_item_new_since, move_group_down,
@@ -29,6 +29,7 @@ use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_component::radio::RadioGroup;
 use gpui_component::text::{markdown, TextView, TextViewState};
 use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
 use gpui_component::tooltip::Tooltip;
@@ -242,6 +243,10 @@ struct GlaucaApp {
     /// menu when opened via the keyboard (Enter), so it appears near the cursor.
     last_pointer: Point<Pixels>,
 
+    /// Selected event for the open review dialog (Comment / Approve / Request
+    /// Changes); reset to `Approve` each time the dialog opens.
+    review_action: ReviewEvent,
+
     /// Inline filter input. Its `Change` events update `filter` (see `new`).
     filter_input: Entity<InputState>,
     /// Pending debounced re-filter task; replacing it cancels the previous one.
@@ -345,6 +350,7 @@ impl GlaucaApp {
             menu: None,
             menu_pos: point(px(0.), px(0.)),
             last_pointer: point(px(0.), px(0.)),
+            review_action: ReviewEvent::Approve,
             filter_input,
             filter_task: None,
             theme_pref: theme,
@@ -1196,7 +1202,7 @@ impl GlaucaApp {
         match action {
             ItemAction::OpenBrowser => self.send(EngineCommand::OpenBrowser { item }),
             ItemAction::Comment => self.open_comment_dialog(item, window, cx),
-            ItemAction::ApprovePR => self.open_approve_dialog(item, window, cx),
+            ItemAction::ApprovePR => self.open_review_dialog(item, window, cx),
             ItemAction::MergePR => self.open_merge_dialog(item, window, cx),
             ItemAction::ViewComments => self.open_comments(item, window, cx),
             ItemAction::CopyUrl => cx.write_to_clipboard(ClipboardItem::new_string(item.url)),
@@ -1254,36 +1260,95 @@ impl GlaucaApp {
         });
     }
 
-    fn open_approve_dialog(&mut self, item: ItemEntry, window: &mut Window, cx: &mut Context<Self>) {
+    /// Submit a PR review: pick Comment / Approve / Request changes, type an
+    /// optional body, and Cancel / Submit. Radio order matches `review_action`'s
+    /// index mapping below. Opened by the "Approve PR" menu item (defaults to
+    /// Approve). Uses explicit buttons (not `on_ok`) so the actions are visible.
+    fn open_review_dialog(&mut self, item: ItemEntry, window: &mut Window, cx: &mut Context<Self>) {
+        self.review_action = ReviewEvent::Approve;
         let body = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(3, 12)
-                .placeholder("Optional review comment")
+                .placeholder("Review comment (required for Comment / Request changes)")
         });
         let this = cx.weak_entity();
         window.open_dialog(cx, move |dlg, _w, _cx| {
-            let body_c = body.clone();
-            let body_ok = body.clone();
+            let body_render = body.clone();
+            let body_submit = body.clone();
             let this = this.clone();
             let item = item.clone();
-            dlg.title("Approve PR").w(px(560.))
-                .content(move |content, _w, _cx| content.child(Input::new(&body_c).h(px(180.))))
-                .on_ok(move |_, _w, cx| {
-                    let b = body_ok.read(cx).value().to_string();
-                    let b = b.trim().to_string();
-                    let body = if b.is_empty() { None } else { Some(b) };
-                    if let Some(app) = this.upgrade() {
+            dlg.title("Submit review").w(px(560.)).content(move |content, _w, cx| {
+                // Radio order ⇄ ReviewEvent: 0 Comment, 1 Approve, 2 Request changes.
+                let selected = this.upgrade().map(|app| match app.read(cx).review_action {
+                    ReviewEvent::Comment => 0,
+                    ReviewEvent::Approve => 1,
+                    ReviewEvent::RequestChanges => 2,
+                });
+                let radios = RadioGroup::horizontal("review-action")
+                    .children(["Comment", "Approve", "Request changes"])
+                    .selected_index(selected)
+                    .on_click({
+                        let this = this.clone();
+                        move |ix, _w, cx| {
+                            let event = match *ix {
+                                0 => ReviewEvent::Comment,
+                                2 => ReviewEvent::RequestChanges,
+                                _ => ReviewEvent::Approve,
+                            };
+                            if let Some(app) = this.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.review_action = event;
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    });
+                let buttons = h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_2()
+                    .child(Button::new("review-cancel").ghost().label("Cancel").on_click(
+                        move |_, window, cx| {
+                            window.close_dialog(cx);
+                        },
+                    ))
+                    .child(Button::new("review-submit").primary().label("Submit review").on_click({
+                        let this = this.clone();
                         let item = item.clone();
-                        app.update(cx, |app, _| {
-                            app.send(EngineCommand::Approve {
-                                url: item.url.clone(),
-                                body,
-                            })
-                        });
-                    }
-                    true
-                })
+                        let body_submit = body_submit.clone();
+                        move |_, window, cx| {
+                            let Some(app) = this.upgrade() else { return };
+                            let event = app.read(cx).review_action;
+                            let b = body_submit.read(cx).value().trim().to_string();
+                            // gh requires a body for comment / request-changes reviews.
+                            if event.requires_body() && b.is_empty() {
+                                app.update(cx, |app, cx| {
+                                    app.status = Some(
+                                        "Review comment required for Comment / Request changes"
+                                            .to_string(),
+                                    );
+                                    cx.notify();
+                                });
+                                return;
+                            }
+                            let body = if b.is_empty() { None } else { Some(b) };
+                            window.close_dialog(cx);
+                            app.update(cx, |app, _| {
+                                app.send(EngineCommand::SubmitReview {
+                                    url: item.url.clone(),
+                                    event,
+                                    body,
+                                })
+                            });
+                        }
+                    }));
+                content
+                    .gap_3()
+                    .child(radios)
+                    .child(Input::new(&body_render).h(px(180.)))
+                    .child(buttons)
+            })
         });
     }
 

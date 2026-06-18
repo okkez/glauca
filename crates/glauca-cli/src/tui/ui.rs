@@ -2,6 +2,7 @@ use crate::tui::{
     App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, item_actions,
 };
 use chrono::{DateTime, Local};
+use glauca_core::engine::ReviewEvent;
 use glauca_core::filter::FilterQuery;
 use ratatui::{
     Frame,
@@ -152,6 +153,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_action_popup(f, app, area);
     } else if app.input_mode == InputMode::MergeMenu {
         draw_merge_menu_popup(f, app, area);
+    } else if app.input_mode == InputMode::ReviewMenu {
+        draw_review_menu_popup(f, app, area);
     } else if app.input_mode == InputMode::CommentsPopup {
         draw_comments_popup(f, app, area);
     }
@@ -589,6 +592,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::EditFilterStream => "EDIT STREAM  Tab:switch field  Enter:save  Esc:cancel".to_string(),
         InputMode::ActionMenu => "ACTIONS  j/k:move  Enter:confirm  Esc:cancel".to_string(),
         InputMode::MergeMenu => "MERGE    j/k:move  Enter:confirm  Esc:back".to_string(),
+        InputMode::ReviewMenu => "REVIEW   j/k:move  Enter:submit  Esc:cancel".to_string(),
         InputMode::CommentsPopup => "COMMENTS  j/k:scroll  g/G:top/bottom  Esc/q:close".to_string(),
     };
 
@@ -812,6 +816,48 @@ fn draw_merge_menu_popup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(List::new(items), chunks[0]);
     f.render_widget(
         Paragraph::new("j/k: move  Enter: confirm  Esc: back")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+}
+
+fn draw_review_menu_popup(f: &mut Frame, app: &App, area: Rect) {
+    let events = ReviewEvent::all();
+    let popup_area = centered_rect_fixed(40, events.len() as u16 + 3, area);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Submit Review ");
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = events
+        .iter()
+        .enumerate()
+        .map(|(i, event)| {
+            if i == app.review_event_cursor {
+                ListItem::new(format!(" ▶ {} ", event.label())).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ListItem::new(format!("   {} ", event.label()))
+            }
+        })
+        .collect();
+
+    f.render_widget(List::new(items), chunks[0]);
+    f.render_widget(
+        Paragraph::new("j/k: move  Enter: submit  Esc: cancel")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center),
         chunks[1],

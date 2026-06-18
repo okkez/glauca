@@ -250,14 +250,65 @@ pub async fn execute_comment(url: &str, kind: &str, body: &str) -> anyhow::Resul
     Ok("Comment posted".into())
 }
 
-pub async fn execute_approve(url: &str, body: Option<&str>) -> anyhow::Result<String> {
+/// A GitHub pull-request review event, submitted via `gh pr review`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewEvent {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl ReviewEvent {
+    /// The `gh pr review` flag for this event.
+    pub fn flag(&self) -> &'static str {
+        match self {
+            ReviewEvent::Comment => "--comment",
+            ReviewEvent::Approve => "--approve",
+            ReviewEvent::RequestChanges => "--request-changes",
+        }
+    }
+
+    /// GitHub requires a body for comment / request-changes reviews; approve's is
+    /// optional.
+    pub fn requires_body(&self) -> bool {
+        !matches!(self, ReviewEvent::Approve)
+    }
+
+    /// All events, in menu order (Approve first — the default for "Approve PR").
+    pub fn all() -> Vec<Self> {
+        vec![Self::Approve, Self::Comment, Self::RequestChanges]
+    }
+
+    /// Human label for selection menus.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ReviewEvent::Comment => "Comment",
+            ReviewEvent::Approve => "Approve",
+            ReviewEvent::RequestChanges => "Request changes",
+        }
+    }
+
+    fn done_message(&self) -> &'static str {
+        match self {
+            ReviewEvent::Comment => "Review comment posted",
+            ReviewEvent::Approve => "PR approved",
+            ReviewEvent::RequestChanges => "Changes requested",
+        }
+    }
+}
+
+pub async fn execute_review(
+    url: &str,
+    event: ReviewEvent,
+    body: Option<&str>,
+) -> anyhow::Result<String> {
     let mut cmd = tokio::process::Command::new("gh");
-    cmd.args(["pr", "review", "--approve", url]);
+    cmd.args(["pr", "review", event.flag(), url]);
     if let Some(b) = body {
         cmd.args(["-b", b]);
     }
-    run_background_command(cmd, "gh pr review --approve failed").await?;
-    Ok("PR approved".into())
+    run_background_command(cmd, &format!("gh pr review {} failed", event.flag())).await?;
+    Ok(event.done_message().into())
 }
 
 pub async fn execute_merge(url: &str, strategy: &MergeStrategy) -> anyhow::Result<String> {
@@ -582,8 +633,9 @@ pub enum EngineCommand {
         kind: String,
         body: String,
     },
-    Approve {
+    SubmitReview {
         url: String,
+        event: ReviewEvent,
         body: Option<String>,
     },
     Merge {
@@ -1011,9 +1063,9 @@ async fn command_loop(
                     execute_comment(&url, &kind, &body).await
                 });
             }
-            EngineCommand::Approve { url, body } => {
+            EngineCommand::SubmitReview { url, event, body } => {
                 spawn_action(msg_tx.clone(), async move {
-                    execute_approve(&url, body.as_deref()).await
+                    execute_review(&url, event, body.as_deref()).await
                 });
             }
             EngineCommand::Merge { url, strategy } => {
