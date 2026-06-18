@@ -372,6 +372,30 @@ impl GlaucaApp {
         });
         app._subscriptions.push(appearance_sub);
         app.prime();
+        // Restore saved column widths into the authoritative ResizableState after
+        // the first frame is drawn (panels are synced and the container has a real
+        // size by then). The `.size()` initial_size hints on the panels lose to
+        // `adjust_to_container_size`, which overwrites `panel.size` on that first
+        // prepaint — so seed the widths explicitly here. `on_next_frame` is a
+        // one-shot, so no guard flag is needed.
+        let pane_state = app.pane_state.clone();
+        let left = app.pane_sizes.first().copied();
+        let right = app.pane_sizes.get(2).copied();
+        if left.is_some() || right.is_some() {
+            window.on_next_frame(move |window, cx| {
+                pane_state.update(cx, |state, cx| {
+                    // panels.len() == 3 and the container size is settled here;
+                    // out-of-range indices are a no-op. Apply left (ix 0) before
+                    // right (ix 2); both take from the flexible center pane.
+                    if let Some(w) = left {
+                        state.resize_panel(0, px(w), window, cx);
+                    }
+                    if let Some(w) = right {
+                        state.resize_panel(2, px(w), window, cx);
+                    }
+                });
+            });
+        }
         // Grab keyboard focus so single-letter navigation works without a click.
         app.focus_handle.focus(window, cx);
         app
@@ -2958,7 +2982,7 @@ impl Render for GlaucaApp {
                         .child(
                             resizable_panel()
                                 .size(px(self.pane_sizes.first().copied().unwrap_or(280.)))
-                                .size_range(px(180.)..px(560.))
+                                .size_range(px(250.)..px(560.))
                                 .flex_none()
                                 .child(pane_frame(
                                     self.focus == Focus::QueryList,
@@ -2967,7 +2991,7 @@ impl Render for GlaucaApp {
                                 )),
                         )
                         .child(
-                            resizable_panel().size_range(px(100.)..px(1000.)).child(
+                            resizable_panel().size_range(px(250.)..px(1000.)).child(
                                 pane_frame(
                                     self.focus == Focus::ItemList,
                                     self.render_center(cx),
