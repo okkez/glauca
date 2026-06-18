@@ -165,8 +165,8 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(20),
-            Constraint::Percentage(40),
-            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(50),
         ])
         .split(area);
 
