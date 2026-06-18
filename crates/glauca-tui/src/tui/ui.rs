@@ -1,7 +1,7 @@
 use crate::tui::{
     App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, item_actions,
 };
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use glauca_core::engine::ReviewEvent;
 use glauca_core::filter::FilterQuery;
 use ratatui::{
@@ -286,6 +286,9 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         .sum();
     let inner_w = (split[1].width as usize).saturating_sub(2 + symbol_w);
 
+    // Sample the clock once for the whole list so each row's relative time is
+    // measured against the same instant (and we avoid a per-row `Utc::now()`).
+    let now = Utc::now();
     let items: Vec<ListItem> = filtered
         .iter()
         .map(|item| {
@@ -293,7 +296,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
             let state_badge = state_badge(&item.state);
             let kind_icon = kind_icon(&item.kind);
             let repo = format!("{}/{}", item.repo_owner, item.repo_name);
-            let updated = format_local_datetime(&item.updated_at);
+            let updated = glauca_core::time::format_relative_time_since(&item.updated_at, now);
             let title_spans =
                 highlight_spans(&filter_query, &item.title, match_normal, match_highlight);
 
@@ -330,16 +333,18 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(spans));
             }
 
-            // Last line: (indent)  [🔒]  repo  ·  updated_at
+            // Last line: (indent)  [🔒]  repo  <pad>  updated (relative, right-aligned)
             let mut line2_spans = vec![Span::raw("        ")];
             if item.repo_private {
                 line2_spans.push(Span::styled("🔒 ", Style::default().fg(Color::Yellow)));
             }
-            line2_spans.extend([
-                Span::styled(repo, Style::default().fg(Color::Gray)),
-                Span::styled("  ·  ", Style::default().fg(Color::Gray)),
-                Span::styled(updated, Style::default().fg(Color::Gray)),
-            ]);
+            line2_spans.push(Span::styled(repo, Style::default().fg(Color::Gray)));
+            // Right-align the relative update time to the row's content edge.
+            let upd_span = Span::styled(updated, Style::default().fg(Color::Gray));
+            let used: usize = line2_spans.iter().map(Span::width).sum();
+            let pad = inner_w.saturating_sub(used + upd_span.width()).max(1);
+            line2_spans.push(Span::raw(" ".repeat(pad)));
+            line2_spans.push(upd_span);
             lines.push(Line::from(line2_spans));
 
             ListItem::new(lines)

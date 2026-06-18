@@ -2071,11 +2071,22 @@ impl GlaucaApp {
                     })
                     .child(
                         div()
-                            .w_full()
+                            .flex_1()
+                            .min_w_0()
                             .truncate()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(SharedString::from(meta)),
+                    )
+                    // Relative update time, right-aligned at the row's end.
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(glauca_core::time::format_relative_time(
+                                &item.updated_at,
+                            ))),
                     ),
             )
             .into_any_element()
