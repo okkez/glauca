@@ -1208,6 +1208,28 @@ impl GlaucaApp {
         Some(root_id)
     }
 
+    /// Force a full re-fetch of the current entry's root query (ignores
+    /// `last_fetched_at`), which re-pages everything and prunes cached items that
+    /// no longer match. Useful to reconcile after items have fallen out of the
+    /// query (e.g. merged PRs lingering in an `is:open` list).
+    fn full_resync_current(&mut self) {
+        let Some(entry) = self.entries.get(self.entry_cursor) else {
+            return;
+        };
+        let root_id = entry.root_query_id();
+        let query_str = entry.root_query_str().unwrap_or_default().to_string();
+        if query_str.is_empty() {
+            return;
+        }
+        let highlight_since = entry.last_viewed_at().map(str::to_string);
+        self.send(EngineCommand::FullResync {
+            query_id: root_id,
+            query_str,
+            highlight_since,
+        });
+        self.syncing = true;
+    }
+
     // ── Item actions ───────────────────────────────────────────────────────────
 
     /// Open a `PopupMenu` (right-click / Enter action menu) anchored at `pos`. The
@@ -2905,6 +2927,10 @@ impl GlaucaApp {
             .dropdown_menu(move |menu, _w, _cx| {
                 let mut menu = app_menu_item(menu, &glauca_app, "Sync now", |this, _w, cx| {
                     this.select_current_entry(true);
+                    cx.notify();
+                });
+                menu = app_menu_item(menu, &glauca_app, "Full resync", |this, _w, cx| {
+                    this.full_resync_current();
                     cx.notify();
                 });
                 menu = menu.separator();

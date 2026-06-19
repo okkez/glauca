@@ -240,6 +240,79 @@ pub async fn mark_fetched(pool: &SqlitePool, query_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// RFC3339 UTC threshold for an incremental fetch: the query's `last_fetched_at`
+/// shifted back by `overlap_secs` (to tolerate clock skew and updates made while
+/// the previous fetch was in flight). `None` when the query was never fetched —
+/// the caller should then do a full fetch.
+pub async fn updated_since(
+    pool: &SqlitePool,
+    query_id: i64,
+    overlap_secs: i64,
+) -> Result<Option<String>> {
+    let modifier = format!("-{overlap_secs} seconds");
+    let row = sqlx::query!(
+        r#"
+        SELECT strftime('%Y-%m-%dT%H:%M:%SZ', last_fetched_at, ?) AS "since?: String"
+        FROM queries
+        WHERE id = ?
+        "#,
+        modifier,
+        query_id,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.since)
+}
+
+/// Delete cached items for `query_id` whose (repo_owner, repo_name, number) key
+/// is absent from `keep` (the authoritative full-fetch result set). Returns the
+/// number of rows deleted. Used only after an untruncated full fetch, so items
+/// that no longer match the query are dropped instead of lingering as ghosts.
+pub async fn prune_query_items(
+    pool: &SqlitePool,
+    query_id: i64,
+    keep: &[(String, String, i64)],
+) -> Result<u64> {
+    use std::collections::HashSet;
+    let keep_set: HashSet<(&str, &str, i64)> = keep
+        .iter()
+        .map(|(owner, name, number)| (owner.as_str(), name.as_str(), *number))
+        .collect();
+
+    let existing = sqlx::query!(
+        r#"SELECT id AS "id!: i64", repo_owner, repo_name, number FROM items WHERE query_id = ?"#,
+        query_id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let stale_ids: Vec<i64> = existing
+        .into_iter()
+        .filter(|r| {
+            !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number))
+        })
+        .map(|r| r.id)
+        .collect();
+
+    if stale_ids.is_empty() {
+        return Ok(0);
+    }
+
+    // Chunk to stay under SQLite's bound-variable limit on large prunes.
+    let mut deleted = 0u64;
+    for chunk in stale_ids.chunks(900) {
+        let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> =
+            sqlx::QueryBuilder::new("DELETE FROM items WHERE id IN (");
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(")");
+        deleted += qb.build().execute(pool).await?.rows_affected();
+    }
+    Ok(deleted)
+}
+
 pub async fn mark_query_viewed(pool: &SqlitePool, query_id: i64) -> Result<()> {
     sqlx::query!(
         "UPDATE queries SET last_viewed_at = datetime('now') WHERE id = ?",
@@ -698,6 +771,71 @@ mod tests {
         // Just fetched → not stale within 5 minutes.
         let stale = is_cache_stale(&pool, qid, 300).await.expect("stale check");
         assert!(!stale);
+    }
+
+    #[tokio::test]
+    async fn updated_since_none_until_fetched_then_rfc3339() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:open", "issue", None)
+            .await
+            .expect("upsert query");
+
+        // Never fetched → None (caller does a full fetch).
+        assert_eq!(updated_since(&pool, qid, 600).await.expect("since"), None);
+
+        mark_fetched(&pool, qid).await.expect("mark fetched");
+        let since = updated_since(&pool, qid, 600)
+            .await
+            .expect("since")
+            .expect("some after fetch");
+        // RFC3339 UTC shape: "YYYY-MM-DDTHH:MM:SSZ".
+        assert_eq!(since.len(), 20, "{since}");
+        assert!(since.contains('T') && since.ends_with('Z'), "{since}");
+    }
+
+    #[tokio::test]
+    async fn prune_removes_only_items_absent_from_keep() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+        for n in 1..=3 {
+            upsert_item(&pool, &make_item(qid, n, &format!("PR {n}")))
+                .await
+                .expect("upsert");
+        }
+
+        // Keep only #1 and #3 (make_item uses owner="owner", repo="repo").
+        let keep = vec![
+            ("owner".to_string(), "repo".to_string(), 1),
+            ("owner".to_string(), "repo".to_string(), 3),
+        ];
+        let deleted = prune_query_items(&pool, qid, &keep).await.expect("prune");
+        assert_eq!(deleted, 1);
+
+        let mut remaining: Vec<i64> = fetch_items(&pool, qid)
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|i| i.number)
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn prune_with_empty_keep_deletes_all() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+        upsert_item(&pool, &make_item(qid, 1, "PR 1"))
+            .await
+            .expect("upsert");
+
+        let deleted = prune_query_items(&pool, qid, &[]).await.expect("prune");
+        assert_eq!(deleted, 1);
+        assert_eq!(fetch_items(&pool, qid).await.expect("fetch").len(), 0);
     }
 
     #[tokio::test]

@@ -179,17 +179,36 @@ pub(crate) fn apply_default_sort(query: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Append `updated:>=<since>` to `query` for an incremental fetch, unless the
+/// query already constrains `updated:` (then the user's choice is preserved) or
+/// `since` is `None` (a full fetch).
+pub(crate) fn apply_updated_since<'a>(
+    query: &'a str,
+    since: Option<&str>,
+) -> std::borrow::Cow<'a, str> {
+    match since {
+        Some(since) if !query.contains("updated:") => {
+            std::borrow::Cow::Owned(format!("{query} updated:>={since}"))
+        }
+        _ => std::borrow::Cow::Borrowed(query),
+    }
+}
+
 /// Fetch a single page of GitHub search results using GraphQL.
 ///
 /// Pass `after: None` for the first page, then `Some(end_cursor)` for subsequent pages.
+/// `since` (RFC3339 UTC) narrows the fetch to items updated at/after that time for
+/// incremental syncs; `None` fetches the full result set.
 /// GraphQL gives us `reviewRequests` in a single round-trip.
 pub async fn search_page(
     client: &Octocrab,
     query_id: i64,
     query: &str,
+    since: Option<&str>,
     after: Option<&str>,
 ) -> Result<SearchPageResult> {
-    let effective_query = apply_default_sort(query);
+    let with_since = apply_updated_since(query, since);
+    let effective_query = apply_default_sort(&with_since);
 
     let payload = serde_json::json!({
         "query": search_query(),
@@ -594,6 +613,25 @@ mod tests {
         let q = "is:issue sort:updated-asc";
         let result = apply_default_sort(q);
         assert_eq!(result, q);
+    }
+
+    #[test]
+    fn apply_updated_since_appends_when_set() {
+        let result = apply_updated_since("is:pr is:open", Some("2026-06-19T00:00:00Z"));
+        assert_eq!(result, "is:pr is:open updated:>=2026-06-19T00:00:00Z");
+    }
+
+    #[test]
+    fn apply_updated_since_none_is_full_fetch() {
+        let q = "is:pr is:open";
+        assert_eq!(apply_updated_since(q, None), q);
+    }
+
+    #[test]
+    fn apply_updated_since_respects_user_updated_qualifier() {
+        let q = "is:pr updated:>2026-01-01";
+        // User already constrains `updated:` — leave their query untouched.
+        assert_eq!(apply_updated_since(q, Some("2026-06-19T00:00:00Z")), q);
     }
 
     // ── node_to_cached_item: None cases ──────────────────────────────────────────

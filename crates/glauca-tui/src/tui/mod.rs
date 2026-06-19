@@ -258,6 +258,8 @@ enum Action {
     ReviewOctorus,
     RefreshList,
     RefreshItem,
+    /// Force a full re-fetch + prune of the selected query (`S`).
+    FullResync,
     /// Apply held-back background-sync results to the visible list (`u`).
     ApplyPending,
 }
@@ -442,6 +444,10 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                 && app.selected_item().is_some() =>
         {
             return Action::RefreshItem;
+        }
+        // Force a full re-fetch + prune of the selected query.
+        KeyCode::Char('S') => {
+            return Action::FullResync;
         }
 
         // Apply held-back background updates to the visible list.
@@ -1028,6 +1034,31 @@ async fn refresh_selected_list(app: &mut App, engine: &Engine) {
     app.syncing = true;
 }
 
+/// Force a full re-fetch of the selected entry's root query (ignores
+/// `last_fetched_at`): re-pages everything and prunes cached items that no longer
+/// match the query.
+async fn full_resync_selected(app: &mut App, engine: &Engine) {
+    let Some((root_id, highlight_since)) = app
+        .entries
+        .get(app.entry_cursor)
+        .map(|e| (e.root_query_id(), e.last_viewed_at().map(str::to_string)))
+    else {
+        return;
+    };
+    let Some(query_str) = root_query_str(app, root_id) else {
+        app.status = Some("Nothing to resync".into());
+        return;
+    };
+    engine
+        .send(EngineCommand::FullResync {
+            query_id: root_id,
+            query_str,
+            highlight_since,
+        })
+        .await;
+    app.syncing = true;
+}
+
 /// Re-fetch just the selected item from GitHub into its query's cache.
 async fn refresh_selected_item(app: &mut App, engine: &Engine) {
     let Some(item) = app.selected_item().cloned() else {
@@ -1491,6 +1522,9 @@ where
                         }
                         Action::RefreshItem => {
                             refresh_selected_item(&mut app, &engine).await;
+                        }
+                        Action::FullResync => {
+                            full_resync_selected(&mut app, &engine).await;
                         }
                         Action::ApplyPending => {
                             app.apply_pending_items();

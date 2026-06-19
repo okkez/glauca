@@ -352,6 +352,26 @@ pub async fn load_items_task(
     }
 }
 
+/// How a sync runs. `background` drives the front-end's deferred-refresh banner;
+/// `incremental` narrows the fetch to items updated since the last fetch (a full
+/// fetch when false, or when the query was never fetched).
+#[derive(Clone, Copy)]
+pub struct SyncOpts {
+    pub background: bool,
+    pub incremental: bool,
+}
+
+/// Overlap subtracted from `last_fetched_at` when building the incremental
+/// `updated:>=` filter, to tolerate clock skew and updates made while the
+/// previous fetch was in flight (re-fetching the overlap is harmless: upsert is
+/// idempotent). Generous since the background interval is 5 min.
+const INCREMENTAL_OVERLAP_SECS: i64 = 600;
+
+/// GitHub Search returns at most this many results. A full fetch that hits the
+/// cap may be truncated, so we must not prune in that case (we can't tell which
+/// items truly fell out of the query vs. were cut off).
+const SEARCH_RESULT_CAP: usize = 1000;
+
 /// Fetch fresh results from GitHub API page by page, upserting each page immediately
 /// so the UI can show results as they arrive rather than waiting for all pages.
 pub async fn sync_task(
@@ -360,14 +380,45 @@ pub async fn sync_task(
     query_id: i64,
     query_str: String,
     last_viewed_at: Option<String>,
-    background: bool,
+    opts: SyncOpts,
     tx: mpsc::Sender<AppMessage>,
 ) {
+    // Incremental fetches narrow the query to items updated since the last fetch.
+    // `None` means a full fetch — used when never fetched, when forced
+    // (`incremental == false`), or when reading the threshold fails (degrading to
+    // a full fetch is safe, just more work).
+    let since = if opts.incremental {
+        db::updated_since(&pool, query_id, INCREMENTAL_OVERLAP_SECS)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    // A full fetch (no `since`) is the authoritative result set, so we collect
+    // its keys to prune items that no longer match the query. Skipped for
+    // incremental fetches (a partial set can't tell us what fell out).
+    let is_full = since.is_none();
+    let mut keep_keys: Vec<(String, String, i64)> = Vec::new();
+
+    // Reload the query's items from the DB and push them to the UI. Called after
+    // each page (incremental display) and after a prune actually removes rows.
+    let reload = || {
+        load_items_task(
+            pool.clone(),
+            query_id,
+            last_viewed_at.clone(),
+            opts.background,
+            tx.clone(),
+        )
+    };
+
     let mut after: Option<String> = None;
     let mut total_count = 0usize;
 
     loop {
-        let result = github::search_page(&gh, query_id, &query_str, after.as_deref()).await;
+        let result =
+            github::search_page(&gh, query_id, &query_str, since.as_deref(), after.as_deref()).await;
         match result {
             Err(e) => {
                 let _ = tx
@@ -384,6 +435,13 @@ pub async fn sync_task(
 
                 // Upsert this page's items into SQLite.
                 for item in &page.items {
+                    if is_full {
+                        keep_keys.push((
+                            item.repo_owner.clone(),
+                            item.repo_name.clone(),
+                            item.number,
+                        ));
+                    }
                     if let Err(e) = db::upsert_item(&pool, item).await {
                         let _ = tx
                             .send(AppMessage::SyncError {
@@ -397,14 +455,7 @@ pub async fn sync_task(
                 total_count += page.items.len();
 
                 // Reload from DB after each page so the UI shows results immediately.
-                load_items_task(
-                    pool.clone(),
-                    query_id,
-                    last_viewed_at.clone(),
-                    background,
-                    tx.clone(),
-                )
-                .await;
+                reload().await;
 
                 // Stop when GitHub reports no further pages, or defensively if
                 // it claims another page but hands back no cursor to fetch it.
@@ -415,6 +466,23 @@ pub async fn sync_task(
                     break;
                 };
                 after = Some(cursor);
+            }
+        }
+    }
+
+    // After an untruncated full fetch, drop cached items the query no longer
+    // returns (e.g. a PR that was merged and left an `is:open` query). Skipped
+    // when the result hit the cap, since the set may be truncated.
+    if is_full && total_count < SEARCH_RESULT_CAP {
+        match db::prune_query_items(&pool, query_id, &keep_keys).await {
+            // Only reload when rows were actually removed — the final per-page
+            // reload already reflects every upsert.
+            Ok(deleted) if deleted > 0 => reload().await,
+            Ok(_) => {}
+            Err(e) => {
+                let _ = tx
+                    .send(AppMessage::Status(format!("prune error: {e}")))
+                    .await;
             }
         }
     }
@@ -463,7 +531,10 @@ pub async fn sync_worker_task(
                 job.query_id,
                 job.query_str,
                 None,
-                true, // background worker
+                SyncOpts {
+                    background: true,
+                    incremental: true,
+                },
                 tx.clone(),
             )
             .await;
@@ -574,8 +645,16 @@ pub enum EngineCommand {
         query_id: i64,
         highlight_since: Option<String>,
     },
-    /// Unconditional GitHub sync for a root query.
+    /// Unconditional GitHub sync for a root query (incremental: only items
+    /// updated since the last fetch).
     Sync {
+        query_id: i64,
+        query_str: String,
+        highlight_since: Option<String>,
+    },
+    /// Forced full re-fetch of a root query, ignoring `last_fetched_at`. Re-pages
+    /// the whole result set and prunes cached items that no longer match.
+    FullResync {
         query_id: i64,
         query_str: String,
         highlight_since: Option<String>,
@@ -814,7 +893,31 @@ async fn command_loop(
                     query_id,
                     query_str,
                     highlight_since,
-                    false, // user-initiated sync
+                    SyncOpts {
+                        background: false,
+                        incremental: true,
+                    },
+                    msg_tx.clone(),
+                ));
+            }
+            EngineCommand::FullResync {
+                query_id,
+                query_str,
+                highlight_since,
+            } => {
+                // Forced full fetch (incremental: false → no `updated:>=` filter),
+                // which re-pages the whole result set and prunes items that no
+                // longer match. Foreground so it applies live.
+                tokio::spawn(sync_task(
+                    pool.clone(),
+                    gh.clone(),
+                    query_id,
+                    query_str,
+                    highlight_since,
+                    SyncOpts {
+                        background: false,
+                        incremental: false,
+                    },
                     msg_tx.clone(),
                 ));
             }
@@ -832,7 +935,19 @@ async fn command_loop(
                         .unwrap_or(true)
                     {
                         let _ = tx2.send(AppMessage::SyncStarted { query_id }).await;
-                        sync_task(pool2, gh2, query_id, query_str, highlight_since, false, tx2).await;
+                        sync_task(
+                            pool2,
+                            gh2,
+                            query_id,
+                            query_str,
+                            highlight_since,
+                            SyncOpts {
+                                background: false,
+                                incremental: true,
+                            },
+                            tx2,
+                        )
+                        .await;
                     }
                 });
             }
