@@ -137,12 +137,56 @@ query FetchItem($owner: String!, $name: String!, $number: Int!) {{
 
 #[derive(Deserialize)]
 struct GqlResponse {
-    data: GqlData,
+    // Optional: a rate-limited GraphQL response is HTTP 200 with `data: null`
+    // and a top-level `errors` array, so `data` must tolerate being absent.
+    data: Option<GqlData>,
+    #[serde(default)]
+    errors: Vec<GqlError>,
+}
+
+#[derive(Deserialize)]
+struct GqlError {
+    #[serde(rename = "type")]
+    err_type: Option<String>,
+    message: String,
+}
+
+/// True when a GraphQL response carries a primary rate-limit error
+/// (`{"errors":[{"type":"RATE_LIMITED",...}]}`).
+fn is_rate_limited(resp: &GqlResponse) -> bool {
+    resp.errors
+        .iter()
+        .any(|e| e.err_type.as_deref() == Some("RATE_LIMITED"))
 }
 
 #[derive(Deserialize)]
 struct GqlData {
     search: GqlSearchConnection,
+}
+
+/// Why a `search_page` call failed. `RateLimited` is treated specially by the
+/// engine (back off) rather than surfaced as a hard error.
+pub enum SearchError {
+    RateLimited,
+    Other(anyhow::Error),
+}
+
+/// Classify an octocrab error: HTTP 429, or 403 whose message names a rate/abuse
+/// limit, is a rate limit; everything else is a generic failure.
+fn classify_octocrab_error(e: octocrab::Error) -> SearchError {
+    if let octocrab::Error::GitHub { source, .. } = &e {
+        let status = source.status_code.as_u16();
+        let msg = source.message.to_lowercase();
+        let rate_limited = status == 429
+            || (status == 403
+                && (msg.contains("rate limit")
+                    || msg.contains("abuse")
+                    || msg.contains("secondary")));
+        if rate_limited {
+            return SearchError::RateLimited;
+        }
+    }
+    SearchError::Other(anyhow::Error::new(e).context("GraphQL search failed"))
 }
 
 #[derive(Deserialize)]
@@ -206,7 +250,7 @@ pub async fn search_page(
     query: &str,
     since: Option<&str>,
     after: Option<&str>,
-) -> Result<SearchPageResult> {
+) -> std::result::Result<SearchPageResult, SearchError> {
     let with_since = apply_updated_since(query, since);
     let effective_query = apply_default_sort(&with_since);
 
@@ -217,12 +261,27 @@ pub async fn search_page(
             "after": after,
         }
     });
-    let resp: GqlResponse = client
-        .graphql(&payload)
-        .await
-        .context("GraphQL search failed")?;
+    let resp: GqlResponse = match client.graphql(&payload).await {
+        Ok(resp) => resp,
+        Err(e) => return Err(classify_octocrab_error(e)),
+    };
 
-    let conn = resp.data.search;
+    if is_rate_limited(&resp) {
+        return Err(SearchError::RateLimited);
+    }
+    let Some(data) = resp.data else {
+        let detail = resp
+            .errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(SearchError::Other(anyhow::anyhow!(
+            "GraphQL search returned no data: {detail}"
+        )));
+    };
+
+    let conn = data.search;
     let items = conn
         .nodes
         .iter()
@@ -437,6 +496,32 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_graphql_rate_limit_error() {
+        let limited: GqlResponse = serde_json::from_value(serde_json::json!({
+            "data": null,
+            "errors": [{ "type": "RATE_LIMITED", "message": "API rate limit exceeded" }]
+        }))
+        .unwrap();
+        assert!(is_rate_limited(&limited));
+    }
+
+    #[test]
+    fn non_rate_limit_errors_are_not_flagged() {
+        let other: GqlResponse = serde_json::from_value(serde_json::json!({
+            "data": null,
+            "errors": [{ "type": "NOT_FOUND", "message": "Could not resolve" }]
+        }))
+        .unwrap();
+        assert!(!is_rate_limited(&other));
+
+        let ok: GqlResponse = serde_json::from_value(serde_json::json!({
+            "data": { "search": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } }
+        }))
+        .unwrap();
+        assert!(!is_rate_limited(&ok));
+    }
 
     #[test]
     fn node_to_cached_item_issue() {

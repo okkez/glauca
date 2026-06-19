@@ -335,10 +335,13 @@ impl GlaucaApp {
         } = init;
         let pane_state = cx.new(|_| ResizableState::default());
         let detail_text = cx.new(|cx| TextViewState::markdown("", cx));
+        // `sync_interval_secs` is read separately in `main` (passed to the engine);
+        // this view only needs the presentation fields.
         let GuiSettings {
             pane_sizes,
             theme,
             notifications_enabled,
+            ..
         } = GuiSettings::load();
         let mut app = Self {
             engine,
@@ -3268,7 +3271,7 @@ fn main() -> Result<()> {
         }
         let pool = db::open_pool(&db_path).await?;
         let gh = github::build_client()?;
-        Engine::start(pool, gh).await
+        Engine::start(pool, gh, GuiSettings::load().sync_interval_secs).await
     })?;
 
     gpui_platform::application()

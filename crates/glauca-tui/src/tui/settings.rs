@@ -9,12 +9,35 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Default when the settings file omits `sync_interval_secs`. Defined in core so
+/// the GUI and TUI share one default; clamped to `MIN_SYNC_INTERVAL_SECS` by the
+/// engine.
+fn default_sync_interval_secs() -> u64 {
+    glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
+}
+
+// `Default` is implemented manually rather than derived: a derived default would
+// give `sync_interval_secs = 0` (an invalid interval), so it must fall back to
+// the same value as the serde default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiSettings {
     /// Whether desktop notifications fire when a background sync surfaces new or
     /// updated items. Defaults to `false` (opt-in).
     #[serde(default)]
     pub notifications_enabled: bool,
+    /// Background auto-sync interval (seconds). Defaults to
+    /// `DEFAULT_SYNC_INTERVAL_SECS`; the engine clamps it to a sane minimum.
+    #[serde(default = "default_sync_interval_secs")]
+    pub sync_interval_secs: u64,
+}
+
+impl Default for TuiSettings {
+    fn default() -> Self {
+        Self {
+            notifications_enabled: false,
+            sync_interval_secs: default_sync_interval_secs(),
+        }
+    }
 }
 
 impl TuiSettings {
@@ -62,15 +85,20 @@ mod tests {
 
     #[test]
     fn legacy_empty_file_loads_as_off() {
-        // A file predating the field (or an empty one) must fill the default.
+        // A file predating the fields (or an empty one) must fill the defaults.
         let s: TuiSettings = toml::from_str("").unwrap();
         assert!(!s.notifications_enabled);
+        assert_eq!(
+            s.sync_interval_secs,
+            glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
+        );
     }
 
     #[test]
     fn notifications_round_trip() {
         let settings = TuiSettings {
             notifications_enabled: true,
+            ..Default::default()
         };
         let serialized = toml::to_string(&settings).unwrap();
         assert!(
@@ -79,5 +107,20 @@ mod tests {
         );
         let back: TuiSettings = toml::from_str(&serialized).unwrap();
         assert!(back.notifications_enabled);
+    }
+
+    #[test]
+    fn sync_interval_defaults_and_round_trips() {
+        assert_eq!(
+            TuiSettings::default().sync_interval_secs,
+            glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
+        );
+        let settings = TuiSettings {
+            sync_interval_secs: 120,
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&settings).unwrap();
+        let back: TuiSettings = toml::from_str(&serialized).unwrap();
+        assert_eq!(back.sync_interval_secs, 120);
     }
 }

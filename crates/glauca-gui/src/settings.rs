@@ -23,7 +23,17 @@ pub enum ThemePreference {
     Dark,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Default when the settings file omits `sync_interval_secs`. Defined in core so
+/// the GUI and TUI share one default; clamped to `MIN_SYNC_INTERVAL_SECS` by the
+/// engine.
+fn default_sync_interval_secs() -> u64 {
+    glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
+}
+
+// `Default` is implemented manually rather than derived: a derived default would
+// give `sync_interval_secs = 0` (an invalid interval), so it must fall back to
+// the same value as the serde default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuiSettings {
     /// Pixel widths of the resizable panes, left-to-right. Empty until the
     /// user drags a divider for the first time.
@@ -36,6 +46,21 @@ pub struct GuiSettings {
     /// updated items. Defaults to `false` (opt-in).
     #[serde(default)]
     pub notifications_enabled: bool,
+    /// Background auto-sync interval (seconds). Defaults to
+    /// `DEFAULT_SYNC_INTERVAL_SECS`; the engine clamps it to a sane minimum.
+    #[serde(default = "default_sync_interval_secs")]
+    pub sync_interval_secs: u64,
+}
+
+impl Default for GuiSettings {
+    fn default() -> Self {
+        Self {
+            pane_sizes: Vec::new(),
+            theme: ThemePreference::default(),
+            notifications_enabled: false,
+            sync_interval_secs: default_sync_interval_secs(),
+        }
+    }
 }
 
 impl GuiSettings {
@@ -90,6 +115,26 @@ mod tests {
         assert_eq!(s.theme, ThemePreference::System);
         assert!(!s.notifications_enabled);
         assert_eq!(s.pane_sizes, vec![280.0, 0.0, 440.0]);
+        // Absent `sync_interval_secs` must fall back to the shared default, not 0.
+        assert_eq!(
+            s.sync_interval_secs,
+            glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn sync_interval_defaults_and_round_trips() {
+        assert_eq!(
+            GuiSettings::default().sync_interval_secs,
+            glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
+        );
+        let settings = GuiSettings {
+            sync_interval_secs: 120,
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&settings).unwrap();
+        let back: GuiSettings = toml::from_str(&serialized).unwrap();
+        assert_eq!(back.sync_interval_secs, 120);
     }
 
     #[test]

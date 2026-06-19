@@ -8,9 +8,12 @@ use crate::types::{
     CommentEntry, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
 use crate::{db, github};
+use chrono::Utc;
 use octocrab::Octocrab;
 use sqlx::SqlitePool;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::mpsc;
 
 // ── Background messages ──────────────────────────────────────────────────────
@@ -374,6 +377,7 @@ const SEARCH_RESULT_CAP: usize = 1000;
 
 /// Fetch fresh results from GitHub API page by page, upserting each page immediately
 /// so the UI can show results as they arrive rather than waiting for all pages.
+#[allow(clippy::too_many_arguments)] // pool/gh/ids/opts/tx/gate are all genuinely needed
 pub async fn sync_task(
     pool: SqlitePool,
     gh: Octocrab,
@@ -382,6 +386,7 @@ pub async fn sync_task(
     last_viewed_at: Option<String>,
     opts: SyncOpts,
     tx: mpsc::Sender<AppMessage>,
+    gate: RateLimitGate,
 ) {
     // Incremental fetches narrow the query to items updated since the last fetch.
     // `None` means a full fetch — used when never fetched, when forced
@@ -420,7 +425,21 @@ pub async fn sync_task(
         let result =
             github::search_page(&gh, query_id, &query_str, since.as_deref(), after.as_deref()).await;
         match result {
-            Err(e) => {
+            Err(github::SearchError::RateLimited) => {
+                // Pause background sync until the limit resets; surface a notice
+                // rather than a hard error so the UI doesn't look broken.
+                let now = Utc::now().timestamp();
+                let until = backoff_until(&gh, now).await;
+                gate.block_until(until);
+                let _ = tx
+                    .send(AppMessage::Status(format!(
+                        "GitHub rate limited; auto-sync paused ~{}s",
+                        (until - now).max(0)
+                    )))
+                    .await;
+                return;
+            }
+            Err(github::SearchError::Other(e)) => {
                 let _ = tx
                     .send(AppMessage::SyncError {
                         query_id,
@@ -507,9 +526,70 @@ pub async fn sync_task(
 
 // ── Background sync worker & refresh timer ────────────────────────────────────
 
-/// Auto-refresh interval and cache staleness threshold (seconds).
-const BG_SYNC_INTERVAL_SECS: u64 = 300;
-pub const CACHE_STALE_SECS: i64 = 300;
+/// Default background auto-refresh interval / cache-staleness threshold, used
+/// when the front-end's settings file doesn't specify one.
+pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 60;
+/// Floor for the configured interval: avoids hammering the GitHub API and a
+/// zero-duration `tokio::time::interval` (which panics).
+pub const MIN_SYNC_INTERVAL_SECS: u64 = 10;
+/// Fallback backoff when a rate limit is hit but no reset time is available
+/// (e.g. a secondary/abuse limit, where `/rate_limit` still shows remaining>0).
+pub const DEFAULT_RATELIMIT_BACKOFF_SECS: i64 = 60;
+
+/// Clamp a configured interval to at least `MIN_SYNC_INTERVAL_SECS`.
+pub fn effective_interval(secs: u64) -> u64 {
+    secs.max(MIN_SYNC_INTERVAL_SECS)
+}
+
+/// Shared, cloneable gate that pauses background sync after a rate limit is hit.
+/// Holds the unix epoch (seconds) until which background work should be skipped;
+/// `0` means open (not limited).
+#[derive(Clone, Default)]
+pub struct RateLimitGate {
+    until: Arc<AtomicI64>,
+}
+
+impl RateLimitGate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True when background sync may proceed (not currently rate-limited).
+    pub fn is_open(&self, now: i64) -> bool {
+        now >= self.until.load(Ordering::Relaxed)
+    }
+
+    /// Pause background sync until `epoch` (unix seconds).
+    pub fn block_until(&self, epoch: i64) {
+        self.until.store(epoch, Ordering::Relaxed);
+    }
+
+    /// Seconds remaining until the gate reopens (0 when already open).
+    pub fn remaining_secs(&self, now: i64) -> i64 {
+        (self.until.load(Ordering::Relaxed) - now).max(0)
+    }
+}
+
+/// Resolve the unix epoch to back off until after a rate limit. Reads the free
+/// REST `/rate_limit` endpoint (no quota cost): if the GraphQL resource is
+/// exhausted, use its `reset`; otherwise (a secondary/abuse limit) fall back to
+/// a fixed cooldown. Any failure also falls back to the fixed cooldown.
+async fn backoff_until(gh: &Octocrab, now: i64) -> i64 {
+    // Used when there's no usable reset time: a secondary/abuse limit (which
+    // leaves the GraphQL quota with remaining>0) or a failed `/rate_limit` read.
+    let fixed_cooldown = now + DEFAULT_RATELIMIT_BACKOFF_SECS;
+    match gh.ratelimit().get().await {
+        Ok(rl) => {
+            let graphql = rl.resources.graphql.unwrap_or(rl.rate);
+            if graphql.remaining == 0 {
+                graphql.reset as i64
+            } else {
+                fixed_cooldown
+            }
+        }
+        Err(_) => fixed_cooldown,
+    }
+}
 
 /// Processes `SyncJob`s sequentially, skipping jobs whose cache is already fresh.
 /// Sends `BgSyncJobDone` after each job (regardless of outcome) so the UI counter
@@ -519,9 +599,17 @@ pub async fn sync_worker_task(
     gh: Octocrab,
     mut rx: mpsc::Receiver<SyncJob>,
     tx: mpsc::Sender<AppMessage>,
+    stale_secs: i64,
+    gate: RateLimitGate,
 ) {
     while let Some(job) = rx.recv().await {
-        let stale = db::is_cache_stale(&pool, job.query_id, CACHE_STALE_SECS)
+        // Skip (don't hit the API) while rate-limited; the query stays stale and
+        // will be re-enqueued once the gate reopens.
+        if !gate.is_open(Utc::now().timestamp()) {
+            let _ = tx.send(AppMessage::BgSyncJobDone).await;
+            continue;
+        }
+        let stale = db::is_cache_stale(&pool, job.query_id, stale_secs)
             .await
             .unwrap_or(true);
         if stale {
@@ -536,6 +624,7 @@ pub async fn sync_worker_task(
                     incremental: true,
                 },
                 tx.clone(),
+                gate.clone(),
             )
             .await;
         }
@@ -551,14 +640,20 @@ async fn enqueue_stale_queries(
     sync_tx: &mpsc::Sender<SyncJob>,
     app_tx: &mpsc::Sender<AppMessage>,
     skip_query_id: Option<i64>,
+    stale_secs: i64,
+    gate: &RateLimitGate,
 ) {
+    // Don't fill the queue while rate-limited; the timer will try again later.
+    if !gate.is_open(Utc::now().timestamp()) {
+        return;
+    }
     let queries = db::list_queries(pool).await.unwrap_or_default();
     let mut count = 0usize;
     for q in queries {
         if Some(q.id) == skip_query_id {
             continue;
         }
-        if db::is_cache_stale(pool, q.id, CACHE_STALE_SECS)
+        if db::is_cache_stale(pool, q.id, stale_secs)
             .await
             .unwrap_or(true)
         {
@@ -576,18 +671,21 @@ async fn enqueue_stale_queries(
     }
 }
 
-/// Every `BG_SYNC_INTERVAL_SECS`, enqueues all stale queries to the worker.
+/// Every `interval_secs`, enqueues all stale queries to the worker. The same
+/// value is used as the staleness threshold, so a query syncs roughly every
+/// `interval_secs`.
 pub async fn refresh_timer_task(
     pool: SqlitePool,
     sync_tx: mpsc::Sender<SyncJob>,
     app_tx: mpsc::Sender<AppMessage>,
+    interval_secs: u64,
+    gate: RateLimitGate,
 ) {
-    let mut interval =
-        tokio::time::interval(tokio::time::Duration::from_secs(BG_SYNC_INTERVAL_SECS));
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
     interval.tick().await; // skip the immediate first tick
     loop {
         interval.tick().await;
-        enqueue_stale_queries(&pool, &sync_tx, &app_tx, None).await;
+        enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, interval_secs as i64, &gate).await;
     }
 }
 
@@ -772,7 +870,11 @@ impl Engine {
     /// Build the initial left-pane entries, resolve the current user, spawn the
     /// background worker / refresh timer / command loop, and return the engine
     /// handle plus the initial state.
-    pub async fn start(pool: SqlitePool, gh: Octocrab) -> anyhow::Result<(Engine, EngineInit)> {
+    pub async fn start(
+        pool: SqlitePool,
+        gh: Octocrab,
+        sync_interval_secs: u64,
+    ) -> anyhow::Result<(Engine, EngineInit)> {
         let query_rows = db::list_queries(&pool).await.unwrap_or_default();
         let mut entries: Vec<LeftPaneEntry> = Vec::new();
         for r in query_rows {
@@ -809,21 +911,34 @@ impl Engine {
         let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(64);
 
+        // One interval drives both the timer tick and the staleness threshold, so
+        // a query syncs roughly every `interval` seconds.
+        let interval = effective_interval(sync_interval_secs);
+        let stale = interval as i64;
+        // Shared gate that pauses background sync after a rate limit is hit.
+        let gate = RateLimitGate::new();
+
         // Spawn the sequential background sync worker.
         tokio::spawn(sync_worker_task(
             pool.clone(),
             gh.clone(),
             sync_job_rx,
             msg_tx.clone(),
+            stale,
+            gate.clone(),
         ));
         // Spawn the periodic refresh timer.
         tokio::spawn(refresh_timer_task(
             pool.clone(),
             sync_job_tx.clone(),
             msg_tx.clone(),
+            interval,
+            gate.clone(),
         ));
         // Spawn the command-handling loop.
-        tokio::spawn(command_loop(pool, gh, cmd_rx, msg_tx, sync_job_tx));
+        tokio::spawn(command_loop(
+            pool, gh, cmd_rx, msg_tx, sync_job_tx, stale, gate,
+        ));
 
         Ok((
             Engine { cmd_tx, msg_rx },
@@ -867,6 +982,8 @@ async fn command_loop(
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
     msg_tx: mpsc::Sender<AppMessage>,
     sync_tx: mpsc::Sender<SyncJob>,
+    stale_secs: i64,
+    gate: RateLimitGate,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -898,6 +1015,7 @@ async fn command_loop(
                         incremental: true,
                     },
                     msg_tx.clone(),
+                    gate.clone(),
                 ));
             }
             EngineCommand::FullResync {
@@ -919,6 +1037,7 @@ async fn command_loop(
                         incremental: false,
                     },
                     msg_tx.clone(),
+                    gate.clone(),
                 ));
             }
             EngineCommand::SyncIfStale {
@@ -929,8 +1048,9 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let gh2 = gh.clone();
                 let tx2 = msg_tx.clone();
+                let gate2 = gate.clone();
                 tokio::spawn(async move {
-                    if db::is_cache_stale(&pool2, query_id, CACHE_STALE_SECS)
+                    if db::is_cache_stale(&pool2, query_id, stale_secs)
                         .await
                         .unwrap_or(true)
                     {
@@ -946,6 +1066,7 @@ async fn command_loop(
                                 incremental: true,
                             },
                             tx2,
+                            gate2,
                         )
                         .await;
                     }
@@ -1004,8 +1125,10 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let sync_tx2 = sync_tx.clone();
                 let tx2 = msg_tx.clone();
+                let gate2 = gate.clone();
                 tokio::spawn(async move {
-                    enqueue_stale_queries(&pool2, &sync_tx2, &tx2, skip_query_id).await;
+                    enqueue_stale_queries(&pool2, &sync_tx2, &tx2, skip_query_id, stale_secs, &gate2)
+                        .await;
                 });
             }
             EngineCommand::AddQuery { name, query } => {
@@ -1274,4 +1397,35 @@ async fn mark_filtered_items_read(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_interval_clamps_to_floor() {
+        assert_eq!(effective_interval(0), MIN_SYNC_INTERVAL_SECS);
+        assert_eq!(effective_interval(5), MIN_SYNC_INTERVAL_SECS);
+        assert_eq!(effective_interval(60), 60);
+        assert_eq!(effective_interval(120), 120);
+    }
+
+    #[test]
+    fn rate_limit_gate_opens_and_blocks() {
+        let gate = RateLimitGate::new();
+        // A fresh gate is open and has no wait.
+        assert!(gate.is_open(1000));
+        assert_eq!(gate.remaining_secs(1000), 0);
+
+        gate.block_until(1100);
+        assert!(!gate.is_open(1000));
+        assert_eq!(gate.remaining_secs(1000), 100);
+        // Exactly at the reset it reopens.
+        assert!(gate.is_open(1100));
+        assert_eq!(gate.remaining_secs(1100), 0);
+        // Past the reset it stays open with no negative wait.
+        assert!(gate.is_open(1200));
+        assert_eq!(gate.remaining_secs(1200), 0);
+    }
 }

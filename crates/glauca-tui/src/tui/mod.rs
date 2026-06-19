@@ -1196,7 +1196,8 @@ where
 {
     // Start the async engine: builds the left-pane entries, resolves the current
     // user, and spawns the background worker / refresh timer / command loop.
-    let (mut engine, init) = Engine::start(pool, gh).await?;
+    let tui_settings = TuiSettings::load();
+    let (mut engine, init) = Engine::start(pool, gh, tui_settings.sync_interval_secs).await?;
 
     // Build App from the engine's initial entries (filter streams interleaved).
     let queries: Vec<QueryEntry> = init
@@ -1210,7 +1211,7 @@ where
     let mut app = App::new(queries);
     app.entries = init.entries;
     app.current_user = init.current_user;
-    app.notifications_enabled = TuiSettings::load().notifications_enabled;
+    app.notifications_enabled = tui_settings.notifications_enabled;
 
     // Prime unread counts for every root query via a cached load (no sync).
     let root_query_ids: Vec<i64> = app
