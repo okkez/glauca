@@ -158,7 +158,10 @@ mod tests {
         assert_eq!(tracker.changed_count_to_notify(7, &base, true, true), None);
         // A foreground load (not background) never notifies, but still updates
         // the baseline so the next diff is against `grown`.
-        assert_eq!(tracker.changed_count_to_notify(7, &grown, false, true), None);
+        assert_eq!(
+            tracker.changed_count_to_notify(7, &grown, false, true),
+            None
+        );
         // No new items now (same set) => nothing to notify.
         assert_eq!(tracker.changed_count_to_notify(7, &grown, true, true), None);
         // A genuinely new item with bg+enabled => notify with its count.
@@ -167,7 +170,10 @@ mod tests {
             item("o", "r", 2, "t1"),
             item("o", "r", 3, "t1"),
         ];
-        assert_eq!(tracker.changed_count_to_notify(7, &more, true, true), Some(1));
+        assert_eq!(
+            tracker.changed_count_to_notify(7, &more, true, true),
+            Some(1)
+        );
         // Disabled => no notification even when items change.
         let evenmore = [
             item("o", "r", 1, "t1"),

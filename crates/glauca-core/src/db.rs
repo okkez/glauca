@@ -115,12 +115,14 @@ pub async fn swap_filter_stream_positions(
     upper_id: i64,
     lower_id: i64,
 ) -> Result<()> {
-    let upper_pos = sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", upper_id)
-        .fetch_one(pool)
-        .await?;
-    let lower_pos = sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", lower_id)
-        .fetch_one(pool)
-        .await?;
+    let upper_pos =
+        sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", upper_id)
+            .fetch_one(pool)
+            .await?;
+    let lower_pos =
+        sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", lower_id)
+            .fetch_one(pool)
+            .await?;
     sqlx::query!(
         "UPDATE filter_streams SET position = ? WHERE id = ?",
         lower_pos,
@@ -192,12 +194,20 @@ pub async fn swap_query_positions(pool: &SqlitePool, upper_id: i64, lower_id: i6
     let lower_pos = sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", lower_id)
         .fetch_one(pool)
         .await?;
-    sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", lower_pos, upper_id)
-        .execute(pool)
-        .await?;
-    sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", upper_pos, lower_id)
-        .execute(pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE queries SET position = ? WHERE id = ?",
+        lower_pos,
+        upper_id
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query!(
+        "UPDATE queries SET position = ? WHERE id = ?",
+        upper_pos,
+        lower_id
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -288,9 +298,7 @@ pub async fn prune_query_items(
 
     let stale_ids: Vec<i64> = existing
         .into_iter()
-        .filter(|r| {
-            !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number))
-        })
+        .filter(|r| !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number)))
         .map(|r| r.id)
         .collect();
 
@@ -693,7 +701,10 @@ mod tests {
         let items = fetch_items(&pool, qid).await.expect("fetch items");
         assert_eq!(items.len(), 1);
         assert!(items[0].repo_private);
-        assert_eq!(items[0].author_avatar_url.as_deref(), Some("https://a/alice.png"));
+        assert_eq!(
+            items[0].author_avatar_url.as_deref(),
+            Some("https://a/alice.png")
+        );
 
         // Re-syncing the same item refreshes both fields (DO UPDATE SET).
         item.repo_private = false;
@@ -703,7 +714,10 @@ mod tests {
         let items = fetch_items(&pool, qid).await.expect("fetch items");
         assert_eq!(items.len(), 1);
         assert!(!items[0].repo_private);
-        assert_eq!(items[0].author_avatar_url.as_deref(), Some("https://a/alice2.png"));
+        assert_eq!(
+            items[0].author_avatar_url.as_deref(),
+            Some("https://a/alice2.png")
+        );
     }
 
     #[tokio::test]

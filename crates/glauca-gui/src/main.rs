@@ -18,11 +18,13 @@ use anyhow::Result;
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{
-    compute_unread_counts, count_changed, expand_me, group_range, is_item_new_since,
-    move_group_down, query_label, reviewer_overlays, ReviewState,
+    ReviewState, compute_unread_counts, count_changed, expand_me, group_range, is_item_new_since,
+    move_group_down, query_label, reviewer_overlays,
 };
 use glauca_core::notify::ItemTracker;
-use glauca_core::types::{CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, UserRef};
+use glauca_core::types::{
+    CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, UserRef,
+};
 use glauca_core::{db, github};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -31,11 +33,11 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::radio::RadioGroup;
-use gpui_component::text::{markdown, TextView, TextViewState};
-use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
+use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
+use gpui_component::text::{TextView, TextViewState, markdown};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme, Root, Sizable, StyledExt, Theme, ThemeMode, WindowExt,
+    ActiveTheme, Root, Sizable, StyledExt, Theme, ThemeMode, WindowExt, h_flex, v_flex,
 };
 use smol::Timer;
 use tokio::sync::mpsc::Sender;
@@ -95,19 +97,15 @@ fn pane_frame(focused: bool, content: impl IntoElement, cx: &App) -> Div {
     } else {
         cx.theme().border
     };
-    v_flex()
-        .size_full()
-        .border_t_1()
-        .border_color(top)
-        .child(
-            v_flex()
-                .size_full()
-                .border_l_1()
-                .border_r_1()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .child(content),
-        )
+    v_flex().size_full().border_t_1().border_color(top).child(
+        v_flex()
+            .size_full()
+            .border_l_1()
+            .border_r_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(content),
+    )
 }
 
 gpui::actions!(
@@ -469,11 +467,21 @@ impl GlaucaApp {
         cx.notify();
     }
 
-    fn on_set_theme_system(&mut self, _: &SetThemeSystem, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_set_theme_system(
+        &mut self,
+        _: &SetThemeSystem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.set_theme(ThemePreference::System, window, cx);
     }
 
-    fn on_set_theme_light(&mut self, _: &SetThemeLight, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_set_theme_light(
+        &mut self,
+        _: &SetThemeLight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.set_theme(ThemePreference::Light, window, cx);
     }
 
@@ -537,7 +545,9 @@ impl GlaucaApp {
     }
 
     fn selected_root_query_id(&self) -> Option<i64> {
-        self.entries.get(self.entry_cursor).map(|e| e.root_query_id())
+        self.entries
+            .get(self.entry_cursor)
+            .map(|e| e.root_query_id())
     }
 
     /// Display name of the selected left-pane entry (query label or stream name),
@@ -659,7 +669,12 @@ impl GlaucaApp {
             // near the last pointer position (same PopupMenu as right-click).
             Focus::ItemList | Focus::ItemDetail => {
                 if let Some(item) = self.selected_item() {
-                    self.open_menu(self.last_pointer, MenuKind::Item(Box::new(item)), window, cx);
+                    self.open_menu(
+                        self.last_pointer,
+                        MenuKind::Item(Box::new(item)),
+                        window,
+                        cx,
+                    );
                 }
             }
         }
@@ -690,7 +705,12 @@ impl GlaucaApp {
 
     /// `o` — open the selected item in the browser (only from the item list,
     /// mirroring the TUI). Also available via the action menu.
-    fn on_open_in_browser(&mut self, _: &OpenInBrowser, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn on_open_in_browser(
+        &mut self,
+        _: &OpenInBrowser,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         if self.focus == Focus::QueryList {
             return;
         }
@@ -1062,7 +1082,12 @@ impl GlaucaApp {
     }
 
     /// Open the "add filter stream" form parented to the entry at `index`'s root query.
-    fn new_filter_stream_under(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn new_filter_stream_under(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(entry) = self.entries.get(index) else {
             return;
         };
@@ -1132,7 +1157,11 @@ impl GlaucaApp {
                 .default_value(init_query)
         });
         let this = cx.weak_entity();
-        let title = if edit.is_some() { "Edit query" } else { "Add query" };
+        let title = if edit.is_some() {
+            "Edit query"
+        } else {
+            "Add query"
+        };
         window.open_dialog(cx, move |dlg, _w, _cx| {
             let (name_c, query_c) = (name.clone(), query.clone());
             let (name_ok, query_ok) = (name.clone(), query.clone());
@@ -1153,11 +1182,9 @@ impl GlaucaApp {
                         let name = if n.is_empty() { None } else { Some(n) };
                         if let Some(app) = this.upgrade() {
                             app.update(cx, |app, _| match edit {
-                                Some(id) => app.send(EngineCommand::EditQuery {
-                                    id,
-                                    name,
-                                    query: q,
-                                }),
+                                Some(id) => {
+                                    app.send(EngineCommand::EditQuery { id, name, query: q })
+                                }
                                 None => app.send(EngineCommand::AddQuery { name, query: q }),
                             });
                         }
@@ -1314,7 +1341,9 @@ impl GlaucaApp {
         cx: &mut Context<Self>,
     ) {
         let app = cx.entity();
-        let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| populate_menu(menu, &app, kind));
+        let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
+            populate_menu(menu, &app, kind)
+        });
         cx.subscribe(&menu, |this, _menu, _e: &DismissEvent, cx| {
             this.menu = None;
             cx.notify();
@@ -1361,7 +1390,12 @@ impl GlaucaApp {
         }
     }
 
-    fn open_comment_dialog(&mut self, item: ItemEntry, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_comment_dialog(
+        &mut self,
+        item: ItemEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let body = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -1374,7 +1408,8 @@ impl GlaucaApp {
             let body_ok = body.clone();
             let this = this.clone();
             let item = item.clone();
-            dlg.title("Comment").w(px(560.))
+            dlg.title("Comment")
+                .w(px(560.))
                 .content(move |content, _w, _cx| content.child(Input::new(&body_c).h(px(220.))))
                 .on_ok(move |_, _w, cx| {
                     let b = body_ok.read(cx).value().to_string();
@@ -1414,77 +1449,87 @@ impl GlaucaApp {
             let body_submit = body.clone();
             let this = this.clone();
             let item = item.clone();
-            dlg.title("Submit review").w(px(560.)).content(move |content, _w, cx| {
-                // Radio order ⇄ ReviewEvent: 0 Comment, 1 Approve, 2 Request changes.
-                let selected = this.upgrade().map(|app| match app.read(cx).review_action {
-                    ReviewEvent::Comment => 0,
-                    ReviewEvent::Approve => 1,
-                    ReviewEvent::RequestChanges => 2,
-                });
-                let radios = RadioGroup::horizontal("review-action")
-                    .children(["Comment", "Approve", "Request changes"])
-                    .selected_index(selected)
-                    .on_click({
-                        let this = this.clone();
-                        move |ix, _w, cx| {
-                            let event = match *ix {
-                                0 => ReviewEvent::Comment,
-                                2 => ReviewEvent::RequestChanges,
-                                _ => ReviewEvent::Approve,
-                            };
-                            if let Some(app) = this.upgrade() {
-                                app.update(cx, |app, cx| {
-                                    app.review_action = event;
-                                    cx.notify();
-                                });
-                            }
-                        }
+            dlg.title("Submit review")
+                .w(px(560.))
+                .content(move |content, _w, cx| {
+                    // Radio order ⇄ ReviewEvent: 0 Comment, 1 Approve, 2 Request changes.
+                    let selected = this.upgrade().map(|app| match app.read(cx).review_action {
+                        ReviewEvent::Comment => 0,
+                        ReviewEvent::Approve => 1,
+                        ReviewEvent::RequestChanges => 2,
                     });
-                let buttons = h_flex()
-                    .w_full()
-                    .justify_end()
-                    .gap_2()
-                    .child(Button::new("review-cancel").ghost().label("Cancel").on_click(
-                        move |_, window, cx| {
-                            window.close_dialog(cx);
-                        },
-                    ))
-                    .child(Button::new("review-submit").primary().label("Submit review").on_click({
-                        let this = this.clone();
-                        let item = item.clone();
-                        let body_submit = body_submit.clone();
-                        move |_, window, cx| {
-                            let Some(app) = this.upgrade() else { return };
-                            let event = app.read(cx).review_action;
-                            let b = body_submit.read(cx).value().trim().to_string();
-                            // gh requires a body for comment / request-changes reviews.
-                            if event.requires_body() && b.is_empty() {
-                                app.update(cx, |app, cx| {
-                                    app.status = Some(
+                    let radios = RadioGroup::horizontal("review-action")
+                        .children(["Comment", "Approve", "Request changes"])
+                        .selected_index(selected)
+                        .on_click({
+                            let this = this.clone();
+                            move |ix, _w, cx| {
+                                let event = match *ix {
+                                    0 => ReviewEvent::Comment,
+                                    2 => ReviewEvent::RequestChanges,
+                                    _ => ReviewEvent::Approve,
+                                };
+                                if let Some(app) = this.upgrade() {
+                                    app.update(cx, |app, cx| {
+                                        app.review_action = event;
+                                        cx.notify();
+                                    });
+                                }
+                            }
+                        });
+                    let buttons = h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("review-cancel")
+                                .ghost()
+                                .label("Cancel")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(
+                            Button::new("review-submit")
+                                .primary()
+                                .label("Submit review")
+                                .on_click({
+                                    let this = this.clone();
+                                    let item = item.clone();
+                                    let body_submit = body_submit.clone();
+                                    move |_, window, cx| {
+                                        let Some(app) = this.upgrade() else { return };
+                                        let event = app.read(cx).review_action;
+                                        let b = body_submit.read(cx).value().trim().to_string();
+                                        // gh requires a body for comment / request-changes reviews.
+                                        if event.requires_body() && b.is_empty() {
+                                            app.update(cx, |app, cx| {
+                                                app.status = Some(
                                         "Review comment required for Comment / Request changes"
                                             .to_string(),
                                     );
-                                    cx.notify();
-                                });
-                                return;
-                            }
-                            let body = if b.is_empty() { None } else { Some(b) };
-                            window.close_dialog(cx);
-                            app.update(cx, |app, _| {
-                                app.send(EngineCommand::SubmitReview {
-                                    url: item.url.clone(),
-                                    event,
-                                    body,
-                                })
-                            });
-                        }
-                    }));
-                content
-                    .gap_3()
-                    .child(radios)
-                    .child(Input::new(&body_render).h(px(180.)))
-                    .child(buttons)
-            })
+                                                cx.notify();
+                                            });
+                                            return;
+                                        }
+                                        let body = if b.is_empty() { None } else { Some(b) };
+                                        window.close_dialog(cx);
+                                        app.update(cx, |app, _| {
+                                            app.send(EngineCommand::SubmitReview {
+                                                url: item.url.clone(),
+                                                event,
+                                                body,
+                                            })
+                                        });
+                                    }
+                                }),
+                        );
+                    content
+                        .gap_3()
+                        .child(radios)
+                        .child(Input::new(&body_render).h(px(180.)))
+                        .child(buttons)
+                })
         });
     }
 
@@ -1493,16 +1538,16 @@ impl GlaucaApp {
         window.open_dialog(cx, move |dlg, _w, _cx| {
             let this = this.clone();
             let item = item.clone();
-            dlg.title("Merge strategy").w(px(320.)).content(move |content, _w, _cx| {
-                let mut col = content.gap_2();
-                for (ix, strat) in MergeStrategy::all().into_iter().enumerate() {
-                    let label = strat.label().to_string();
-                    let item = item.clone();
-                    let this = this.clone();
-                    col = col.child(
-                        Button::new(("merge", ix))
-                            .label(label)
-                            .on_click(move |_, window, cx| {
+            dlg.title("Merge strategy")
+                .w(px(320.))
+                .content(move |content, _w, _cx| {
+                    let mut col = content.gap_2();
+                    for (ix, strat) in MergeStrategy::all().into_iter().enumerate() {
+                        let label = strat.label().to_string();
+                        let item = item.clone();
+                        let this = this.clone();
+                        col = col.child(Button::new(("merge", ix)).label(label).on_click(
+                            move |_, window, cx| {
                                 let item = item.clone();
                                 let strat = strat.clone();
                                 let this = this.clone();
@@ -1515,11 +1560,11 @@ impl GlaucaApp {
                                         })
                                     });
                                 }
-                            }),
-                    );
-                }
-                col
-            })
+                            },
+                        ));
+                    }
+                    col
+                })
         });
     }
 
@@ -1628,7 +1673,12 @@ impl GlaucaApp {
                 // session (baseline only), suppressing the startup storm.
                 let to_notify = self
                     .notif_tracker
-                    .changed_count_to_notify(query_id, &items, background, self.notifications_enabled)
+                    .changed_count_to_notify(
+                        query_id,
+                        &items,
+                        background,
+                        self.notifications_enabled,
+                    )
                     .and_then(|n| query_label(&self.entries, query_id).map(|name| (name, n)));
                 if let Some((name, n)) = to_notify {
                     cx.background_executor()
@@ -1658,7 +1708,10 @@ impl GlaucaApp {
                     }
                 }
             }
-            AppMessage::EntryViewed { entry_id, viewed_at } => {
+            AppMessage::EntryViewed {
+                entry_id,
+                viewed_at,
+            } => {
                 if let Some(entry) = self.entries.iter_mut().find(|e| e.id() == entry_id) {
                     entry.set_last_viewed_at(Some(viewed_at));
                 }
@@ -1698,7 +1751,11 @@ impl GlaucaApp {
                 self.filter.clear();
                 self.select_index(self.entry_cursor);
             }
-            AppMessage::QueryUpdated { id, new_name, new_query } => {
+            AppMessage::QueryUpdated {
+                id,
+                new_name,
+                new_query,
+            } => {
                 if let Some(LeftPaneEntry::Query(q)) = self
                     .entries
                     .iter_mut()
@@ -1726,7 +1783,11 @@ impl GlaucaApp {
                 }
                 self.status = Some("Query updated".into());
             }
-            AppMessage::FilterStreamUpdated { id, new_name, new_filter } => {
+            AppMessage::FilterStreamUpdated {
+                id,
+                new_name,
+                new_filter,
+            } => {
                 let mut root_id = None;
                 if let Some(LeftPaneEntry::FilterStream(fs)) = self
                     .entries
@@ -1777,17 +1838,27 @@ impl GlaucaApp {
                     self.select_index(self.entry_cursor);
                 }
             }
-            AppMessage::QueriesSwapped { upper_id, active_id, .. } => {
-                if let Some(idx) = self.entries.iter().position(
-                    |e| matches!(e, LeftPaneEntry::Query(q) if q.id == upper_id),
-                ) {
+            AppMessage::QueriesSwapped {
+                upper_id,
+                active_id,
+                ..
+            } => {
+                if let Some(idx) = self
+                    .entries
+                    .iter()
+                    .position(|e| matches!(e, LeftPaneEntry::Query(q) if q.id == upper_id))
+                {
                     move_group_down(&mut self.entries, idx);
                 }
                 if let Some(pos) = self.entries.iter().position(|e| e.id() == active_id) {
                     self.entry_cursor = pos;
                 }
             }
-            AppMessage::FilterStreamsSwapped { upper_id, lower_id, active_id } => {
+            AppMessage::FilterStreamsSwapped {
+                upper_id,
+                lower_id,
+                active_id,
+            } => {
                 let u = self.entries.iter().position(|e| e.id() == upper_id);
                 let l = self.entries.iter().position(|e| e.id() == lower_id);
                 if let (Some(u), Some(l)) = (u, l) {
@@ -1820,7 +1891,6 @@ impl GlaucaApp {
     }
 
     fn render_left(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-
         // Fixed header: current user's avatar + login (line 1) + display name
         // (line 2). Stays pinned while the entry list below scrolls.
         let mut avatar = Avatar::new().with_size(px(HEADER_AVATAR_PX));
@@ -1880,7 +1950,11 @@ impl GlaucaApp {
                 LeftPaneEntry::Query(q) => q.label.clone(),
                 LeftPaneEntry::FilterStream(fs) => fs.name.clone(),
             };
-            let unread = self.unread_counts.get(&entry.unread_key()).copied().unwrap_or(0);
+            let unread = self
+                .unread_counts
+                .get(&entry.unread_key())
+                .copied()
+                .unwrap_or(0);
 
             let row = h_flex()
                 .id(("entry", i))
@@ -2203,18 +2277,15 @@ impl GlaucaApp {
                                 .flex_shrink_0()
                                 .when_some(item.author.as_ref(), |e, a| e.child(user_avatar(a)))
                                 // Arrow reads "author → assignee(s)" when both sides exist.
-                                .when(
-                                    item.author.is_some() && !item.assignees.is_empty(),
-                                    |e| {
-                                        e.child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child("→"),
-                                        )
-                                    },
-                                )
+                                .when(item.author.is_some() && !item.assignees.is_empty(), |e| {
+                                    e.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("→"),
+                                    )
+                                })
                                 .children(item.assignees.iter().take(AVATAR_LIMIT).map(user_avatar))
                                 .when(assignee_extra > 0, |e| {
                                     e.child(avatar_overflow(assignee_extra, cx))
@@ -2317,7 +2388,10 @@ impl GlaucaApp {
                 }),
             );
 
-        let Some(item) = self.filtered.get(self.item_cursor).and_then(|&i| self.items.get(i))
+        let Some(item) = self
+            .filtered
+            .get(self.item_cursor)
+            .and_then(|&i| self.items.get(i))
         else {
             return container.child(
                 div()
@@ -2416,9 +2490,10 @@ impl GlaucaApp {
             .when(!item.labels.is_empty(), |e| {
                 e.child(detail_field("labels", &item.labels.join(", "), cx))
             })
-            .when_some(item.base_ref.as_ref().zip(item.head_ref.as_ref()), |e, (base, head)| {
-                e.child(detail_field("branch", &format!("{head} → {base}"), cx))
-            })
+            .when_some(
+                item.base_ref.as_ref().zip(item.head_ref.as_ref()),
+                |e, (base, head)| e.child(detail_field("branch", &format!("{head} → {base}"), cx)),
+            )
             .when(!item.assignees.is_empty(), |e| {
                 e.child(detail_people_field(
                     "assignees",
@@ -2449,7 +2524,12 @@ impl GlaucaApp {
         // cheap. The body owns its own scroll (mouse wheel / scrollbar). Content
         // is synced into the retained `detail_text` state; `set_text` is a no-op
         // unless the selected item's body actually changed.
-        let body = match item.body.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let body = match item
+            .body
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(body) => {
                 self.detail_text
                     .update(cx, |state, cx| state.set_text(body, cx));
@@ -2489,7 +2569,11 @@ impl GlaucaApp {
     /// `COMMENTS_CONTEXT` via the focused panel.
     fn render_comments_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hidden_count = self.comments.iter().filter(|c| c.is_minimized).count();
-        let sort_label = if self.comments_sort_desc { "newest" } else { "oldest" };
+        let sort_label = if self.comments_sort_desc {
+            "newest"
+        } else {
+            "oldest"
+        };
 
         let body = if self.comments_loading {
             div()
@@ -2533,7 +2617,10 @@ impl GlaucaApp {
                     );
                 let mut block = v_flex().gap_1().child(head);
                 if c.is_minimized && !self.comments_show_hidden {
-                    let reason = c.minimized_reason.clone().unwrap_or_else(|| "minimized".into());
+                    let reason = c
+                        .minimized_reason
+                        .clone()
+                        .unwrap_or_else(|| "minimized".into());
                     block = block.child(
                         div()
                             .text_xs()
@@ -2544,8 +2631,10 @@ impl GlaucaApp {
                     );
                 } else {
                     if c.is_minimized {
-                        let reason =
-                            c.minimized_reason.clone().unwrap_or_else(|| "minimized".into());
+                        let reason = c
+                            .minimized_reason
+                            .clone()
+                            .unwrap_or_else(|| "minimized".into());
                         block = block.child(
                             div()
                                 .text_xs()
@@ -2814,7 +2903,10 @@ fn item_state_icon_info(item: &ItemEntry, cx: &App) -> (&'static str, Hsla) {
     let theme = cx.theme();
     if item.kind == "pull_request" {
         if item.is_draft {
-            ("octicons/git-pull-request-draft.svg", theme.muted_foreground)
+            (
+                "octicons/git-pull-request-draft.svg",
+                theme.muted_foreground,
+            )
         } else {
             match item.state.as_str() {
                 "merged" => ("octicons/git-merge.svg", theme.magenta),
@@ -2872,7 +2964,9 @@ fn sized_avatar_url(url: &str, target_px: f32) -> String {
 /// login's initials placeholder when there is no avatar URL (teams, or older
 /// cache rows). `name` also drives the alt/initials text.
 fn user_avatar(user: &UserRef) -> Avatar {
-    let mut a = Avatar::new().name(user.login.clone()).with_size(px(AVATAR_PX));
+    let mut a = Avatar::new()
+        .name(user.login.clone())
+        .with_size(px(AVATAR_PX));
     if let Some(url) = &user.avatar_url {
         a = a.src(sized_avatar_url(url, AVATAR_PX));
     }
@@ -2901,9 +2995,11 @@ fn review_state_icon(state: ReviewState, cx: &App) -> (&'static str, Hsla, Hsla)
     match state {
         ReviewState::Approved => ("octicons/check-circle-fill.svg", theme.green, white()),
         ReviewState::ChangesRequested => ("octicons/x-circle-fill.svg", theme.red, white()),
-        ReviewState::Commented | ReviewState::Dismissed => {
-            ("octicons/comment.svg", theme.muted_foreground, theme.background)
-        }
+        ReviewState::Commented | ReviewState::Dismissed => (
+            "octicons/comment.svg",
+            theme.muted_foreground,
+            theme.background,
+        ),
         ReviewState::Pending => ("octicons/clock.svg", theme.yellow, theme.background),
     }
 }
@@ -3022,7 +3118,9 @@ impl GlaucaApp {
                     cx.notify();
                 });
                 menu = menu.separator();
-                app_menu_item(menu, &glauca_app, "Quit", |this, w, cx| this.on_quit(&Quit, w, cx))
+                app_menu_item(menu, &glauca_app, "Quit", |this, w, cx| {
+                    this.on_quit(&Quit, w, cx)
+                })
             });
 
         // View menu: theme selection (System / Light / Dark). The active choice
@@ -3101,50 +3199,54 @@ impl GlaucaApp {
     /// dismisses it.
     fn open_about_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.open_dialog(cx, move |dlg, _w, _cx| {
-            dlg.title("About Glauca").w(px(360.)).content(move |content, _w, _cx| {
-                content
-                    .gap_1()
-                    .text_sm()
-                    .child(SharedString::from(format!(
-                        "glauca-gui {}",
-                        env!("CARGO_PKG_VERSION")
-                    )))
-                    .child(SharedString::from("GitHub PR/issue triage for the terminal."))
-            })
+            dlg.title("About Glauca")
+                .w(px(360.))
+                .content(move |content, _w, _cx| {
+                    content
+                        .gap_1()
+                        .text_sm()
+                        .child(SharedString::from(format!(
+                            "glauca-gui {}",
+                            env!("CARGO_PKG_VERSION")
+                        )))
+                        .child(SharedString::from(
+                            "GitHub PR/issue triage for the terminal.",
+                        ))
+                })
         });
     }
 
     /// Help → Keyboard shortcuts: a read-only two-column list of the key bindings.
     fn open_shortcuts_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.open_dialog(cx, move |dlg, _w, _cx| {
-            dlg.title("Keyboard shortcuts").w(px(480.)).content(move |content, _w, _cx| {
-                let mut list = content.gap_1().text_sm();
-                for (key, desc) in SHORTCUTS {
-                    if desc.is_empty() {
-                        // Section header.
-                        list = list.child(
-                            div()
-                                .pt_2()
-                                .font_bold()
-                                .child(SharedString::from(*key)),
-                        );
-                    } else {
-                        list = list.child(
-                            h_flex()
-                                .w_full()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .w(px(160.))
-                                        .child(SharedString::from(*key)),
-                                )
-                                .child(div().flex_1().min_w_0().child(SharedString::from(*desc))),
-                        );
+            dlg.title("Keyboard shortcuts")
+                .w(px(480.))
+                .content(move |content, _w, _cx| {
+                    let mut list = content.gap_1().text_sm();
+                    for (key, desc) in SHORTCUTS {
+                        if desc.is_empty() {
+                            // Section header.
+                            list = list
+                                .child(div().pt_2().font_bold().child(SharedString::from(*key)));
+                        } else {
+                            list = list.child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .w(px(160.))
+                                            .child(SharedString::from(*key)),
+                                    )
+                                    .child(
+                                        div().flex_1().min_w_0().child(SharedString::from(*desc)),
+                                    ),
+                            );
+                        }
                     }
-                }
-                list
-            })
+                    list
+                })
         });
     }
 }
@@ -3210,8 +3312,12 @@ impl Render for GlaucaApp {
                             // Read-modify-write so persisting pane sizes doesn't
                             // clobber the saved theme (and vice-versa).
                             let mut settings = GuiSettings::load();
-                            settings.pane_sizes =
-                                state.read(cx).sizes().iter().map(|p| f32::from(*p)).collect();
+                            settings.pane_sizes = state
+                                .read(cx)
+                                .sizes()
+                                .iter()
+                                .map(|p| f32::from(*p))
+                                .collect();
                             settings.save();
                         })
                         .child(
@@ -3329,58 +3435,58 @@ fn main() -> Result<()> {
             }
             gpui_component::init(cx);
 
-        // Navigation/edit keys are scoped to "Glauca && !Input": a bare "Glauca"
-        // binding would still fire while a gpui-component Input is focused, because
-        // dispatch bubbles to the root node (where the context is just [Glauca]) and
-        // matches there — swallowing letters meant for the text box. The `!Input`
-        // term is evaluated against the *full* focus path, so it disables these
-        // bindings whenever an Input is anywhere in the chain. Escape stays plain
-        // "Glauca" so it can blur the filter / close a dialog from inside the Input.
-        cx.bind_keys([
-            KeyBinding::new("j", MoveDown, Some(NAV_CONTEXT)),
-            KeyBinding::new("k", MoveUp, Some(NAV_CONTEXT)),
-            KeyBinding::new("down", MoveDown, Some(NAV_CONTEXT)),
-            KeyBinding::new("up", MoveUp, Some(NAV_CONTEXT)),
-            KeyBinding::new("h", FocusLeft, Some(NAV_CONTEXT)),
-            KeyBinding::new("l", FocusRight, Some(NAV_CONTEXT)),
-            KeyBinding::new("left", FocusLeft, Some(NAV_CONTEXT)),
-            KeyBinding::new("right", FocusRight, Some(NAV_CONTEXT)),
-            KeyBinding::new("enter", Activate, Some(NAV_CONTEXT)),
-            KeyBinding::new("/", FocusFilter, Some(NAV_CONTEXT)),
-            KeyBinding::new("escape", Cancel, Some(GLAUCA_CONTEXT)),
-            KeyBinding::new("n", NewQuery, Some(NAV_CONTEXT)),
-            KeyBinding::new("f", NewFilterStream, Some(NAV_CONTEXT)),
-            KeyBinding::new("e", EditEntry, Some(NAV_CONTEXT)),
-            KeyBinding::new("d", DeleteEntry, Some(NAV_CONTEXT)),
-            KeyBinding::new("shift-j", ReorderDown, Some(NAV_CONTEXT)),
-            KeyBinding::new("shift-k", ReorderUp, Some(NAV_CONTEXT)),
-            KeyBinding::new("q", Quit, Some(NAV_CONTEXT)),
-            KeyBinding::new("o", OpenInBrowser, Some(NAV_CONTEXT)),
-            KeyBinding::new("c", OpenComments, Some(NAV_CONTEXT)),
-            KeyBinding::new("y", CopyUrl, Some(NAV_CONTEXT)),
-            KeyBinding::new("r", Refresh, Some(NAV_CONTEXT)),
-            // Comments overlay controls (active only while the overlay is focused).
-            KeyBinding::new("j", CommentsScrollDown, Some(COMMENTS_CONTEXT)),
-            KeyBinding::new("k", CommentsScrollUp, Some(COMMENTS_CONTEXT)),
-            KeyBinding::new("down", CommentsScrollDown, Some(COMMENTS_CONTEXT)),
-            KeyBinding::new("up", CommentsScrollUp, Some(COMMENTS_CONTEXT)),
-            KeyBinding::new("g", CommentsTop, Some(COMMENTS_CONTEXT)),
-            KeyBinding::new("shift-g", CommentsBottom, Some(COMMENTS_CONTEXT)),
-            KeyBinding::new("s", CommentsToggleSort, Some(COMMENTS_CONTEXT)),
-            KeyBinding::new("h", CommentsToggleHidden, Some(COMMENTS_CONTEXT)),
-            KeyBinding::new("q", CommentsClose, Some(COMMENTS_CONTEXT)),
-        ]);
+            // Navigation/edit keys are scoped to "Glauca && !Input": a bare "Glauca"
+            // binding would still fire while a gpui-component Input is focused, because
+            // dispatch bubbles to the root node (where the context is just [Glauca]) and
+            // matches there — swallowing letters meant for the text box. The `!Input`
+            // term is evaluated against the *full* focus path, so it disables these
+            // bindings whenever an Input is anywhere in the chain. Escape stays plain
+            // "Glauca" so it can blur the filter / close a dialog from inside the Input.
+            cx.bind_keys([
+                KeyBinding::new("j", MoveDown, Some(NAV_CONTEXT)),
+                KeyBinding::new("k", MoveUp, Some(NAV_CONTEXT)),
+                KeyBinding::new("down", MoveDown, Some(NAV_CONTEXT)),
+                KeyBinding::new("up", MoveUp, Some(NAV_CONTEXT)),
+                KeyBinding::new("h", FocusLeft, Some(NAV_CONTEXT)),
+                KeyBinding::new("l", FocusRight, Some(NAV_CONTEXT)),
+                KeyBinding::new("left", FocusLeft, Some(NAV_CONTEXT)),
+                KeyBinding::new("right", FocusRight, Some(NAV_CONTEXT)),
+                KeyBinding::new("enter", Activate, Some(NAV_CONTEXT)),
+                KeyBinding::new("/", FocusFilter, Some(NAV_CONTEXT)),
+                KeyBinding::new("escape", Cancel, Some(GLAUCA_CONTEXT)),
+                KeyBinding::new("n", NewQuery, Some(NAV_CONTEXT)),
+                KeyBinding::new("f", NewFilterStream, Some(NAV_CONTEXT)),
+                KeyBinding::new("e", EditEntry, Some(NAV_CONTEXT)),
+                KeyBinding::new("d", DeleteEntry, Some(NAV_CONTEXT)),
+                KeyBinding::new("shift-j", ReorderDown, Some(NAV_CONTEXT)),
+                KeyBinding::new("shift-k", ReorderUp, Some(NAV_CONTEXT)),
+                KeyBinding::new("q", Quit, Some(NAV_CONTEXT)),
+                KeyBinding::new("o", OpenInBrowser, Some(NAV_CONTEXT)),
+                KeyBinding::new("c", OpenComments, Some(NAV_CONTEXT)),
+                KeyBinding::new("y", CopyUrl, Some(NAV_CONTEXT)),
+                KeyBinding::new("r", Refresh, Some(NAV_CONTEXT)),
+                // Comments overlay controls (active only while the overlay is focused).
+                KeyBinding::new("j", CommentsScrollDown, Some(COMMENTS_CONTEXT)),
+                KeyBinding::new("k", CommentsScrollUp, Some(COMMENTS_CONTEXT)),
+                KeyBinding::new("down", CommentsScrollDown, Some(COMMENTS_CONTEXT)),
+                KeyBinding::new("up", CommentsScrollUp, Some(COMMENTS_CONTEXT)),
+                KeyBinding::new("g", CommentsTop, Some(COMMENTS_CONTEXT)),
+                KeyBinding::new("shift-g", CommentsBottom, Some(COMMENTS_CONTEXT)),
+                KeyBinding::new("s", CommentsToggleSort, Some(COMMENTS_CONTEXT)),
+                KeyBinding::new("h", CommentsToggleHidden, Some(COMMENTS_CONTEXT)),
+                KeyBinding::new("q", CommentsClose, Some(COMMENTS_CONTEXT)),
+            ]);
 
-        cx.spawn(async move |cx| {
-            cx.open_window(WindowOptions::default(), move |window, cx| {
-                window.set_window_title("glauca");
-                let view = cx.new(|cx| GlaucaApp::new(engine, init, window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
+            cx.spawn(async move |cx| {
+                cx.open_window(WindowOptions::default(), move |window, cx| {
+                    window.set_window_title("glauca");
+                    let view = cx.new(|cx| GlaucaApp::new(engine, init, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .expect("Failed to open window");
             })
-            .expect("Failed to open window");
-        })
-        .detach();
-    });
+            .detach();
+        });
 
     // Keep the runtime alive across the whole GUI lifetime.
     drop(rt);

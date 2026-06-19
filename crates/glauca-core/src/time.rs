@@ -34,7 +34,9 @@ pub fn humanize_secs(secs: i64) -> String {
 pub fn format_relative_time_since(rfc3339: &str, now: DateTime<Utc>) -> String {
     match DateTime::parse_from_rfc3339(rfc3339) {
         Ok(dt) => {
-            let secs = now.signed_duration_since(dt.with_timezone(&Utc)).num_seconds();
+            let secs = now
+                .signed_duration_since(dt.with_timezone(&Utc))
+                .num_seconds();
             humanize_secs(secs)
         }
         Err(_) => rfc3339.to_string(),

@@ -360,9 +360,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
             login.to_string()
         }
     });
-    let author_avatar_url = node["author"]["avatarUrl"]
-        .as_str()
-        .map(|s| s.to_string());
+    let author_avatar_url = node["author"]["avatarUrl"].as_str().map(|s| s.to_string());
     let comment_count = node["comments"]["totalCount"].as_u64().unwrap_or(0) as i64;
 
     let repo_owner = node["repository"]["owner"]["login"].as_str()?.to_string();
@@ -639,12 +637,18 @@ mod tests {
         let assignees = crate::logic::decode_users(&item.assignees);
         assert_eq!(assignees.len(), 1);
         assert_eq!(assignees[0].login, "carol");
-        assert_eq!(assignees[0].avatar_url.as_deref(), Some("https://a/carol.png"));
+        assert_eq!(
+            assignees[0].avatar_url.as_deref(),
+            Some("https://a/carol.png")
+        );
 
         let reviews = crate::logic::decode_reviews(&item.reviews);
         assert_eq!(reviews.len(), 1);
         assert_eq!(reviews[0].0.login, "dave");
-        assert_eq!(reviews[0].0.avatar_url.as_deref(), Some("https://a/dave.png"));
+        assert_eq!(
+            reviews[0].0.avatar_url.as_deref(),
+            Some("https://a/dave.png")
+        );
         assert_eq!(reviews[0].1, "APPROVED");
     }
 

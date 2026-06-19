@@ -1,6 +1,4 @@
-use crate::tui::{
-    App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, item_actions,
-};
+use crate::tui::{App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, item_actions};
 use chrono::{DateTime, Local, Utc};
 use glauca_core::engine::ReviewEvent;
 use glauca_core::filter::FilterQuery;
@@ -188,7 +186,11 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
         .entries
         .iter()
         .map(|entry| {
-            let unread = app.unread_counts.get(&entry.unread_key()).copied().unwrap_or(0);
+            let unread = app
+                .unread_counts
+                .get(&entry.unread_key())
+                .copied()
+                .unwrap_or(0);
             let badge = (unread > 0).then(|| {
                 Span::styled(
                     format!(" ({unread})"),

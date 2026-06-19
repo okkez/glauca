@@ -141,7 +141,10 @@ impl FilterQuery {
 
         best.map(|(start, end)| {
             // Ensure byte indices are on char boundaries.
-            (floor_char_boundary(text, start), ceil_char_boundary(text, end))
+            (
+                floor_char_boundary(text, start),
+                ceil_char_boundary(text, end),
+            )
         })
     }
 }

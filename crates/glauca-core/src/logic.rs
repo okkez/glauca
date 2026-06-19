@@ -32,7 +32,7 @@ pub fn count_changed(current: &[ItemEntry], fresh: &[ItemEntry]) -> usize {
         .filter(|it| {
             let key = (it.repo_owner.as_str(), it.repo_name.as_str(), it.number);
             match seen.get(&key) {
-                None => true,                                  // newly appeared
+                None => true,                                         // newly appeared
                 Some(prev_updated) => *prev_updated != it.updated_at, // changed
             }
         })
@@ -353,7 +353,10 @@ mod tests {
 
     #[test]
     fn count_changed_counts_new_and_updated_only() {
-        let current = vec![item_at(1, "2026-01-01T00:00:00Z"), item_at(2, "2026-01-01T00:00:00Z")];
+        let current = vec![
+            item_at(1, "2026-01-01T00:00:00Z"),
+            item_at(2, "2026-01-01T00:00:00Z"),
+        ];
         let fresh = vec![
             item_at(1, "2026-01-01T00:00:00Z"), // unchanged
             item_at(2, "2026-06-01T00:00:00Z"), // updated

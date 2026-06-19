@@ -294,7 +294,7 @@ fn copy_to_clipboard_osc52(text: &str) -> std::io::Result<()> {
 /// Build the OSC 52 clipboard escape sequence for `text` (pure; the side effect
 /// of writing to the terminal lives in [`copy_to_clipboard_osc52`]).
 fn osc52_sequence(text: &str) -> String {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     format!("\x1b]52;c;{}\x07", STANDARD.encode(text.as_bytes()))
 }
 
@@ -492,7 +492,11 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             s.save();
             app.status = Some(format!(
                 "Desktop notifications {}",
-                if app.notifications_enabled { "on" } else { "off" }
+                if app.notifications_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
             ));
         }
 
@@ -2293,7 +2297,7 @@ mod tests {
 
     #[test]
     fn osc52_sequence_wraps_base64() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let url = "https://github.com/owner/repo/pull/1";
         let seq = osc52_sequence(url);
         let expected = format!("\x1b]52;c;{}\x07", STANDARD.encode(url.as_bytes()));

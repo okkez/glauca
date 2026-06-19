@@ -427,8 +427,14 @@ pub async fn sync_task(
     let mut total_count = 0usize;
 
     loop {
-        let result =
-            github::search_page(&gh, query_id, &query_str, since.as_deref(), after.as_deref()).await;
+        let result = github::search_page(
+            &gh,
+            query_id,
+            &query_str,
+            since.as_deref(),
+            after.as_deref(),
+        )
+        .await;
         match result {
             Err(github::SearchError::RateLimited) => {
                 // Pause background sync until the limit resets; surface a notice
@@ -598,7 +604,10 @@ async fn backoff_until(gh: &Octocrab, now: i64) -> i64 {
         Ok(rl) => {
             let graphql = rl.resources.graphql.unwrap_or(rl.rate);
             if graphql.remaining == 0 {
-                info!(reset = graphql.reset, "rate limit: waiting for graphql reset");
+                info!(
+                    reset = graphql.reset,
+                    "rate limit: waiting for graphql reset"
+                );
                 graphql.reset as i64
             } else {
                 info!("rate limit: secondary/abuse, using fixed cooldown");
@@ -962,7 +971,13 @@ impl Engine {
         ));
         // Spawn the command-handling loop.
         tokio::spawn(command_loop(
-            pool, gh, cmd_rx, msg_tx, sync_job_tx, stale, gate,
+            pool,
+            gh,
+            cmd_rx,
+            msg_tx,
+            sync_job_tx,
+            stale,
+            gate,
         ));
 
         Ok((
@@ -1110,16 +1125,20 @@ async fn command_loop(
                 let gh2 = gh.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    match github::fetch_item(&gh2, query_id, &repo_owner, &repo_name, number).await {
+                    match github::fetch_item(&gh2, query_id, &repo_owner, &repo_name, number).await
+                    {
                         Ok(Some(item)) => {
                             if let Err(e) = db::upsert_item(&pool2, &item).await {
-                                let _ =
-                                    tx2.send(AppMessage::Status(format!("Refresh failed: {e}"))).await;
+                                let _ = tx2
+                                    .send(AppMessage::Status(format!("Refresh failed: {e}")))
+                                    .await;
                                 return;
                             }
                             load_items_task(pool2, query_id, highlight_since, false, tx2.clone())
                                 .await;
-                            let _ = tx2.send(AppMessage::Status(format!("Refreshed #{number}"))).await;
+                            let _ = tx2
+                                .send(AppMessage::Status(format!("Refreshed #{number}")))
+                                .await;
                         }
                         Ok(None) => {
                             let _ = tx2
@@ -1127,8 +1146,9 @@ async fn command_loop(
                                 .await;
                         }
                         Err(e) => {
-                            let _ =
-                                tx2.send(AppMessage::Status(format!("Refresh failed: {e}"))).await;
+                            let _ = tx2
+                                .send(AppMessage::Status(format!("Refresh failed: {e}")))
+                                .await;
                         }
                     }
                 });
@@ -1152,8 +1172,15 @@ async fn command_loop(
                 let tx2 = msg_tx.clone();
                 let gate2 = gate.clone();
                 tokio::spawn(async move {
-                    enqueue_stale_queries(&pool2, &sync_tx2, &tx2, skip_query_id, stale_secs, &gate2)
-                        .await;
+                    enqueue_stale_queries(
+                        &pool2,
+                        &sync_tx2,
+                        &tx2,
+                        skip_query_id,
+                        stale_secs,
+                        &gate2,
+                    )
+                    .await;
                 });
             }
             EngineCommand::AddQuery { name, query } => {
@@ -1206,9 +1233,7 @@ async fn command_loop(
                         }
                         Err(e) => {
                             let _ = tx2
-                                .send(AppMessage::Status(format!(
-                                    "save filter stream error: {e}"
-                                )))
+                                .send(AppMessage::Status(format!("save filter stream error: {e}")))
                                 .await;
                         }
                     }
@@ -1252,9 +1277,7 @@ async fn command_loop(
                         }
                         Err(e) => {
                             let _ = tx2
-                                .send(AppMessage::Status(format!(
-                                    "edit filter stream error: {e}"
-                                )))
+                                .send(AppMessage::Status(format!("edit filter stream error: {e}")))
                                 .await;
                         }
                     }
@@ -1341,9 +1364,10 @@ async fn command_loop(
                 });
             }
             EngineCommand::OpenBrowser { item } => {
-                spawn_action(msg_tx.clone(), async move {
-                    execute_open_browser(&item).await
-                });
+                spawn_action(
+                    msg_tx.clone(),
+                    async move { execute_open_browser(&item).await },
+                );
             }
             EngineCommand::Comment { url, kind, body } => {
                 spawn_action(msg_tx.clone(), async move {
@@ -1417,8 +1441,14 @@ async fn mark_filtered_items_read(
     for c in db::fetch_items(pool, query_id).await? {
         let item = cached_item_to_item_entry(c, None);
         if !item.read && fq.matches(&item) {
-            db::mark_item_read(pool, query_id, &item.repo_owner, &item.repo_name, item.number)
-                .await?;
+            db::mark_item_read(
+                pool,
+                query_id,
+                &item.repo_owner,
+                &item.repo_name,
+                item.number,
+            )
+            .await?;
         }
     }
     Ok(())
