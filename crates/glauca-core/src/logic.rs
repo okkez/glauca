@@ -191,7 +191,7 @@ pub fn filter_items<'a>(
     items
         .iter()
         .filter(|i| {
-            stream_q.as_ref().map_or(true, |q| q.matches(i))
+            stream_q.as_ref().is_none_or(|q| q.matches(i))
                 && (inline_q.is_empty() || inline_q.matches(i))
         })
         .collect()

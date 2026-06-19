@@ -848,7 +848,7 @@ pub enum EngineCommand {
         number: u64,
     },
     OpenBrowser {
-        item: ItemEntry,
+        item: Box<ItemEntry>,
     },
     Comment {
         url: String,

@@ -158,11 +158,20 @@ enum Focus {
 /// What a context/action menu operates on (see `open_menu` / `populate_menu`).
 enum MenuKind {
     /// Item-pane actions (open / comment / view comments / approve / merge).
-    Item(ItemEntry),
+    Item(Box<ItemEntry>),
     /// Left-pane entry actions for the entry at `index`.
     Entry { index: usize, is_query: bool },
     /// Empty area of the left pane: only "New query".
     NewQueryOnly,
+}
+
+/// Inputs to `open_filter_stream_form` (add when `edit` is `None`, edit otherwise).
+struct FilterStreamFormParams {
+    edit: Option<i64>,
+    parent_id: i64,
+    kind: String,
+    init_name: String,
+    init_filter: String,
 }
 
 struct GlaucaApp {
@@ -650,7 +659,7 @@ impl GlaucaApp {
             // near the last pointer position (same PopupMenu as right-click).
             Focus::ItemList | Focus::ItemDetail => {
                 if let Some(item) = self.selected_item() {
-                    self.open_menu(self.last_pointer, MenuKind::Item(item), window, cx);
+                    self.open_menu(self.last_pointer, MenuKind::Item(Box::new(item)), window, cx);
                 }
             }
         }
@@ -686,7 +695,9 @@ impl GlaucaApp {
             return;
         }
         if let Some(item) = self.selected_item() {
-            self.send(EngineCommand::OpenBrowser { item });
+            self.send(EngineCommand::OpenBrowser {
+                item: Box::new(item),
+            });
         }
     }
 
@@ -1016,7 +1027,7 @@ impl GlaucaApp {
             .iter()
             .enumerate()
             .filter(|(_, item)| {
-                stream_q.as_ref().map_or(true, |q| q.matches(item))
+                stream_q.as_ref().is_none_or(|q| q.matches(item))
                     && (inline_q.is_empty() || inline_q.matches(item))
             })
             .map(|(ix, _)| ix)
@@ -1057,7 +1068,17 @@ impl GlaucaApp {
         };
         let parent_id = entry.root_query_id();
         let kind = entry.kind().to_string();
-        self.open_filter_stream_form(None, parent_id, kind, String::new(), String::new(), window, cx);
+        self.open_filter_stream_form(
+            FilterStreamFormParams {
+                edit: None,
+                parent_id,
+                kind,
+                init_name: String::new(),
+                init_filter: String::new(),
+            },
+            window,
+            cx,
+        );
     }
 
     fn on_edit_entry(&mut self, _: &EditEntry, window: &mut Window, cx: &mut Context<Self>) {
@@ -1077,7 +1098,17 @@ impl GlaucaApp {
                 fs.name.clone(),
                 fs.filter.clone(),
             );
-            self.open_filter_stream_form(Some(id), parent, kind, name, filter, window, cx);
+            self.open_filter_stream_form(
+                FilterStreamFormParams {
+                    edit: Some(id),
+                    parent_id: parent,
+                    kind,
+                    init_name: name,
+                    init_filter: filter,
+                },
+                window,
+                cx,
+            );
         }
     }
 
@@ -1139,14 +1170,17 @@ impl GlaucaApp {
     /// Add (`edit=None`) or edit (`edit=Some(id)`) a filter stream via a 2-field dialog.
     fn open_filter_stream_form(
         &mut self,
-        edit: Option<i64>,
-        parent_id: i64,
-        kind: String,
-        init_name: String,
-        init_filter: String,
+        params: FilterStreamFormParams,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let FilterStreamFormParams {
+            edit,
+            parent_id,
+            kind,
+            init_name,
+            init_filter,
+        } = params;
         let name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("display name")
@@ -1300,7 +1334,9 @@ impl GlaucaApp {
         cx: &mut Context<Self>,
     ) {
         match action {
-            ItemAction::OpenBrowser => self.send(EngineCommand::OpenBrowser { item }),
+            ItemAction::OpenBrowser => self.send(EngineCommand::OpenBrowser {
+                item: Box::new(item),
+            }),
             ItemAction::Comment => self.open_comment_dialog(item, window, cx),
             ItemAction::ApprovePR => self.open_review_dialog(item, window, cx),
             ItemAction::MergePR => self.open_merge_dialog(item, window, cx),
@@ -1343,17 +1379,17 @@ impl GlaucaApp {
                 .on_ok(move |_, _w, cx| {
                     let b = body_ok.read(cx).value().to_string();
                     let b = b.trim().to_string();
-                    if !b.is_empty() {
-                        if let Some(app) = this.upgrade() {
-                            let item = item.clone();
-                            app.update(cx, |app, _| {
-                                app.send(EngineCommand::Comment {
-                                    url: item.url.clone(),
-                                    kind: item.kind.clone(),
-                                    body: b,
-                                })
-                            });
-                        }
+                    if !b.is_empty()
+                        && let Some(app) = this.upgrade()
+                    {
+                        let item = item.clone();
+                        app.update(cx, |app, _| {
+                            app.send(EngineCommand::Comment {
+                                url: item.url.clone(),
+                                kind: item.kind.clone(),
+                                body: b,
+                            })
+                        });
                     }
                     true
                 })
@@ -2136,7 +2172,7 @@ impl GlaucaApp {
                         this.focus = Focus::ItemList;
                         this.item_cursor = ix;
                         if let Some(item) = this.selected_item() {
-                            this.open_menu(ev.position, MenuKind::Item(item), window, cx);
+                            this.open_menu(ev.position, MenuKind::Item(Box::new(item)), window, cx);
                         }
                         cx.notify();
                     });
@@ -2276,7 +2312,7 @@ impl GlaucaApp {
                 MouseButton::Right,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     if let Some(item) = this.selected_item() {
-                        this.open_menu(ev.position, MenuKind::Item(item), window, cx);
+                        this.open_menu(ev.position, MenuKind::Item(Box::new(item)), window, cx);
                     }
                 }),
             );
@@ -2640,6 +2676,7 @@ fn apply_github_dark_overlay(cx: &mut App) {
 fn populate_menu(mut menu: PopupMenu, app: &Entity<GlaucaApp>, kind: MenuKind) -> PopupMenu {
     match kind {
         MenuKind::Item(item) => {
+            let item = *item;
             for action in ItemAction::available_for(&item.kind) {
                 let item = item.clone();
                 let label = action.label().to_string();
@@ -2912,19 +2949,20 @@ fn reviewer_avatar(user: &UserRef, state: ReviewState, cx: &App) -> impl IntoEle
 fn highlight_title(title: &str, range: Option<(usize, usize)>, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let mut text = StyledText::new(SharedString::from(title.to_string()));
-    if let Some((start, end)) = range {
-        if start < end && end <= title.len() {
-            text = text.with_highlights([(
-                start..end,
-                HighlightStyle {
-                    // `link` (not `accent`) so the match stays a visible blue —
-                    // `accent` is the muted grey used for inline code / badges.
-                    background_color: Some(theme.link),
-                    color: Some(theme.accent_foreground),
-                    ..Default::default()
-                },
-            )]);
-        }
+    if let Some((start, end)) = range
+        && start < end
+        && end <= title.len()
+    {
+        text = text.with_highlights([(
+            start..end,
+            HighlightStyle {
+                // `link` (not `accent`) so the match stays a visible blue —
+                // `accent` is the muted grey used for inline code / badges.
+                background_color: Some(theme.link),
+                color: Some(theme.accent_foreground),
+                ..Default::default()
+            },
+        )]);
     }
     div()
         .flex_1()

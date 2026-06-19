@@ -264,7 +264,7 @@ enum Action {
     SaveNewFilterStream,
     SaveEditQuery,
     SaveEditFilterStream,
-    ConfirmAction,
+    Confirm,
     ConfirmMergeStrategy,
     ConfirmReviewEvent,
     OpenBrowser,
@@ -397,13 +397,11 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             app.new_query_input.clear();
         }
         // New filter stream (left pane) — only when a root query or filter stream is selected
-        KeyCode::Char('f') if app.focus == Focus::QueryList => {
-            if !app.entries.is_empty() {
-                app.input_mode = InputMode::NewFilterStream;
-                app.modal_field = 0;
-                app.new_filter_stream_name.clear();
-                app.new_filter_stream_filter.clear();
-            }
+        KeyCode::Char('f') if app.focus == Focus::QueryList && !app.entries.is_empty() => {
+            app.input_mode = InputMode::NewFilterStream;
+            app.modal_field = 0;
+            app.new_filter_stream_name.clear();
+            app.new_filter_stream_filter.clear();
         }
         // Edit selected entry (left pane)
         KeyCode::Char('e') if app.focus == Focus::QueryList => {
@@ -527,7 +525,7 @@ fn handle_key_action_menu(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char('k') | KeyCode::Up => {
             app.action_cursor = app.action_cursor.saturating_sub(1);
         }
-        KeyCode::Enter => return Action::ConfirmAction,
+        KeyCode::Enter => return Action::Confirm,
         _ => {}
     }
 
@@ -541,10 +539,8 @@ fn handle_key_merge_menu(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Esc => {
             app.input_mode = InputMode::ActionMenu;
         }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if app.merge_strategy_cursor < max {
-                app.merge_strategy_cursor += 1;
-            }
+        KeyCode::Char('j') | KeyCode::Down if app.merge_strategy_cursor < max => {
+            app.merge_strategy_cursor += 1;
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.merge_strategy_cursor = app.merge_strategy_cursor.saturating_sub(1);
@@ -567,10 +563,8 @@ fn handle_key_review_menu(app: &mut App, key: KeyEvent) -> Action {
             app.review_body = None;
             app.status = Some("Review cancelled".into());
         }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if app.review_event_cursor < max {
-                app.review_event_cursor += 1;
-            }
+        KeyCode::Char('j') | KeyCode::Down if app.review_event_cursor < max => {
+            app.review_event_cursor += 1;
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.review_event_cursor = app.review_event_cursor.saturating_sub(1);
@@ -1402,7 +1396,7 @@ where
                                     .await;
                             }
                         }
-                        Action::ConfirmAction => {
+                        Action::Confirm => {
                             if let Some(item) = app.selected_item().cloned() {
                                 let actions = item_actions(&item.kind);
                                 if let Some(action) = actions.get(app.action_cursor).cloned() {
@@ -1411,7 +1405,7 @@ where
                                             app.input_mode = InputMode::Normal;
                                             engine
                                                 .send(EngineCommand::OpenBrowser {
-                                                    item: item.clone(),
+                                                    item: Box::new(item.clone()),
                                                 })
                                                 .await;
                                         }
@@ -1520,33 +1514,36 @@ where
                             }
                         }
                         Action::ConfirmReviewEvent => {
-                            if let Some(item) = app.selected_item().cloned() {
-                                if let Some(event) =
+                            if let Some(item) = app.selected_item().cloned()
+                                && let Some(event) =
                                     ReviewEvent::all().get(app.review_event_cursor).copied()
-                                {
-                                    // gh requires a body for comment / request-changes.
-                                    if event.requires_body() && app.review_body.is_none() {
-                                        app.status = Some(
-                                            "Review comment required for Comment / Request changes"
-                                                .into(),
-                                        );
-                                    } else {
-                                        app.input_mode = InputMode::Normal;
-                                        let body = app.review_body.take();
-                                        engine
-                                            .send(EngineCommand::SubmitReview {
-                                                url: item.url.clone(),
-                                                event,
-                                                body,
-                                            })
-                                            .await;
-                                    }
+                            {
+                                // gh requires a body for comment / request-changes.
+                                if event.requires_body() && app.review_body.is_none() {
+                                    app.status = Some(
+                                        "Review comment required for Comment / Request changes"
+                                            .into(),
+                                    );
+                                } else {
+                                    app.input_mode = InputMode::Normal;
+                                    let body = app.review_body.take();
+                                    engine
+                                        .send(EngineCommand::SubmitReview {
+                                            url: item.url.clone(),
+                                            event,
+                                            body,
+                                        })
+                                        .await;
                                 }
                             }
                         }
                         Action::OpenBrowser => {
                             if let Some(item) = app.selected_item().cloned() {
-                                engine.send(EngineCommand::OpenBrowser { item }).await;
+                                engine
+                                    .send(EngineCommand::OpenBrowser {
+                                        item: Box::new(item),
+                                    })
+                                    .await;
                             }
                         }
                         Action::CopyUrl => {
@@ -1701,13 +1698,12 @@ where
                         // If this filter stream is currently selected, re-apply its filter
                         if let Some(LeftPaneEntry::FilterStream(fs)) =
                             app.entries.get(app.entry_cursor)
+                            && fs.id == id
                         {
-                            if fs.id == id {
-                                app.stream_filter = Some(new_filter.clone());
-                                app.item_cursor = 0;
-                                app.detail_scroll = 0;
-                                app.clamp_item_cursor();
-                            }
+                            app.stream_filter = Some(new_filter.clone());
+                            app.item_cursor = 0;
+                            app.detail_scroll = 0;
+                            app.clamp_item_cursor();
                         }
                         if let Some(root_id) = app
                             .entries
@@ -2327,7 +2323,7 @@ mod tests {
         assert_eq!(app.action_cursor, 1);
 
         let action = handle_key_action_menu(&mut app, make_key(KeyCode::Enter));
-        assert!(matches!(action, Action::ConfirmAction));
+        assert!(matches!(action, Action::Confirm));
     }
 
     #[test]

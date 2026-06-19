@@ -575,15 +575,15 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             ]));
 
             // Description body
-            if let Some(body) = &item.body {
-                if !body.is_empty() {
-                    lines.push(Line::default());
-                    lines.push(Line::from(Span::styled(
-                        "─── Description ────────────────────────────────",
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                    lines.extend(tui_markdown::from_str(body).lines);
-                }
+            if let Some(body) = &item.body
+                && !body.is_empty()
+            {
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    "─── Description ────────────────────────────────",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.extend(tui_markdown::from_str(body).lines);
             }
 
             lines
