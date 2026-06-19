@@ -50,6 +50,8 @@ pub enum InputMode {
     ReviewMenu,
     /// Comments popup (fetched via API, displayed in-TUI).
     CommentsPopup,
+    /// Keybinding cheat-sheet overlay (opened with `?`).
+    Help,
 }
 
 pub struct App {
@@ -297,13 +299,30 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         InputMode::MergeMenu => handle_key_merge_menu(app, key),
         InputMode::ReviewMenu => handle_key_review_menu(app, key),
         InputMode::CommentsPopup => handle_key_comments_popup(app, key),
+        InputMode::Help => handle_key_help(app, key),
         InputMode::Normal => handle_key_normal(app, key),
     }
+}
+
+/// Keybinding overlay: Esc / `?` / `q` close it; everything else is ignored.
+fn handle_key_help(app: &mut App, key: KeyEvent) -> Action {
+    if matches!(
+        key.code,
+        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+    ) {
+        app.input_mode = InputMode::Normal;
+    }
+    Action::None
 }
 
 fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('q') => return Action::Quit,
+
+        // Show the keybinding cheat-sheet overlay (works from any pane).
+        KeyCode::Char('?') => {
+            app.input_mode = InputMode::Help;
+        }
 
         // Focus cycling — h/l or left/right arrows
         KeyCode::Char('l') | KeyCode::Right => {
@@ -2060,6 +2079,34 @@ mod tests {
 
     fn make_ctrl_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn question_mark_opens_help_overlay() {
+        let mut app = App::new(vec![]);
+        handle_key_normal(&mut app, make_key(KeyCode::Char('?')));
+        assert!(matches!(app.input_mode, InputMode::Help));
+    }
+
+    #[test]
+    fn help_overlay_closes_on_esc_question_and_q() {
+        for close_key in [KeyCode::Esc, KeyCode::Char('?'), KeyCode::Char('q')] {
+            let mut app = App::new(vec![]);
+            app.input_mode = InputMode::Help;
+            handle_key_help(&mut app, make_key(close_key));
+            assert!(
+                matches!(app.input_mode, InputMode::Normal),
+                "{close_key:?} should close help"
+            );
+        }
+    }
+
+    #[test]
+    fn help_overlay_ignores_other_keys() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Help;
+        handle_key_help(&mut app, make_key(KeyCode::Char('j')));
+        assert!(matches!(app.input_mode, InputMode::Help));
     }
 
     #[test]

@@ -157,6 +157,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_review_menu_popup(f, app, area);
     } else if app.input_mode == InputMode::CommentsPopup {
         draw_comments_popup(f, app, area);
+    } else if app.input_mode == InputMode::Help {
+        draw_help_popup(f, area);
     }
 }
 
@@ -616,9 +618,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let mode_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  r:refresh  a:mark all read  q:quit".to_string(),
-            Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}{refresh_hint}{review_hint}  q:quit"),
-            Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}{refresh_hint}{review_hint}  q:quit"),
+            Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  r:refresh  a:mark all read  ?:help  q:quit".to_string(),
+            Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}{refresh_hint}{review_hint}  ?:help  q:quit"),
+            Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}{refresh_hint}{review_hint}  ?:help  q:quit"),
         },
         InputMode::Filter => "FILTER   Esc:exit  C-u:clear  state:open  author:name  label:bug  repo:owner/name".to_string(),
         InputMode::NewQuery => "NEW QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
@@ -629,6 +631,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::MergeMenu => "MERGE    j/k:move  Enter:confirm  Esc:back".to_string(),
         InputMode::ReviewMenu => "REVIEW   j/k:move  Enter:submit  Esc:cancel".to_string(),
         InputMode::CommentsPopup => "COMMENTS  j/k:scroll  g/G:top/bottom  Esc/q:close".to_string(),
+        InputMode::Help => "HELP     Esc/?/q:close".to_string(),
     };
 
     // Assemble only the segments that apply, in fixed order, then join — instead
@@ -812,6 +815,83 @@ fn draw_action_popup(f: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center),
         chunks[1],
+    );
+}
+
+/// Keybinding cheat-sheet overlay (opened with `?`). Static two-column list so it
+/// fits without scrolling; closed with Esc / `?` / `q` (see `handle_key_help`).
+fn draw_help_popup(f: &mut Frame, area: Rect) {
+    let header = |text: &str| {
+        Line::from(Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let entry = |key: &str, desc: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {key:<9}"), Style::default().fg(Color::Yellow)),
+            Span::raw(desc.to_string()),
+        ])
+    };
+
+    let left = vec![
+        header("Global"),
+        entry("?", "this help"),
+        entry("q", "quit"),
+        entry("h l ← →", "move focus"),
+        entry("S", "full resync (+prune)"),
+        entry("u", "apply pending updates"),
+        Line::raw(""),
+        header("Query list"),
+        entry("j k", "move selection"),
+        entry("n", "new query"),
+        entry("f", "new filter stream"),
+        entry("e", "edit entry"),
+        entry("d", "delete entry"),
+        entry("a", "mark all read"),
+        entry("J K", "reorder"),
+        entry("r", "re-sync query"),
+    ];
+    let right = vec![
+        header("Items / detail"),
+        entry("j k", "move / scroll"),
+        entry("/", "filter (item list)"),
+        entry("Enter", "actions menu"),
+        entry("o", "open in browser"),
+        entry("y", "copy URL"),
+        entry("r", "refresh item"),
+        entry("R", "review w/ octorus (PR)"),
+    ];
+
+    // Height: tallest column + borders (2) + hint line (1).
+    let height = left.len().max(right.len()) as u16 + 3;
+    let popup_area = centered_rect_fixed(64, height, area);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Keybindings ");
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+
+    f.render_widget(Paragraph::new(left), cols[0]);
+    f.render_widget(Paragraph::new(right), cols[1]);
+    f.render_widget(
+        Paragraph::new("Esc / ? / q: close")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center),
+        rows[1],
     );
 }
 
