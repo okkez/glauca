@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
+  "query": "SELECT id, parent_id, name, filter, last_viewed_at FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
   "describe": {
     "columns": [
       {
@@ -22,6 +22,11 @@
         "name": "filter",
         "ordinal": 3,
         "type_info": "Text"
+      },
+      {
+        "name": "last_viewed_at",
+        "ordinal": 4,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -31,8 +36,9 @@
       true,
       false,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "5379cec47d585cf5c708e8b77170dc03a795199252896169fc9b49bda71e89de"
+  "hash": "2fbfe960180431defb9b92d35ae850c5941a3887b3122ecd4c1812f991d80e4e"
 }

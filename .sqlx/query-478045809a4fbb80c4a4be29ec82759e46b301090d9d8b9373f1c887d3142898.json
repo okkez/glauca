@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", repo_owner, repo_name, number FROM items WHERE query_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "repo_owner",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "repo_name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "number",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "478045809a4fbb80c4a4be29ec82759e46b301090d9d8b9373f1c887d3142898"
+}

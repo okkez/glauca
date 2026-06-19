@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE items SET read = 1 WHERE query_id = ? AND repo_owner = ? AND repo_name = ? AND number = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "168543281d7695f305dadf3b083ecba5dc2cb5c9d55c8502cff7773847345060"
+}

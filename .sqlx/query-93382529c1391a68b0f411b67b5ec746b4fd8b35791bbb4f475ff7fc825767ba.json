@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT strftime('%Y-%m-%dT%H:%M:%SZ', last_fetched_at, ?) AS \"since?: String\"\n        FROM queries\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "since?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "93382529c1391a68b0f411b67b5ec746b4fd8b35791bbb4f475ff7fc825767ba"
+}
