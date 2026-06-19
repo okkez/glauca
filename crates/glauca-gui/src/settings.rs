@@ -1,7 +1,7 @@
 //! Persisted GUI preferences (pane sizes, …).
 //!
 //! Kept separate from the core `cache.db`: these are GUI-only, presentation
-//! settings that the TUI neither reads nor writes, so a small JSON file under
+//! settings that the TUI neither reads nor writes, so a small TOML file under
 //! the user config dir is simpler than a DB table. Reads/writes are
 //! best-effort — a missing or corrupt file falls back to defaults, and write
 //! failures are swallowed (a non-persisted layout is not worth crashing over).
@@ -35,11 +35,11 @@ pub struct GuiSettings {
 }
 
 impl GuiSettings {
-    /// `~/.config/glauca/gui.json` (or the platform equivalent); falls back to
+    /// `~/.config/glauca/gui.toml` (or the platform equivalent); falls back to
     /// the local data dir if no config dir is available.
     fn path() -> Option<PathBuf> {
         let base = dirs::config_dir().or_else(dirs::data_local_dir)?;
-        Some(base.join("glauca").join("gui.json"))
+        Some(base.join("glauca").join("gui.toml"))
     }
 
     /// Load saved settings, or defaults if the file is missing/unreadable/corrupt.
@@ -49,7 +49,7 @@ impl GuiSettings {
         };
         std::fs::read_to_string(&path)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|s| toml::from_str(&s).ok())
             .unwrap_or_default()
     }
 
@@ -62,8 +62,8 @@ impl GuiSettings {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
+        if let Ok(serialized) = toml::to_string_pretty(self) {
+            let _ = std::fs::write(&path, serialized);
         }
     }
 }
@@ -81,16 +81,25 @@ mod tests {
     #[test]
     fn legacy_settings_without_theme_load_as_system() {
         // Older files predate the `theme` field; `#[serde(default)]` must fill it.
-        let s: GuiSettings = serde_json::from_str(r#"{"pane_sizes":[280.0,0.0,440.0]}"#).unwrap();
+        let s: GuiSettings = toml::from_str("pane_sizes = [280.0, 0.0, 440.0]").unwrap();
         assert_eq!(s.theme, ThemePreference::System);
         assert_eq!(s.pane_sizes, vec![280.0, 0.0, 440.0]);
     }
 
     #[test]
     fn theme_round_trips_as_lowercase() {
-        let json = serde_json::to_string(&ThemePreference::Dark).unwrap();
-        assert_eq!(json, r#""dark""#);
-        let back: ThemePreference = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, ThemePreference::Dark);
+        // TOML requires a table at the top level, so round-trip the whole struct
+        // rather than a bare enum value.
+        let settings = GuiSettings {
+            theme: ThemePreference::Dark,
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&settings).unwrap();
+        assert!(
+            serialized.contains(r#"theme = "dark""#),
+            "expected lowercase theme key, got:\n{serialized}"
+        );
+        let back: GuiSettings = toml::from_str(&serialized).unwrap();
+        assert_eq!(back.theme, ThemePreference::Dark);
     }
 }
