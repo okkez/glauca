@@ -643,6 +643,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     if app.bg_sync_pending > 0 {
         segments.push(format!("⟳ Auto ({})", app.bg_sync_pending));
     }
+    if app.notifications_enabled {
+        segments.push("🔔".to_string());
+    }
     if let Some(msg) = &app.status {
         segments.push(msg.clone());
     }
@@ -843,6 +846,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
         entry("h l ← →", "move focus"),
         entry("S", "full resync (+prune)"),
         entry("u", "apply pending updates"),
+        entry("N", "toggle desktop notifications"),
         Line::raw(""),
         header("Query list"),
         entry("j k", "move selection"),

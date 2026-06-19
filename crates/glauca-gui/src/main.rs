@@ -19,8 +19,9 @@ use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit, ReviewE
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{
     compute_unread_counts, count_changed, expand_me, group_range, is_item_new_since,
-    move_group_down, reviewer_overlays, ReviewState,
+    move_group_down, query_label, reviewer_overlays, ReviewState,
 };
+use glauca_core::notify::ItemTracker;
 use glauca_core::types::{CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, UserRef};
 use glauca_core::{db, github};
 use gpui::prelude::FluentBuilder as _;
@@ -140,6 +141,7 @@ gpui::actions!(
         SetThemeSystem,
         SetThemeLight,
         SetThemeDark,
+        ToggleNotifications,
     ]
 );
 
@@ -262,6 +264,13 @@ struct GlaucaApp {
     /// Selected color theme. Drives the View menu's active marker and decides
     /// whether window-appearance changes re-sync the theme (only in `System`).
     theme_pref: ThemePreference,
+    /// Whether background-sync arrivals fire OS desktop notifications. Persisted
+    /// to `GuiSettings`; toggled from the View menu.
+    notifications_enabled: bool,
+    /// Per-query session baseline for the notification "N updated" count, so the
+    /// first load of each query establishes a baseline without notifying (no
+    /// startup storm). See `glauca_core::notify::ItemTracker`.
+    notif_tracker: ItemTracker,
     /// Keeps the `filter_input` subscription alive for the view's lifetime.
     _subscriptions: Vec<Subscription>,
 }
@@ -326,7 +335,11 @@ impl GlaucaApp {
         } = init;
         let pane_state = cx.new(|_| ResizableState::default());
         let detail_text = cx.new(|cx| TextViewState::markdown("", cx));
-        let GuiSettings { pane_sizes, theme } = GuiSettings::load();
+        let GuiSettings {
+            pane_sizes,
+            theme,
+            notifications_enabled,
+        } = GuiSettings::load();
         let mut app = Self {
             engine,
             cmd_tx,
@@ -369,6 +382,8 @@ impl GlaucaApp {
             filter_input,
             filter_task: None,
             theme_pref: theme,
+            notifications_enabled,
+            notif_tracker: ItemTracker::new(),
             _subscriptions: vec![subscription],
         };
         // Apply the saved theme up front (System follows the OS appearance).
@@ -452,6 +467,25 @@ impl GlaucaApp {
 
     fn on_set_theme_dark(&mut self, _: &SetThemeDark, window: &mut Window, cx: &mut Context<Self>) {
         self.set_theme(ThemePreference::Dark, window, cx);
+    }
+
+    /// Toggle desktop notifications from the View menu: flip the flag, persist it
+    /// (preserving the other settings), and repaint the menu marker.
+    fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notifications_enabled = !self.notifications_enabled;
+        let mut settings = GuiSettings::load();
+        settings.notifications_enabled = self.notifications_enabled;
+        settings.save();
+        cx.notify();
+    }
+
+    fn on_toggle_notifications(
+        &mut self,
+        _: &ToggleNotifications,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_notifications(cx);
     }
 
     /// Mirror of the TUI run_app startup: prime unread counts for every root
@@ -1534,7 +1568,7 @@ impl GlaucaApp {
 
     /// Apply a single engine message to GUI state. Mirrors the TUI's `run_app`
     /// message handling (crates/glauca-tui/src/tui/mod.rs).
-    fn apply(&mut self, msg: AppMessage, _cx: &mut Context<Self>) {
+    fn apply(&mut self, msg: AppMessage, cx: &mut Context<Self>) {
         // Only rebuild the filtered-index cache when items/filter/stream_filter
         // actually change. Background sync floods `apply` with messages that don't
         // touch the visible list (other queries' ItemsLoaded, Status, BgSync*,
@@ -1549,6 +1583,19 @@ impl GlaucaApp {
                 items,
                 background,
             } => {
+                // Desktop notification, independent of which query is selected:
+                // a background sync surfacing new/updated items for any query
+                // should notify. Returns `None` on the query's first load this
+                // session (baseline only), suppressing the startup storm.
+                let to_notify = self
+                    .notif_tracker
+                    .changed_count_to_notify(query_id, &items, background, self.notifications_enabled)
+                    .and_then(|n| query_label(&self.entries, query_id).map(|name| (name, n)));
+                if let Some((name, n)) = to_notify {
+                    cx.background_executor()
+                        .spawn(async move { glauca_core::notify::notify_updated_items(&name, n) })
+                        .detach();
+                }
                 let is_current = self.selected_root_query_id() == Some(query_id);
                 if is_current && background {
                     // Don't change the list under the user. Stash the fresh items
@@ -2941,6 +2988,7 @@ impl GlaucaApp {
         // is marked with a leading check; the rest are blank-padded to align.
         let view_app = app.clone();
         let current_theme = self.theme_pref;
+        let notifications_enabled = self.notifications_enabled;
         let theme_label = move |pref: ThemePreference, text: &str| {
             let mark = if pref == current_theme { "✓ " } else { "   " };
             format!("{mark}{text}")
@@ -2962,11 +3010,19 @@ impl GlaucaApp {
                     theme_label(ThemePreference::Light, "Theme: Light"),
                     |this, w, cx| this.set_theme(ThemePreference::Light, w, cx),
                 );
-                app_menu_item(
+                let menu = app_menu_item(
                     menu,
                     &view_app,
                     theme_label(ThemePreference::Dark, "Theme: Dark"),
                     |this, w, cx| this.set_theme(ThemePreference::Dark, w, cx),
+                );
+                let menu = menu.separator();
+                let notif_mark = if notifications_enabled { "✓ " } else { "   " };
+                app_menu_item(
+                    menu,
+                    &view_app,
+                    format!("{notif_mark}Desktop notifications"),
+                    |this, _w, cx| this.toggle_notifications(cx),
                 )
             });
 
@@ -3091,6 +3147,7 @@ impl Render for GlaucaApp {
             .on_action(cx.listener(Self::on_set_theme_system))
             .on_action(cx.listener(Self::on_set_theme_light))
             .on_action(cx.listener(Self::on_set_theme_dark))
+            .on_action(cx.listener(Self::on_toggle_notifications))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

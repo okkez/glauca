@@ -32,6 +32,10 @@ pub struct GuiSettings {
     /// Color theme. Defaults to `System` (follow the OS appearance).
     #[serde(default)]
     pub theme: ThemePreference,
+    /// Whether desktop notifications fire when a background sync surfaces new or
+    /// updated items. Defaults to `false` (opt-in).
+    #[serde(default)]
+    pub notifications_enabled: bool,
 }
 
 impl GuiSettings {
@@ -80,10 +84,28 @@ mod tests {
 
     #[test]
     fn legacy_settings_without_theme_load_as_system() {
-        // Older files predate the `theme` field; `#[serde(default)]` must fill it.
+        // Older files predate the `theme`/`notifications_enabled` fields;
+        // `#[serde(default)]` must fill them.
         let s: GuiSettings = toml::from_str("pane_sizes = [280.0, 0.0, 440.0]").unwrap();
         assert_eq!(s.theme, ThemePreference::System);
+        assert!(!s.notifications_enabled);
         assert_eq!(s.pane_sizes, vec![280.0, 0.0, 440.0]);
+    }
+
+    #[test]
+    fn notifications_default_off_and_round_trip() {
+        assert!(!GuiSettings::default().notifications_enabled);
+        let settings = GuiSettings {
+            notifications_enabled: true,
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&settings).unwrap();
+        assert!(
+            serialized.contains("notifications_enabled = true"),
+            "expected the flag in output, got:\n{serialized}"
+        );
+        let back: GuiSettings = toml::from_str(&serialized).unwrap();
+        assert!(back.notifications_enabled);
     }
 
     #[test]

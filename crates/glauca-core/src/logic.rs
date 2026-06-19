@@ -234,6 +234,15 @@ pub fn compute_unread_counts(
     out
 }
 
+/// Display label of the root query with `query_id`, or `None` if no such root
+/// query is in `entries`.
+pub fn query_label(entries: &[LeftPaneEntry], query_id: i64) -> Option<String> {
+    entries.iter().find_map(|e| match e {
+        LeftPaneEntry::Query(q) if q.id == query_id => Some(q.label.clone()),
+        _ => None,
+    })
+}
+
 pub fn group_range(entries: &[LeftPaneEntry], query_idx: usize) -> std::ops::Range<usize> {
     let end = entries[query_idx + 1..]
         .iter()

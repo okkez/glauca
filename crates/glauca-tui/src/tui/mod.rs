@@ -11,11 +11,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub mod settings;
 pub mod ui;
 
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
-use glauca_core::logic::{group_range, is_item_new_since, move_group_down};
+use glauca_core::logic::{group_range, is_item_new_since, move_group_down, query_label};
+use glauca_core::notify::ItemTracker;
+use settings::TuiSettings;
 
 // ── Display/domain types ─────────────────────────────────────────────────────
 // Moved to glauca-core::types (framework 非依存)。TUI からは従来名で使えるよう re-export。
@@ -109,6 +112,13 @@ pub struct App {
     pub detail_scroll: u16,
     /// Login name of the authenticated GitHub user (used to expand `@me` in filters).
     pub current_user: Option<String>,
+    /// Whether background-sync arrivals fire OS desktop notifications. Loaded
+    /// from `TuiSettings`; toggled with `N`.
+    pub notifications_enabled: bool,
+    /// Per-query session baseline for the notification "N updated" count, so the
+    /// first load of each query establishes a baseline without notifying (no
+    /// startup storm). See `glauca_core::notify::ItemTracker`.
+    pub notif_tracker: ItemTracker,
 }
 
 impl App {
@@ -148,6 +158,8 @@ impl App {
             bg_sync_pending: 0,
             detail_scroll: 0,
             current_user: None,
+            notifications_enabled: false,
+            notif_tracker: ItemTracker::new(),
         }
     }
 
@@ -472,6 +484,18 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
         // Apply held-back background updates to the visible list.
         KeyCode::Char('u') if app.pending_count > 0 => {
             return Action::ApplyPending;
+        }
+
+        // Toggle desktop notifications and persist the choice.
+        KeyCode::Char('N') => {
+            app.notifications_enabled = !app.notifications_enabled;
+            let mut s = TuiSettings::load();
+            s.notifications_enabled = app.notifications_enabled;
+            s.save();
+            app.status = Some(format!(
+                "Desktop notifications {}",
+                if app.notifications_enabled { "on" } else { "off" }
+            ));
         }
 
         // Enter filter mode (middle pane)
@@ -1186,6 +1210,7 @@ where
     let mut app = App::new(queries);
     app.entries = init.entries;
     app.current_user = init.current_user;
+    app.notifications_enabled = TuiSettings::load().notifications_enabled;
 
     // Prime unread counts for every root query via a cached load (no sync).
     let root_query_ids: Vec<i64> = app
@@ -1567,6 +1592,25 @@ where
                         items,
                         background,
                     } => {
+                        // Desktop notification, independent of which query is
+                        // selected. Returns `None` on the query's first load this
+                        // session (baseline only), suppressing the startup storm.
+                        let to_notify = app
+                            .notif_tracker
+                            .changed_count_to_notify(
+                                query_id,
+                                &items,
+                                background,
+                                app.notifications_enabled,
+                            )
+                            .and_then(|n| {
+                                query_label(&app.entries, query_id).map(|name| (name, n))
+                            });
+                        if let Some((name, n)) = to_notify {
+                            tokio::task::spawn_blocking(move || {
+                                glauca_core::notify::notify_updated_items(&name, n)
+                            });
+                        }
                         let is_current = app.selected_root_query_id() == Some(query_id);
                         if is_current && background {
                             // Don't change the list under the user; stash the fresh
