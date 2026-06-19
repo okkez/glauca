@@ -3256,6 +3256,11 @@ impl Render for GlaucaApp {
 }
 
 fn main() -> Result<()> {
+    // Keep the guard alive for the whole program so buffered logs are flushed on
+    // exit. Logs go to a file under the data dir (shared with the TUI).
+    let _log_guard = glauca_core::logging::init("glauca-gui", "glauca_core=info,glauca_gui=info");
+    tracing::info!("glauca-gui starting");
+
     // rustls needs a process-level CryptoProvider, but with both aws-lc-rs and
     // ring in the dependency graph it can't auto-select one. Install ring before
     // any TLS use (the avatar HTTP client). Ignore the error if already set.
@@ -3282,7 +3287,7 @@ fn main() -> Result<()> {
             // the Avatar falls back to its placeholder). Install a real client.
             match reqwest_client::ReqwestClient::user_agent("glauca-gui") {
                 Ok(client) => cx.set_http_client(std::sync::Arc::new(client)),
-                Err(e) => eprintln!("failed to init HTTP client for avatars: {e}"),
+                Err(e) => tracing::warn!(error = %e, "failed to init HTTP client for avatars"),
             }
             gpui_component::init(cx);
 

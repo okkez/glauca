@@ -2,6 +2,7 @@ use crate::db::CachedItem;
 use anyhow::{Context, Result};
 use octocrab::Octocrab;
 use serde::Deserialize;
+use tracing::{info, warn};
 
 /// Build an authenticated Octocrab instance.
 ///
@@ -10,9 +11,14 @@ use serde::Deserialize;
 ///   2. `GITHUB_TOKEN` env var (GitHub Actions / manual PAT)
 ///   3. Unauthenticated (rate-limited to 60 req/hour)
 pub fn build_client() -> Result<Octocrab> {
-    let token = std::env::var("GH_TOKEN")
-        .or_else(|_| std::env::var("GITHUB_TOKEN"))
-        .ok();
+    let (token, auth_source) = match std::env::var("GH_TOKEN") {
+        Ok(t) => (Some(t), "GH_TOKEN"),
+        Err(_) => match std::env::var("GITHUB_TOKEN") {
+            Ok(t) => (Some(t), "GITHUB_TOKEN"),
+            Err(_) => (None, "unauthenticated"),
+        },
+    };
+    info!(auth = auth_source, "building GitHub client");
 
     let mut builder = Octocrab::builder();
     if let Some(t) = token {
@@ -40,15 +46,20 @@ pub async fn get_current_user(client: &Octocrab) -> Option<CurrentUser> {
         #[serde(default)]
         avatar_url: Option<String>,
     }
-    client
+    match client
         .get::<UserResponse, _, _>("https://api.github.com/user", None::<&()>)
         .await
-        .ok()
-        .map(|u| CurrentUser {
+    {
+        Ok(u) => Some(CurrentUser {
             login: u.login,
             name: u.name,
             avatar_url: u.avatar_url,
-        })
+        }),
+        Err(e) => {
+            warn!(error = %e, "get_current_user failed (unauthenticated or API error)");
+            None
+        }
+    }
 }
 
 // ── GraphQL query ─────────────────────────────────────────────────────────────

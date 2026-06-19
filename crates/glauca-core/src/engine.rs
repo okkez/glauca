@@ -15,6 +15,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::mpsc;
+use tracing::{debug, info, instrument, warn};
 
 // ── Background messages ──────────────────────────────────────────────────────
 
@@ -378,6 +379,10 @@ const SEARCH_RESULT_CAP: usize = 1000;
 /// Fetch fresh results from GitHub API page by page, upserting each page immediately
 /// so the UI can show results as they arrive rather than waiting for all pages.
 #[allow(clippy::too_many_arguments)] // pool/gh/ids/opts/tx/gate are all genuinely needed
+#[instrument(
+    skip(pool, gh, query_str, last_viewed_at, opts, tx, gate),
+    fields(background = opts.background, incremental = opts.incremental)
+)]
 pub async fn sync_task(
     pool: SqlitePool,
     gh: Octocrab,
@@ -431,6 +436,11 @@ pub async fn sync_task(
                 let now = Utc::now().timestamp();
                 let until = backoff_until(&gh, now).await;
                 gate.block_until(until);
+                warn!(
+                    until,
+                    wait_secs = (until - now).max(0),
+                    "rate limited; pausing background sync"
+                );
                 let _ = tx
                     .send(AppMessage::Status(format!(
                         "GitHub rate limited; auto-sync paused ~{}s",
@@ -440,6 +450,7 @@ pub async fn sync_task(
                 return;
             }
             Err(github::SearchError::Other(e)) => {
+                warn!(error = %e, "sync failed");
                 let _ = tx
                     .send(AppMessage::SyncError {
                         query_id,
@@ -472,6 +483,7 @@ pub async fn sync_task(
                     }
                 }
                 total_count += page.items.len();
+                debug!(page_items = page.items.len(), total_count, "fetched page");
 
                 // Reload from DB after each page so the UI shows results immediately.
                 reload().await;
@@ -496,7 +508,10 @@ pub async fn sync_task(
         match db::prune_query_items(&pool, query_id, &keep_keys).await {
             // Only reload when rows were actually removed — the final per-page
             // reload already reflects every upsert.
-            Ok(deleted) if deleted > 0 => reload().await,
+            Ok(deleted) if deleted > 0 => {
+                debug!(deleted, "pruned items no longer matching query");
+                reload().await;
+            }
             Ok(_) => {}
             Err(e) => {
                 let _ = tx
@@ -516,6 +531,7 @@ pub async fn sync_task(
             .await;
         return;
     }
+    info!(total_count, "sync done");
     let _ = tx
         .send(AppMessage::SyncDone {
             query_id,
@@ -582,12 +598,17 @@ async fn backoff_until(gh: &Octocrab, now: i64) -> i64 {
         Ok(rl) => {
             let graphql = rl.resources.graphql.unwrap_or(rl.rate);
             if graphql.remaining == 0 {
+                info!(reset = graphql.reset, "rate limit: waiting for graphql reset");
                 graphql.reset as i64
             } else {
+                info!("rate limit: secondary/abuse, using fixed cooldown");
                 fixed_cooldown
             }
         }
-        Err(_) => fixed_cooldown,
+        Err(e) => {
+            warn!(error = %e, "rate_limit query failed; using fixed cooldown");
+            fixed_cooldown
+        }
     }
 }
 
@@ -606,6 +627,7 @@ pub async fn sync_worker_task(
         // Skip (don't hit the API) while rate-limited; the query stays stale and
         // will be re-enqueued once the gate reopens.
         if !gate.is_open(Utc::now().timestamp()) {
+            debug!(query_id = job.query_id, "skip sync: rate-limited");
             let _ = tx.send(AppMessage::BgSyncJobDone).await;
             continue;
         }
@@ -645,6 +667,7 @@ async fn enqueue_stale_queries(
 ) {
     // Don't fill the queue while rate-limited; the timer will try again later.
     if !gate.is_open(Utc::now().timestamp()) {
+        debug!("skip enqueue: rate-limited");
         return;
     }
     let queries = db::list_queries(pool).await.unwrap_or_default();
@@ -666,6 +689,7 @@ async fn enqueue_stale_queries(
             count += 1;
         }
     }
+    debug!(count, "enqueued stale queries");
     if count > 0 {
         let _ = app_tx.send(AppMessage::BgSyncQueued(count)).await;
     }
@@ -915,6 +939,7 @@ impl Engine {
         // a query syncs roughly every `interval` seconds.
         let interval = effective_interval(sync_interval_secs);
         let stale = interval as i64;
+        info!(sync_interval_secs = interval, "engine started");
         // Shared gate that pauses background sync after a rate limit is hit.
         let gate = RateLimitGate::new();
 

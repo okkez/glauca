@@ -6,6 +6,7 @@ pub mod db;
 pub mod engine;
 pub mod filter;
 pub mod github;
+pub mod logging;
 pub mod logic;
 pub mod notify;
 pub mod time;
