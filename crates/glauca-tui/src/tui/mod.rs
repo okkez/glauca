@@ -63,6 +63,11 @@ pub struct App {
     pub item_cursor: usize,
     pub unread_counts: HashMap<(bool, i64), usize>,
     pub active_entry_last_viewed_at: Option<String>,
+    /// Freshly-synced items for the currently-viewed query, held back because
+    /// they came from a background sync. Applied on explicit action (`u`).
+    pub pending_items: Option<Vec<ItemEntry>>,
+    /// How many of `pending_items` are new/updated vs the displayed list.
+    pub pending_count: usize,
     pub filter: String,
     /// Active filter stream filter applied before the inline filter (if any).
     pub stream_filter: Option<String>,
@@ -116,6 +121,8 @@ impl App {
             item_cursor: 0,
             unread_counts: HashMap::new(),
             active_entry_last_viewed_at: None,
+            pending_items: None,
+            pending_count: 0,
             filter: String::new(),
             stream_filter: None,
             new_query_input: String::new(),
@@ -182,6 +189,37 @@ impl App {
         }
     }
 
+    /// Set `is_new` flags (relative to the active entry's last-viewed time) and
+    /// install `items` as the visible list, clamping the cursor.
+    fn apply_items_to_view(&mut self, mut items: Vec<ItemEntry>) {
+        let highlight_since = self.active_entry_last_viewed_at.clone();
+        for item in &mut items {
+            item.is_new =
+                is_item_new_since(&item.cached_at, highlight_since.as_deref()) && !item.read;
+        }
+        self.items = items;
+        self.clamp_item_cursor();
+    }
+
+    /// Drop any held-back background-sync results / banner.
+    fn clear_pending(&mut self) {
+        self.pending_items = None;
+        self.pending_count = 0;
+    }
+
+    /// Apply the stashed background-sync results to the visible list (the `u`
+    /// key). No-op when nothing is pending.
+    pub fn apply_pending_items(&mut self) {
+        let Some(items) = self.pending_items.take() else {
+            return;
+        };
+        self.pending_count = 0;
+        if let Some(qid) = self.selected_root_query_id() {
+            self.recompute_unread_counts_for_query(qid, &items);
+        }
+        self.apply_items_to_view(items);
+    }
+
     fn mark_entry_viewed(&mut self, entry_id: i64, viewed_at: String) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id() == entry_id) {
             entry.set_last_viewed_at(Some(viewed_at));
@@ -220,6 +258,8 @@ enum Action {
     ReviewOctorus,
     RefreshList,
     RefreshItem,
+    /// Apply held-back background-sync results to the visible list (`u`).
+    ApplyPending,
 }
 
 /// Copy `text` to the system clipboard via the OSC 52 terminal escape sequence.
@@ -402,6 +442,11 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                 && app.selected_item().is_some() =>
         {
             return Action::RefreshItem;
+        }
+
+        // Apply held-back background updates to the visible list.
+        KeyCode::Char('u') if app.pending_count > 0 => {
+            return Action::ApplyPending;
         }
 
         // Enter filter mode (middle pane)
@@ -898,6 +943,8 @@ fn prepare_selected_entry_load(app: &mut App) -> Option<SelectedEntryLoad> {
     let highlight_since = entry.last_viewed_at().map(str::to_string);
     app.stream_filter = entry.stream_filter().map(|s| s.to_string());
     app.active_entry_last_viewed_at = highlight_since.clone();
+    // Switching entries invalidates any held-back update for the previous one.
+    app.clear_pending();
 
     Some(SelectedEntryLoad {
         root_id: entry.root_query_id(),
@@ -1445,6 +1492,9 @@ where
                         Action::RefreshItem => {
                             refresh_selected_item(&mut app, &engine).await;
                         }
+                        Action::ApplyPending => {
+                            app.apply_pending_items();
+                        }
                         Action::None => {}
                     }
                     // Viewing an item (cursor on the item list or its detail pane)
@@ -1459,16 +1509,29 @@ where
             }
             Some(msg) = engine.recv() => {
                 match msg {
-                    AppMessage::ItemsLoaded { query_id, mut items } => {
-                        app.recompute_unread_counts_for_query(query_id, &items);
-                        if app.selected_root_query_id() == Some(query_id) {
-                            let highlight_since = app.active_entry_last_viewed_at.clone();
-                            for item in &mut items {
-                                item.is_new = is_item_new_since(&item.cached_at, highlight_since.as_deref())
-                                    && !item.read;
+                    AppMessage::ItemsLoaded {
+                        query_id,
+                        items,
+                        background,
+                    } => {
+                        let is_current = app.selected_root_query_id() == Some(query_id);
+                        if is_current && background {
+                            // Don't change the list under the user; stash the fresh
+                            // items and show a "N updated" banner (applied via `u`).
+                            let n = glauca_core::logic::count_changed(&app.items, &items);
+                            if n == 0 {
+                                app.clear_pending();
+                            } else {
+                                app.pending_items = Some(items);
+                                app.pending_count = n;
                             }
-                            app.items = items;
-                            app.clamp_item_cursor();
+                        } else {
+                            app.recompute_unread_counts_for_query(query_id, &items);
+                            if is_current {
+                                // Foreground load: apply live and drop any banner.
+                                app.apply_items_to_view(items);
+                                app.clear_pending();
+                            }
                         }
                     }
                     AppMessage::QueryAdded(q) => {

@@ -19,6 +19,11 @@ pub enum AppMessage {
     ItemsLoaded {
         query_id: i64,
         items: Vec<ItemEntry>,
+        /// True when this load came from a background sync (the periodic worker),
+        /// false for user-driven loads (select/manual sync/refresh/mark-read). The
+        /// front-ends defer applying background updates to the currently-viewed
+        /// query so the list doesn't change under the user.
+        background: bool,
     },
     QueryAdded(QueryEntry),
     FilterStreamAdded(FilterStreamEntry),
@@ -322,6 +327,7 @@ pub async fn load_items_task(
     pool: SqlitePool,
     query_id: i64,
     last_viewed_at: Option<String>,
+    background: bool,
     tx: mpsc::Sender<AppMessage>,
 ) {
     match db::fetch_items(&pool, query_id).await {
@@ -330,7 +336,13 @@ pub async fn load_items_task(
                 .into_iter()
                 .map(|c| cached_item_to_item_entry(c, last_viewed_at.as_deref()))
                 .collect();
-            let _ = tx.send(AppMessage::ItemsLoaded { query_id, items }).await;
+            let _ = tx
+                .send(AppMessage::ItemsLoaded {
+                    query_id,
+                    items,
+                    background,
+                })
+                .await;
         }
         Err(e) => {
             let _ = tx
@@ -348,6 +360,7 @@ pub async fn sync_task(
     query_id: i64,
     query_str: String,
     last_viewed_at: Option<String>,
+    background: bool,
     tx: mpsc::Sender<AppMessage>,
 ) {
     let mut after: Option<String> = None;
@@ -384,7 +397,14 @@ pub async fn sync_task(
                 total_count += page.items.len();
 
                 // Reload from DB after each page so the UI shows results immediately.
-                load_items_task(pool.clone(), query_id, last_viewed_at.clone(), tx.clone()).await;
+                load_items_task(
+                    pool.clone(),
+                    query_id,
+                    last_viewed_at.clone(),
+                    background,
+                    tx.clone(),
+                )
+                .await;
 
                 // Stop when GitHub reports no further pages, or defensively if
                 // it claims another page but hands back no cursor to fetch it.
@@ -443,6 +463,7 @@ pub async fn sync_worker_task(
                 job.query_id,
                 job.query_str,
                 None,
+                true, // background worker
                 tx.clone(),
             )
             .await;
@@ -778,6 +799,7 @@ async fn command_loop(
                     pool.clone(),
                     query_id,
                     highlight_since,
+                    false, // user-driven load
                     msg_tx.clone(),
                 ));
             }
@@ -792,6 +814,7 @@ async fn command_loop(
                     query_id,
                     query_str,
                     highlight_since,
+                    false, // user-initiated sync
                     msg_tx.clone(),
                 ));
             }
@@ -809,7 +832,7 @@ async fn command_loop(
                         .unwrap_or(true)
                     {
                         let _ = tx2.send(AppMessage::SyncStarted { query_id }).await;
-                        sync_task(pool2, gh2, query_id, query_str, highlight_since, tx2).await;
+                        sync_task(pool2, gh2, query_id, query_str, highlight_since, false, tx2).await;
                     }
                 });
             }
@@ -833,7 +856,8 @@ async fn command_loop(
                                     tx2.send(AppMessage::Status(format!("Refresh failed: {e}"))).await;
                                 return;
                             }
-                            load_items_task(pool2, query_id, highlight_since, tx2.clone()).await;
+                            load_items_task(pool2, query_id, highlight_since, false, tx2.clone())
+                                .await;
                             let _ = tx2.send(AppMessage::Status(format!("Refreshed #{number}"))).await;
                         }
                         Ok(None) => {
@@ -1105,7 +1129,7 @@ async fn command_loop(
                         Some(f) => mark_filtered_items_read(&pool2, query_id, f).await,
                     };
                     match res {
-                        Ok(()) => load_items_task(pool2, query_id, None, tx2).await,
+                        Ok(()) => load_items_task(pool2, query_id, None, false, tx2).await,
                         Err(e) => {
                             let _ = tx2
                                 .send(AppMessage::Status(format!("mark all read error: {e}")))

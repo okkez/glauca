@@ -240,11 +240,41 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::ItemList;
     let filter_mode = app.input_mode == InputMode::Filter;
 
-    // Split: filter bar (3 lines) + list
-    let split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)])
-        .split(area);
+    // Layout: optional "N updated" banner (1 line) + filter bar (3 lines) + list.
+    // The banner shows when a background sync brought results we held back; press
+    // `u` to apply them.
+    let has_banner = app.pending_count > 0;
+    let split = if has_banner {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Min(1),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .split(area)
+    };
+    let (filter_area, list_area) = if has_banner {
+        let banner = Paragraph::new(format!(
+            "↻ {} updated — press u to refresh",
+            app.pending_count
+        ))
+        .style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+        f.render_widget(banner, split[0]);
+        (split[1], split[2])
+    } else {
+        (split[0], split[1])
+    };
 
     // Filter input bar
     let filter_label = if filter_mode {
@@ -265,7 +295,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     let filter_para = Paragraph::new(filter_label)
         .style(filter_style)
         .block(filter_block);
-    f.render_widget(filter_para, split[0]);
+    f.render_widget(filter_para, filter_area);
 
     // Item list
     let filtered = app.filtered_items();
@@ -284,7 +314,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         .chars()
         .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
         .sum();
-    let inner_w = (split[1].width as usize).saturating_sub(2 + symbol_w);
+    let inner_w = (list_area.width as usize).saturating_sub(2 + symbol_w);
 
     // Sample the clock once for the whole list so each row's relative time is
     // measured against the same instant (and we avoid a per-row `Utc::now()`).
@@ -361,7 +391,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         .highlight_style(highlight_style(focused))
         .highlight_symbol(HIGHLIGHT_SYMBOL);
 
-    f.render_stateful_widget(list, split[1], &mut state);
+    f.render_stateful_widget(list, list_area, &mut state);
 }
 
 // ── Right pane: item detail ───────────────────────────────────────────────────

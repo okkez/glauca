@@ -13,6 +13,32 @@ pub fn is_item_new_since(cached_at: &str, last_viewed_at: Option<&str>) -> bool 
         .unwrap_or(true)
 }
 
+/// Count how many items in `fresh` differ from `current`: items that are new
+/// (not present in `current`) or whose `updated_at` changed. Used to show
+/// "N updated" when a background sync's results are held back from the view.
+/// Items keyed by (repo_owner, repo_name, number).
+pub fn count_changed(current: &[ItemEntry], fresh: &[ItemEntry]) -> usize {
+    let seen: std::collections::HashMap<(&str, &str, i64), &str> = current
+        .iter()
+        .map(|it| {
+            (
+                (it.repo_owner.as_str(), it.repo_name.as_str(), it.number),
+                it.updated_at.as_str(),
+            )
+        })
+        .collect();
+    fresh
+        .iter()
+        .filter(|it| {
+            let key = (it.repo_owner.as_str(), it.repo_name.as_str(), it.number);
+            match seen.get(&key) {
+                None => true,                                  // newly appeared
+                Some(prev_updated) => *prev_updated != it.updated_at, // changed
+            }
+        })
+        .count()
+}
+
 /// Labels are stored as a JSON array string, e.g. '["bug","enhancement"]'.
 pub fn decode_labels(raw: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
@@ -304,5 +330,38 @@ mod tests {
     #[test]
     fn reviewer_overlays_empty_when_no_reviews_or_requests() {
         assert!(reviewer_overlays(&ItemEntry::default()).is_empty());
+    }
+
+    fn item_at(number: i64, updated_at: &str) -> ItemEntry {
+        ItemEntry {
+            repo_owner: "okkez".into(),
+            repo_name: "glauca".into(),
+            number,
+            updated_at: updated_at.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn count_changed_counts_new_and_updated_only() {
+        let current = vec![item_at(1, "2026-01-01T00:00:00Z"), item_at(2, "2026-01-01T00:00:00Z")];
+        let fresh = vec![
+            item_at(1, "2026-01-01T00:00:00Z"), // unchanged
+            item_at(2, "2026-06-01T00:00:00Z"), // updated
+            item_at(3, "2026-06-01T00:00:00Z"), // new
+        ];
+        assert_eq!(count_changed(&current, &fresh), 2);
+    }
+
+    #[test]
+    fn count_changed_zero_when_identical() {
+        let items = vec![item_at(1, "2026-01-01T00:00:00Z")];
+        assert_eq!(count_changed(&items, &items), 0);
+    }
+
+    #[test]
+    fn count_changed_counts_all_against_empty() {
+        let fresh = vec![item_at(1, "t"), item_at(2, "t")];
+        assert_eq!(count_changed(&[], &fresh), 2);
     }
 }

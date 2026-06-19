@@ -18,8 +18,8 @@ use anyhow::Result;
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{
-    compute_unread_counts, expand_me, group_range, is_item_new_since, move_group_down,
-    reviewer_overlays, ReviewState,
+    compute_unread_counts, count_changed, expand_me, group_range, is_item_new_since,
+    move_group_down, reviewer_overlays, ReviewState,
 };
 use glauca_core::types::{CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, UserRef};
 use glauca_core::{db, github};
@@ -191,6 +191,14 @@ struct GlaucaApp {
     /// `last_viewed_at` of the selected entry at selection time; drives `is_new`.
     active_entry_last_viewed_at: Option<String>,
 
+    /// Freshly-synced items for the currently-viewed query, held back from the
+    /// list because they arrived from a background sync. Applied on explicit
+    /// action (clicking the "N updated" banner). `None` when nothing is pending.
+    pending_items: Option<Vec<ItemEntry>>,
+    /// How many of `pending_items` are new/updated vs the displayed list (the
+    /// number shown in the banner).
+    pending_count: usize,
+
     /// Whether a manual GitHub sync is in progress for the selected query.
     syncing: bool,
     /// Number of pending background auto-refresh jobs (queued + in-progress).
@@ -261,9 +269,14 @@ struct GlaucaApp {
 impl GlaucaApp {
     fn new(engine: Engine, init: EngineInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Periodically drain engine messages and repaint while the window lives.
+        // Use gpui's executor timer (not `smol::Timer`): its completion wakes the
+        // platform event loop, so the loop keeps draining while the window is idle.
+        // With `smol::Timer` the tick doesn't poke gpui's loop, so background-sync
+        // messages sat undrained until the next user interaction (no "N updated"
+        // banner appeared on its own).
         cx.spawn(async move |this, cx| {
             loop {
-                Timer::after(DRAIN_INTERVAL).await;
+                cx.background_executor().timer(DRAIN_INTERVAL).await;
                 let result = this.update(cx, |this, cx| {
                     let mut changed = false;
                     while let Some(msg) = this.engine.try_recv() {
@@ -329,6 +342,8 @@ impl GlaucaApp {
             unread_counts: HashMap::new(),
             stream_filter: None,
             active_entry_last_viewed_at: None,
+            pending_items: None,
+            pending_count: 0,
             syncing: false,
             bg_sync_pending: 0,
             status: None,
@@ -497,6 +512,7 @@ impl GlaucaApp {
         self.entry_cursor = index;
         self.items.clear();
         self.item_cursor = 0;
+        self.clear_pending();
         self.recompute_filtered();
         self.select_current_entry(true);
     }
@@ -516,6 +532,7 @@ impl GlaucaApp {
         self.item_cursor = 0;
         self.stream_filter = stream_filter;
         self.active_entry_last_viewed_at = highlight_since.clone();
+        self.clear_pending();
         self.recompute_filtered();
         self.send(EngineCommand::LoadCached {
             query_id: root_id,
@@ -1411,6 +1428,38 @@ impl GlaucaApp {
         });
     }
 
+    /// Set `is_new` flags (relative to the active entry's last-viewed time) and
+    /// install `items` as the visible list. Caller refilters / notifies.
+    fn apply_items_to_view(&mut self, mut items: Vec<ItemEntry>) {
+        let highlight_since = self.active_entry_last_viewed_at.clone();
+        for item in &mut items {
+            item.is_new =
+                is_item_new_since(&item.cached_at, highlight_since.as_deref()) && !item.read;
+        }
+        self.items = items;
+    }
+
+    /// Drop any held-back background-sync results / banner.
+    fn clear_pending(&mut self) {
+        self.pending_items = None;
+        self.pending_count = 0;
+    }
+
+    /// Apply the stashed background-sync results to the visible list (banner
+    /// click / explicit refresh). No-op when nothing is pending.
+    fn apply_pending(&mut self, cx: &mut Context<Self>) {
+        let Some(items) = self.pending_items.take() else {
+            return;
+        };
+        self.pending_count = 0;
+        if let Some(qid) = self.selected_root_query_id() {
+            self.recompute_unread(qid, &items);
+        }
+        self.apply_items_to_view(items);
+        self.recompute_filtered();
+        cx.notify();
+    }
+
     fn recompute_unread(&mut self, query_id: i64, items: &[ItemEntry]) {
         for (key, unread) in
             compute_unread_counts(&self.entries, query_id, items, self.current_user.as_deref())
@@ -1473,17 +1522,32 @@ impl GlaucaApp {
         // `preview_entry`, the filter debounce task).
         let mut needs_refilter = false;
         match msg {
-            AppMessage::ItemsLoaded { query_id, mut items } => {
-                self.recompute_unread(query_id, &items);
-                if self.selected_root_query_id() == Some(query_id) {
-                    let highlight_since = self.active_entry_last_viewed_at.clone();
-                    for item in &mut items {
-                        item.is_new =
-                            is_item_new_since(&item.cached_at, highlight_since.as_deref())
-                                && !item.read;
+            AppMessage::ItemsLoaded {
+                query_id,
+                items,
+                background,
+            } => {
+                let is_current = self.selected_root_query_id() == Some(query_id);
+                if is_current && background {
+                    // Don't change the list under the user. Stash the fresh items
+                    // and surface a "N updated" banner; applied on explicit action.
+                    // Unread badges are deferred too, so nothing moves until then.
+                    let n = count_changed(&self.items, &items);
+                    if n == 0 {
+                        self.clear_pending();
+                    } else {
+                        self.pending_items = Some(items);
+                        self.pending_count = n;
                     }
-                    self.items = items;
-                    needs_refilter = true;
+                } else {
+                    self.recompute_unread(query_id, &items);
+                    if is_current {
+                        // Foreground load for the current query: apply live and drop
+                        // any banner (this load supersedes it).
+                        self.apply_items_to_view(items);
+                        self.clear_pending();
+                        needs_refilter = true;
+                    }
                 }
             }
             AppMessage::EntryViewed { entry_id, viewed_at } => {
@@ -1848,6 +1912,42 @@ impl GlaucaApp {
                     .border_color(cx.theme().border)
                     .child(Input::new(&self.filter_input)),
             )
+            // "N updated" banner: shown when a background sync brought fresh
+            // results for this query that we held back. Click to apply them.
+            .when(self.pending_count > 0, |this| {
+                let view = cx.entity();
+                let n = self.pending_count;
+                // Solid attention color (amber) with its matching foreground so the
+                // banner clearly stands out instead of blending into the pane.
+                let bg = cx.theme().warning;
+                let fg = cx.theme().warning_foreground;
+                let mut hover_bg = bg;
+                hover_bg.l = (hover_bg.l + 0.06).min(1.0);
+                this.child(
+                    div()
+                        .id("pending-refresh")
+                        .w_full()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .bg(bg)
+                        .text_sm()
+                        .font_bold()
+                        .text_color(fg)
+                        .cursor_pointer()
+                        .hover(move |e| e.bg(hover_bg))
+                        .on_click(move |_, _window, cx| {
+                            view.update(cx, |this, cx| this.apply_pending(cx));
+                        })
+                        .child(SharedString::from(format!(
+                            "↻  {n} updated — click to refresh"
+                        ))),
+                )
+            })
             .child(self.render_items(cx))
     }
 
