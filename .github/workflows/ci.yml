@@ -17,15 +17,12 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           components: rustfmt, clippy
-
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
 
       # rustfmt only parses, so checking the whole workspace (including the GUI)
       # is cheap and keeps every crate formatted.
