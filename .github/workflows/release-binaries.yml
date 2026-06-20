@@ -1,0 +1,68 @@
+name: release-binaries
+
+# Triggered by the tag that release-plz creates (see release-plz.yml). For this
+# to fire, that tag must be pushed with a PAT/App token, not GITHUB_TOKEN.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  SQLX_OFFLINE: "true"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  upload:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: ${{ matrix.target }}
+
+      # gpui (the GUI) needs X11/Wayland/GPU/font system libraries on Linux.
+      # macOS uses Metal and needs none. Tune this list if the first GUI build
+      # fails at the linker stage.
+      - name: Install GUI system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libvulkan-dev
+
+      - name: Build and upload glauca-tui
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: glauca-tui
+          target: ${{ matrix.target }}
+          archive: glauca-tui-$target
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and upload glauca-gui
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
+        with:
+          bin: glauca-gui
+          target: ${{ matrix.target }}
+          archive: glauca-gui-$target
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}

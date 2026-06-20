@@ -1,0 +1,39 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Opens / updates the release PR (version bump + CHANGELOG) and, once that PR
+  # is merged, creates the git tag and GitHub Release.
+  release-plz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+
+      - name: Run release-plz
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        with:
+          # The tag/release must be created with a PAT or GitHub App token, NOT
+          # the default GITHUB_TOKEN. A tag pushed by GITHUB_TOKEN does not
+          # trigger other workflows (recursion guard), so release-binaries.yml
+          # would never fire. Provide a RELEASE_PLZ_TOKEN secret (fine-grained
+          # PAT or GitHub App token with contents + pull-requests write).
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        env:
+          SQLX_OFFLINE: "true"
