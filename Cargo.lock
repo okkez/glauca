@@ -2721,6 +2721,7 @@ dependencies = [
  "glauca-core",
  "octocrab",
  "ratatui",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",
