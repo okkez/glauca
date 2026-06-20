@@ -2,9 +2,7 @@
 name = "glauca-core"
 edition.workspace = true
 version.workspace = true
-# Not published to crates.io: the workspace depends on gpui via git, which
-# crates.io forbids. release-plz manages versions/changelog/releases only.
-publish = false
+publish.workspace = true
 
 [lib]
 

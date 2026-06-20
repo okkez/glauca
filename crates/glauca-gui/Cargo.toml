@@ -2,8 +2,7 @@
 name = "glauca-gui"
 edition.workspace = true
 version.workspace = true
-# Not published to crates.io (see glauca-core). release-plz manages releases.
-publish = false
+publish.workspace = true
 
 [[bin]]
 name = "glauca-gui"
