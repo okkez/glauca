@@ -1,10 +1,13 @@
 name: release-binaries
 
-# Triggered by the tag that release-plz creates (see release-plz.yml). For this
-# to fire, that tag must be pushed with a PAT/App token, not GITHUB_TOKEN.
+# Triggered by the GitHub Release that release-plz publishes (see release-plz.yml).
+# Using the `release` event (not tag push) guarantees the Release object already
+# exists, since taiki-e/upload-rust-binary-action only uploads to an existing
+# release. For this to fire, release-plz must create the release with an App/PAT
+# token, not the default GITHUB_TOKEN.
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -35,6 +38,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           target: ${{ matrix.target }}
+          # Releases are infrequent and their build cache reuses poorly; skip
+          # caching so it doesn't evict the more valuable ci.yml cache.
+          cache: false
 
       # gpui (the GUI) needs X11/Wayland/GPU/font system libraries on Linux.
       # macOS uses Metal and needs none. Tune this list if the first GUI build
@@ -56,6 +62,7 @@ jobs:
           target: ${{ matrix.target }}
           archive: glauca-tui-$target
           checksum: sha256
+          locked: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and upload glauca-gui
@@ -65,4 +72,5 @@ jobs:
           target: ${{ matrix.target }}
           archive: glauca-gui-$target
           checksum: sha256
+          locked: true
           token: ${{ secrets.GITHUB_TOKEN }}
