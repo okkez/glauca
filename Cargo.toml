@@ -49,3 +49,10 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 # from a git dependency's own workspace.
 [patch.crates-io]
 psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
+# zed patches async-process to a fork that adds Child::adopt_raw_pid, used by
+# util/src/command/darwin.rs (macOS only). [patch] does not propagate from zed's
+# own workspace, so without mirroring it the aarch64-apple-darwin glauca-gui build
+# fails with E0599. async-task is the other patch zed applies; mirror both so the
+# dependency graph resolves identically to zed's.
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
