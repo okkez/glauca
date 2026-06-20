@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core access for the main window: custom command invocation and the event bus used to receive AppMessage from the engine.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

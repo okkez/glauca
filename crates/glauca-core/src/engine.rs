@@ -19,6 +19,14 @@ use tracing::{debug, info, instrument, warn};
 
 // ── Background messages ──────────────────────────────────────────────────────
 
+/// Messages the engine emits to the front-end.
+///
+/// Serialized adjacently tagged (`{"type": "ItemsLoaded", "data": {…}}`) for the
+/// web front-end (glauca-tauri), which forwards each one to JavaScript over the
+/// Tauri event bus. The adjacent representation handles every variant shape
+/// (struct/newtype/tuple/unit) uniformly. The TUI/GUI never serialize it.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", content = "data")]
 pub enum AppMessage {
     ItemsLoaded {
         query_id: i64,
@@ -286,7 +294,8 @@ pub async fn execute_comment(url: &str, kind: &str, body: &str) -> anyhow::Resul
 }
 
 /// A GitHub pull-request review event, submitted via `gh pr review`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReviewEvent {
     Comment,
     Approve,
@@ -738,6 +747,7 @@ pub async fn refresh_timer_task(
 
 /// Initial state produced by `Engine::start`: the left-pane entries (root queries
 /// interleaved with their filter streams) and the authenticated user login.
+#[derive(serde::Serialize)]
 pub struct EngineInit {
     pub entries: Vec<LeftPaneEntry>,
     pub current_user: Option<String>,

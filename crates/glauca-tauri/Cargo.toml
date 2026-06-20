@@ -1,0 +1,33 @@
+[package]
+name = "glauca-tauri"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "glauca-tauri"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+glauca-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+dirs.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tauri = { version = "2", features = [] }
+# octocrab (via glauca-core) uses rustls; both aws-lc-rs and ring are in the
+# graph, so rustls can't auto-pick a CryptoProvider. We install ring at startup,
+# mirroring glauca-tui / glauca-gui.
+rustls = { version = "0.23", features = ["ring"] }
+
+# NOTE on Servo: rendering through Servo uses `tauri-runtime-verso`, which is NOT
+# published on crates.io (it lives in the tauri-apps repo and is experimental).
+# It is therefore an opt-in manual step rather than a Cargo feature here — see the
+# "Servo (experimental)" section in README.md. The default build uses the system
+# WebView (WebKitGTK / WKWebView / WebView2).

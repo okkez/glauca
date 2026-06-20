@@ -1,0 +1,184 @@
+/* Plain, framework-free styling. Kept deliberately simple (flexbox, no exotic
+   CSS) so it also renders cleanly under Servo/Verso, not just the system WebView. */
+:root {
+  --bg: #14181c;
+  --bg-alt: #1b2127;
+  --bg-sel: #2a3a4a;
+  --border: #2a323a;
+  --fg: #d6dde4;
+  --fg-dim: #8b97a3;
+  --accent: #4fb0c6;
+  --green: #57ab5a;
+  --red: #e5534b;
+  --purple: #986ee2;
+  --new: #d9a441;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+#app {
+  display: flex;
+  height: calc(100vh - 26px);
+}
+
+#sidebar { width: 260px; min-width: 200px; border-right: 1px solid var(--border); overflow-y: auto; }
+#items   { width: 420px; min-width: 280px; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+#detail  { flex: 1; min-width: 280px; display: flex; flex-direction: column; }
+
+.pane-title {
+  padding: 8px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--fg-dim);
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pane-title #items-title { flex: 1; }
+
+#filter {
+  flex: 1;
+  max-width: 220px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+ul { list-style: none; margin: 0; padding: 0; }
+
+#entries li {
+  padding: 6px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+}
+#entries li.stream { padding-left: 28px; color: var(--fg-dim); }
+#entries li.selected { background: var(--bg-sel); }
+#entries li:hover { background: var(--bg-alt); }
+#entries .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge {
+  background: var(--accent);
+  color: #06222b;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 9px;
+  padding: 0 6px;
+  min-width: 18px;
+  text-align: center;
+}
+
+#item-list { overflow-y: auto; flex: 1; }
+#item-list li {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+#item-list li.selected { background: var(--bg-sel); }
+#item-list li:hover { background: var(--bg-alt); }
+#item-list li.read .it-title { color: var(--fg-dim); }
+.it-title { font-weight: 500; display: block; }
+.it-meta { color: var(--fg-dim); font-size: 12px; margin-top: 2px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tag { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--border); }
+.tag.new   { color: var(--new); border-color: var(--new); }
+.tag.draft { color: var(--fg-dim); }
+.state-open   { color: var(--green); }
+.state-closed { color: var(--red); }
+.state-merged { color: var(--purple); }
+
+#detail-body { padding: 14px; overflow-y: auto; flex: 1; }
+#detail-body.empty { color: var(--fg-dim); }
+#detail-body h2 { margin: 0 0 6px; font-size: 16px; }
+#detail-body .meta { color: var(--fg-dim); margin-bottom: 10px; }
+#detail-body .labels { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 4px; }
+#detail-body .body {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 10px;
+  margin-top: 10px;
+}
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.actions button {
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.actions button:hover { background: var(--bg-sel); border-color: var(--accent); }
+
+.comments { margin-top: 14px; }
+.comment { border-top: 1px solid var(--border); padding: 8px 0; }
+.comment .chead { color: var(--fg-dim); font-size: 12px; margin-bottom: 3px; }
+.comment .cbody { white-space: pre-wrap; word-wrap: break-word; }
+
+#statusbar {
+  height: 26px;
+  background: var(--bg-alt);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+#statusbar.error #status { color: var(--red); }
+
+/* In-page prompt modal (replaces window.prompt, unreliable in some webviews). */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-box {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  width: min(420px, 90vw);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.modal-label { margin-bottom: 8px; }
+.modal-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.modal-actions button {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.modal-actions button:hover { border-color: var(--accent); }

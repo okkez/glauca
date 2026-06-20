@@ -29,13 +29,17 @@ It ships as two frontends sharing the same core: a terminal UI and a desktop GUI
 
 ## Architecture
 
-Glauca is a Cargo workspace of three crates:
+Glauca is a Cargo workspace of four crates:
 
 | Crate | Role |
 | --- | --- |
 | `glauca-core` | Shared library: database, GitHub API integration, sync engine |
 | `glauca-tui` | Terminal UI (built with `ratatui`) |
 | `glauca-gui` | Desktop GUI (built with `gpui`) |
+| `glauca-tauri` | Desktop web-tech UI (built with `tauri`, plain HTML/CSS/JS) |
+
+Every front-end is a thin shell over `glauca-core`'s async engine, talking to it
+through the same `EngineCommand` / `AppMessage` message protocol.
 
 The GitHub client uses `octocrab` plus GraphQL search; the cache uses `sqlx` with SQLite.
 
@@ -66,7 +70,19 @@ cargo run -p glauca-tui
 
 # Desktop GUI (requires X11/Wayland + GPU)
 cargo run -p glauca-gui
+
+# Desktop web-tech UI (Tauri). Needs the Tauri CLI (Rust, no Node):
+#   cargo install tauri-cli
+cargo tauri dev --config crates/glauca-tauri/tauri.conf.json
+# or just build/run the binary directly:
+cargo run -p glauca-tauri
 ```
+
+> The `glauca-tauri` front-end uses a build-step-free, framework-free static
+> front-end (`crates/glauca-tauri/ui/`) and the system WebView (WebKitGTK on
+> Linux, WKWebView on macOS, WebView2 on Windows). No Node toolchain is involved.
+> It currently ports a browse/sync/read/act subset of the TUI/GUI; query and
+> filter-stream editing dialogs are not yet implemented there.
 
 Glauca authenticates to GitHub using a personal access token from your environment. The
 easiest way is to install the [`gh` CLI](https://cli.github.com/) and run `gh auth login`,
@@ -101,6 +117,29 @@ case-insensitive substring unless noted):
 | `review-requested:<login>` | a requested reviewer login |
 
 `@me` is expanded to the current user in both layers.
+
+### Servo rendering (experimental)
+
+`glauca-tauri` can, in principle, render through **Servo** instead of the system
+WebView, using [`tauri-runtime-verso`](https://github.com/tauri-apps/tauri-runtime-verso)
+(Tauri's Servo/Verso backend). This is **experimental and opt-in**, and is *not*
+wired in by default because:
+
+- `tauri-runtime-verso` is not published on crates.io and its API is in flux.
+- It requires a separately built `versoview` executable.
+- IPC / multi-window support is partial.
+
+Because the front-end is plain HTML/CSS/JS (no heavy framework runtime), it is a
+good fit for Servo's current capabilities. To experiment:
+
+1. Build `versoview` from the Verso project.
+2. Add `tauri-runtime-verso` (git dependency) to `crates/glauca-tauri/Cargo.toml`.
+3. Switch the builder in `crates/glauca-tauri/src/main.rs` to
+   `tauri::Builder::<VersoRuntime>::new()…`, point it at the `versoview` binary,
+   and add `.invoke_system(INVOKE_SYSTEM_SCRIPTS.to_owned())`.
+
+The default `cargo run -p glauca-tauri` keeps using the stable system WebView.
+
 
 ## Configuration
 
