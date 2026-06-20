@@ -1,0 +1,50 @@
+name: Create Release PR
+
+# On every push to main, knope opens or updates a "release" PR containing the
+# next version bump (Cargo.toml + Cargo.lock) and the CHANGELOG. Merging that PR
+# triggers release.yml. knope never runs cargo (see knope.toml for why).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-release:
+    # Skip the push that knope itself makes for the release branch/PR.
+    if: "!contains(github.event.head_commit.message, 'chore: prepare release')"
+    runs-on: ubuntu-latest
+    steps:
+      # A GitHub App token (not GITHUB_TOKEN) so the release PR / later tag can
+      # trigger downstream workflows. App needs Contents: write + Pull requests: write.
+      - name: Generate a GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_PLZ_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install knope
+        uses: taiki-e/install-action@8b3c737da4b541bf0fb5a3e0488ff20535badac9 # v2.82.1
+        with:
+          tool: knope@0.23.0
+
+      - name: Prepare release PR
+        run: knope prepare-release --verbose
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        # "nothing to release" exits non-zero; don't fail the workflow for it.
+        continue-on-error: true
