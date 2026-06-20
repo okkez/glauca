@@ -15,11 +15,18 @@ permissions:
 env:
   SQLX_OFFLINE: "true"
   CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # Fetch git dependencies (e.g. gpui) via the git CLI for more reliable fetches.
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
   upload:
     name: ${{ matrix.target }}
+    # Skip on forks: nothing to publish there.
+    if: github.repository_owner == 'okkez'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +67,7 @@ jobs:
         with:
           bin: glauca-tui
           target: ${{ matrix.target }}
-          archive: glauca-tui-$target
+          archive: glauca-tui-$target-$tag
           checksum: sha256
           locked: true
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -70,7 +77,7 @@ jobs:
         with:
           bin: glauca-gui
           target: ${{ matrix.target }}
-          archive: glauca-gui-$target
+          archive: glauca-gui-$target-$tag
           checksum: sha256
           locked: true
           token: ${{ secrets.GITHUB_TOKEN }}
