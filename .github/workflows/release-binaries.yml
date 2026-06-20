@@ -31,12 +31,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `asset` is the gh CLI extension binary name (GOOS-GOARCH); see the
+          # "Publish gh extension binary to gh-glauca" step.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            asset: gh-glauca-linux-amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+            asset: gh-glauca-linux-arm64
           - target: aarch64-apple-darwin
             os: macos-latest
+            asset: gh-glauca-darwin-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -81,3 +86,33 @@ jobs:
           checksum: sha256
           locked: true
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Distribute glauca-tui as the `gh glauca` CLI extension via okkez/gh-glauca.
+      # gh requires a RAW binary named gh-<ext>-<os>-<arch>, so we reuse the
+      # binary the taiki-e step above already built (no rebuild) and cross-upload
+      # it to a matching release in gh-glauca. Both steps are best-effort: a
+      # gh-glauca problem (e.g. the App not yet installed there) must not fail
+      # glauca's own release, whose assets are already uploaded above.
+      - name: Generate gh-glauca App token
+        id: gh-glauca-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_PLZ_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          owner: okkez
+          repositories: gh-glauca
+
+      - name: Publish gh extension binary to gh-glauca
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.gh-glauca-token.outputs.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # Create the gh-glauca release once; concurrent matrix jobs race
+          # harmlessly (first wins, others see "already exists").
+          gh release create "$TAG" -R okkez/gh-glauca --title "$TAG" \
+            --notes "glauca-tui $TAG as a gh CLI extension. See https://github.com/okkez/glauca/releases/tag/$TAG" \
+            || echo "gh-glauca release $TAG already exists"
+          cp "target/${{ matrix.target }}/release/glauca-tui" "${{ matrix.asset }}"
+          gh release upload "$TAG" "${{ matrix.asset }}" -R okkez/gh-glauca --clobber
