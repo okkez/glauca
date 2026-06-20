@@ -30,6 +30,17 @@ changelog = "CHANGELOG.md"
 owner = "okkez"
 repo = "glauca"
 
+# Render each changelog entry with a clickable PR link and author.
+# $pr_number / $pr_author_login require knope >= 0.23.0 and the [github] config
+# above; knope resolves the PR for each commit via the GitHub API. Entries with
+# no resolvable PR fall back to the second template (plain summary). GitHub does
+# not autolink "#N" inside a committed file, so the full PR URL is spelled out.
+[release_notes]
+change_templates = [
+  "- $summary ([#$pr_number](https://github.com/okkez/glauca/pull/$pr_number) by @$pr_author_login)",
+  "- $summary",
+]
+
 # Opens/updates the release PR. Run on push to main (see prepare-release.yml).
 [[workflows]]
 name = "prepare-release"
