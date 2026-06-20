@@ -12,9 +12,15 @@ concurrency:
 env:
   SQLX_OFFLINE: "true"
   CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  # Fetch git dependencies (e.g. gpui) via the git CLI for more reliable fetches.
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
-  ci:
+  # Fast lint/test loop on a single platform. Scoped to core + TUI so it stays
+  # quick; the GUI is exercised by the cross-platform build job below.
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -29,11 +35,49 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # Scope clippy/test to core + TUI. --workspace would compile glauca-gui,
-      # pulling in the gpui git deps and X11/Wayland/GPU system libraries we
-      # intentionally keep out of CI.
       - name: Clippy
         run: cargo clippy -p glauca-core -p glauca-tui --all-targets -- -D warnings
 
       - name: Test
         run: cargo test -p glauca-core -p glauca-tui
+
+  # Build the release binaries (glauca-tui + glauca-gui) on every platform that
+  # release-binaries.yml ships, so platform-specific breakage (e.g. macOS-only
+  # gpui code) is caught at PR/main time instead of at release time. Keep this
+  # matrix in sync with release-binaries.yml.
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          target: ${{ matrix.target }}
+
+      # gpui (the GUI) needs X11/Wayland/GPU/font system libraries on Linux.
+      # macOS uses Metal and needs none. Keep in sync with release-binaries.yml.
+      - name: Install GUI system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libvulkan-dev
+
+      - name: Build glauca-tui and glauca-gui
+        run: cargo build --locked --target ${{ matrix.target }} -p glauca-tui -p glauca-gui
