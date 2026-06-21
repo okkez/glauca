@@ -1,0 +1,28 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended", ":dependencyDashboard"],
+  timezone: "Asia/Tokyo",
+  schedule: ["before 9am on monday"], // 週次でまとめて
+  labels: ["dependencies"],
+  packageRules: [
+    {
+      // GitHub Actions（ワークフロー）を 1 グループに
+      matchManagers: ["github-actions"],
+      groupName: "github-actions",
+    },
+    {
+      // crates.io の minor/patch はまとめる（major は個別 PR のまま）
+      matchManagers: ["cargo"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "cargo minor/patch",
+    },
+  ],
+  lockFileMaintenance: {
+    // `cargo update` を回し、ブランチ追従の git 依存（gpui/zed 系・psm master）を
+    // Cargo.lock ごと追従する。GUI(gpui)系を頻繁に上げないよう、頻度は月次に下げる。
+    // 注: rev ピンの git 依存（gpui-component / async-process / async-task）は
+    // Renovate でも自動更新されない。これらは従来どおり手動で bump する。
+    enabled: true,
+    schedule: ["before 9am on the first day of the month"],
+  },
+}
