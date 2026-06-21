@@ -8,21 +8,37 @@
 //! The whole `EngineCommand` enum is never exposed to JS; the variant is chosen
 //! here so the front-end only deals with plain values.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use glauca_core::db;
 use glauca_core::engine::{EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{compute_unread_counts, expand_me};
-use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
+use glauca_core::types::{FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry};
 use serde::Serialize;
+use sqlx::SqlitePool;
 use tauri::State;
 use tokio::sync::mpsc::Sender;
 
-/// Shared state held by Tauri: the engine command sender, the pre-serialized
-/// initial state (left-pane entries + current user) returned by `init`, and the
-/// authenticated login (needed to expand `@me` when computing unread counts).
+use crate::settings::TauriSettings;
+
+/// Shared state held by Tauri.
 pub struct AppState {
     pub tx: Sender<EngineCommand>,
+    /// Pre-serialized initial state (left-pane entries + current user) for `init`.
     pub init: serde_json::Value,
+    /// Authenticated login, to expand `@me` when computing unread counts.
     pub current_user: Option<String>,
+    /// DB pool, to rebuild the left pane after structural changes.
+    pub pool: SqlitePool,
+    /// Whether desktop notifications fire (toggled at runtime via save_settings;
+    /// read by the engine-message loop in main.rs through a shared clone).
+    pub notifications_enabled: Arc<AtomicBool>,
+    /// Root-query id -> display label, for notification text. Refreshed on
+    /// startup and by list_entries.
+    pub query_names: Arc<Mutex<HashMap<i64, String>>>,
 }
 
 /// One left-pane entry's unread count, as returned by [`unread_counts`]. Mirrors
@@ -46,6 +62,81 @@ async fn dispatch(tx: &Sender<EngineCommand>, cmd: EngineCommand) -> Result<(), 
 #[tauri::command]
 pub fn init(state: State<'_, AppState>) -> serde_json::Value {
     state.init.clone()
+}
+
+/// Rebuild the left-pane entries (root queries interleaved with their filter
+/// streams) from the DB. The front-end calls this after any structural change
+/// (add/edit/delete/reorder) so it never re-implements the ordering logic — this
+/// mirrors how `Engine::start` assembles the initial entries.
+#[tauri::command]
+pub async fn list_entries(state: State<'_, AppState>) -> Result<Vec<LeftPaneEntry>, String> {
+    let pool = &state.pool;
+    let query_rows = db::list_queries(pool).await.map_err(|e| e.to_string())?;
+    let mut entries: Vec<LeftPaneEntry> = Vec::new();
+    for r in query_rows {
+        let streams = db::list_filter_streams(pool, r.id).await.unwrap_or_default();
+        let kind = r.kind.clone();
+        let label = r.name.clone().unwrap_or_else(|| r.query.clone());
+        entries.push(LeftPaneEntry::Query(QueryEntry {
+            id: r.id,
+            label,
+            query_str: r.query.clone(),
+            kind: kind.clone(),
+            last_viewed_at: r.last_viewed_at,
+        }));
+        for s in streams {
+            entries.push(LeftPaneEntry::FilterStream(FilterStreamEntry {
+                id: s.id,
+                parent_id: s.parent_id,
+                name: s.name,
+                filter: s.filter,
+                kind: kind.clone(),
+                last_viewed_at: s.last_viewed_at,
+            }));
+        }
+    }
+    // Keep the notification query-name map in sync with the latest labels.
+    *state.query_names.lock().unwrap() = query_name_map(&entries);
+    Ok(entries)
+}
+
+/// Build the root-query id -> label map used for notification text.
+pub fn query_name_map(entries: &[LeftPaneEntry]) -> HashMap<i64, String> {
+    entries
+        .iter()
+        .filter_map(|e| match e {
+            LeftPaneEntry::Query(q) => Some((q.id, q.label.clone())),
+            LeftPaneEntry::FilterStream(_) => None,
+        })
+        .collect()
+}
+
+/// Return the persisted settings (theme / notifications / sync interval) so the
+/// front-end can render the settings UI.
+#[tauri::command]
+pub fn get_settings() -> TauriSettings {
+    TauriSettings::load()
+}
+
+/// Persist settings and apply the notifications flag immediately. The sync
+/// interval change takes effect on the next launch (the engine is already running).
+#[tauri::command]
+pub fn save_settings(
+    state: State<'_, AppState>,
+    theme: String,
+    notifications_enabled: bool,
+    sync_interval_secs: u64,
+) -> Result<(), String> {
+    state
+        .notifications_enabled
+        .store(notifications_enabled, Ordering::Relaxed);
+    TauriSettings {
+        theme,
+        notifications_enabled,
+        sync_interval_secs,
+    }
+    .save()
+    .map_err(|e| e.to_string())
 }
 
 /// Compute per-entry unread counts for the entries under `query_id`, reusing
@@ -404,5 +495,8 @@ pub async fn mark_all_read(
     query_id: i64,
     filter: Option<String>,
 ) -> Result<(), String> {
+    // The engine expects an already-`@me`-expanded filter; expand here (reusing
+    // core's expand_me) so the front-end can pass the raw filter-stream filter.
+    let filter = filter.map(|f| expand_me(state.current_user.as_deref(), &f).into_owned());
     dispatch(&state.tx, EngineCommand::MarkAllRead { query_id, filter }).await
 }

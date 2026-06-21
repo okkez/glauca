@@ -17,8 +17,12 @@
 mod commands;
 mod settings;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use commands::AppState;
-use glauca_core::engine::Engine;
+use glauca_core::engine::{AppMessage, Engine};
+use glauca_core::notify::{ItemTracker, notify_updated_items};
 use glauca_core::{db, github};
 use tauri::Emitter;
 
@@ -32,33 +36,50 @@ fn main() -> anyhow::Result<()> {
     // TUI/GUI front-ends). Ignore the error if already set.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Honor the user's configured sync interval (same per-front-end TOML pattern
-    // as glauca-tui / glauca-gui), falling back to the shared core default.
-    let sync_interval_secs = settings::TauriSettings::load().sync_interval_secs;
+    // Honor the user's persisted settings (same per-front-end TOML pattern as
+    // glauca-tui / glauca-gui), falling back to the shared core defaults.
+    let settings = settings::TauriSettings::load();
+    let sync_interval_secs = settings.sync_interval_secs;
 
     // Bring up DB + GitHub client + engine on the Tauri-managed tokio runtime, so
     // the engine's internal `tokio::spawn` tasks share that runtime with the async
     // command handlers below.
-    let (engine, init_json, current_user) = tauri::async_runtime::block_on(async {
-        let db_path = db::default_db_path();
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let pool = db::open_pool(&db_path).await?;
-        let gh_client = github::build_client()?;
-        let (engine, init) = Engine::start(pool, gh_client, sync_interval_secs).await?;
-        let current_user = init.current_user.clone();
-        let init_json = serde_json::to_value(&init)?;
-        anyhow::Ok((engine, init_json, current_user))
-    })?;
+    let (engine, init_json, current_user, pool, query_names) =
+        tauri::async_runtime::block_on(async {
+            let db_path = db::default_db_path();
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let pool = db::open_pool(&db_path).await?;
+            let gh_client = github::build_client()?;
+            // Keep a clone for AppState (rebuilding the left pane via list_entries);
+            // the engine takes ownership of the original.
+            let pool_for_state = pool.clone();
+            let (engine, init) = Engine::start(pool, gh_client, sync_interval_secs).await?;
+            let current_user = init.current_user.clone();
+            let query_names = commands::query_name_map(&init.entries);
+            let init_json = serde_json::to_value(&init)?;
+            anyhow::Ok((engine, init_json, current_user, pool_for_state, query_names))
+        })?;
 
     let sender = engine.sender();
+    let notifications_enabled = Arc::new(AtomicBool::new(settings.notifications_enabled));
+    let query_names = Arc::new(Mutex::new(query_names));
+
+    // Clones for the engine-message loop in setup(). The ItemTracker lives only in
+    // the loop (no command needs it).
+    let notif_loop = notifications_enabled.clone();
+    let tracker_loop = Arc::new(Mutex::new(ItemTracker::new()));
+    let names_loop = query_names.clone();
 
     tauri::Builder::default()
         .manage(AppState {
             tx: sender,
             init: init_json,
             current_user,
+            pool,
+            notifications_enabled,
+            query_names,
         })
         .setup(move |app| {
             // Stream engine messages to the front-end. `emit` requires the payload
@@ -68,6 +89,33 @@ fn main() -> anyhow::Result<()> {
             let mut engine = engine;
             tauri::async_runtime::spawn(async move {
                 while let Some(msg) = engine.recv().await {
+                    // Fire desktop notifications for background-sync arrivals,
+                    // reusing core's ItemTracker (baseline maintained even when
+                    // disabled, so toggling on mid-session doesn't re-announce).
+                    if let AppMessage::ItemsLoaded {
+                        query_id,
+                        items,
+                        background,
+                    } = &msg
+                    {
+                        let enabled = notif_loop.load(Ordering::Relaxed);
+                        let to_notify = tracker_loop
+                            .lock()
+                            .unwrap()
+                            .changed_count_to_notify(*query_id, items, *background, enabled);
+                        if let Some(n) = to_notify {
+                            let name = names_loop
+                                .lock()
+                                .unwrap()
+                                .get(query_id)
+                                .cloned()
+                                .unwrap_or_else(|| format!("Query #{query_id}"));
+                            // notify_updated_items is a blocking D-Bus call on Linux.
+                            tauri::async_runtime::spawn_blocking(move || {
+                                notify_updated_items(&name, n)
+                            });
+                        }
+                    }
                     match serde_json::to_value(&msg) {
                         Ok(value) => {
                             if let Err(e) = handle.emit("app-message", value) {
@@ -83,6 +131,9 @@ fn main() -> anyhow::Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             commands::init,
+            commands::get_settings,
+            commands::save_settings,
+            commands::list_entries,
             commands::unread_counts,
             commands::filter_items,
             commands::load_cached,

@@ -17,18 +17,31 @@ fn default_sync_interval_secs() -> u64 {
 // `Default` is implemented manually rather than derived: a derived default would
 // give `sync_interval_secs = 0` (an invalid interval), so it must fall back to
 // the same value as the serde default.
+fn default_theme() -> String {
+    "system".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TauriSettings {
     /// Background auto-sync interval (seconds). Defaults to
     /// `DEFAULT_SYNC_INTERVAL_SECS`; the engine clamps it to a sane minimum.
     #[serde(default = "default_sync_interval_secs")]
     pub sync_interval_secs: u64,
+    /// UI theme preference: "system" | "light" | "dark".
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Whether desktop notifications fire when a background sync surfaces new or
+    /// updated items. Defaults to `false` (opt-in), like the TUI/GUI.
+    #[serde(default)]
+    pub notifications_enabled: bool,
 }
 
 impl Default for TauriSettings {
     fn default() -> Self {
         Self {
             sync_interval_secs: default_sync_interval_secs(),
+            theme: default_theme(),
+            notifications_enabled: false,
         }
     }
 }
@@ -50,5 +63,15 @@ impl TauriSettings {
             .ok()
             .and_then(|s| toml::from_str(&s).ok())
             .unwrap_or_default()
+    }
+
+    /// Persist settings to `tauri.toml`, creating the parent dir if needed.
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = Self::path().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, toml::to_string_pretty(self)?)?;
+        Ok(())
     }
 }
