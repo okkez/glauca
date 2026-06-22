@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE items SET last_read_updated_at = updated_at WHERE query_id = ? AND repo_owner = ? AND repo_name = ? AND number = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "bf3a4c6a8681bce077c1feb145042c30de932bb0d8636825410bf8a09d79564f"
+}

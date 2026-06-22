@@ -18,7 +18,7 @@ use anyhow::Result;
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{
-    ReviewState, compute_unread_counts, count_changed, expand_me, group_range, is_item_new_since,
+    ReviewState, compute_unread_counts, count_changed, expand_me, group_range, is_item_unread,
     move_group_down, query_label, reviewer_overlays,
 };
 use glauca_core::notify::ItemTracker;
@@ -197,8 +197,6 @@ struct GlaucaApp {
     unread_counts: HashMap<(bool, i64), usize>,
     /// Filter stream filter applied to the item list (None for root queries).
     stream_filter: Option<String>,
-    /// `last_viewed_at` of the selected entry at selection time; drives `is_new`.
-    active_entry_last_viewed_at: Option<String>,
 
     /// Freshly-synced items for the currently-viewed query, held back from the
     /// list because they arrived from a background sync. Applied on explicit
@@ -364,7 +362,6 @@ impl GlaucaApp {
             filter: String::new(),
             unread_counts: HashMap::new(),
             stream_filter: None,
-            active_entry_last_viewed_at: None,
             pending_items: None,
             pending_count: 0,
             syncing: false,
@@ -521,10 +518,7 @@ impl GlaucaApp {
             })
             .collect();
         for id in &root_ids {
-            self.send(EngineCommand::LoadCached {
-                query_id: *id,
-                highlight_since: None,
-            });
+            self.send(EngineCommand::LoadCached { query_id: *id });
         }
 
         let initially_synced_id = if self.entries.is_empty() {
@@ -581,19 +575,14 @@ impl GlaucaApp {
             return;
         };
         let root_id = entry.root_query_id();
-        let highlight_since = entry.last_viewed_at().map(str::to_string);
         let stream_filter = entry.stream_filter().map(|s| s.to_string());
         self.entry_cursor = index;
         self.items.clear();
         self.item_cursor = 0;
         self.stream_filter = stream_filter;
-        self.active_entry_last_viewed_at = highlight_since.clone();
         self.clear_pending();
         self.recompute_filtered();
-        self.send(EngineCommand::LoadCached {
-            query_id: root_id,
-            highlight_since,
-        });
+        self.send(EngineCommand::LoadCached { query_id: root_id });
     }
 
     // ── Keyboard action handlers ──────────────────────────────────────────────
@@ -756,10 +745,10 @@ impl GlaucaApp {
     /// Re-sync the list for the selected entry (its root query) in place, keeping
     /// the current selection.
     fn refresh_selected_list(&mut self) {
-        let Some((root_id, highlight_since)) = self
+        let Some(root_id) = self
             .entries
             .get(self.entry_cursor)
-            .map(|e| (e.root_query_id(), e.last_viewed_at().map(str::to_string)))
+            .map(|e| e.root_query_id())
         else {
             return;
         };
@@ -770,7 +759,6 @@ impl GlaucaApp {
         self.send(EngineCommand::Sync {
             query_id: root_id,
             query_str,
-            highlight_since,
         });
         self.syncing = true;
     }
@@ -789,7 +777,6 @@ impl GlaucaApp {
             repo_owner: item.repo_owner,
             repo_name: item.repo_name,
             number,
-            highlight_since: self.active_entry_last_viewed_at.clone(),
         });
         self.status = Some(format!("Refreshing #{number}…"));
     }
@@ -1271,19 +1258,12 @@ impl GlaucaApp {
     fn select_current_entry(&mut self, always_sync: bool) -> Option<i64> {
         let entry = self.entries.get(self.entry_cursor)?.clone();
         // Selecting a query does NOT mark it viewed: the unread badge is kept and
-        // reflects the engine's stored `last_viewed_at` (counts only change as sync
-        // brings newer items). Previously this optimistically set last_viewed_at=now
-        // and zeroed the count, which cleared the badge on every open and left it
-        // diverged from the recomputed value until the next background sync.
-        let highlight_since = entry.last_viewed_at().map(str::to_string);
+        // cleared per-item as items are read. Unread is now derived per item from
+        // `updated_at` vs `last_read_updated_at`, so there is no per-entry baseline.
         self.stream_filter = entry.stream_filter().map(|s| s.to_string());
-        self.active_entry_last_viewed_at = highlight_since.clone();
 
         let root_id = entry.root_query_id();
-        self.send(EngineCommand::LoadCached {
-            query_id: root_id,
-            highlight_since: highlight_since.clone(),
-        });
+        self.send(EngineCommand::LoadCached { query_id: root_id });
         if entry.is_filter_stream() {
             return None;
         }
@@ -1293,14 +1273,12 @@ impl GlaucaApp {
             self.send(EngineCommand::Sync {
                 query_id: root_id,
                 query_str,
-                highlight_since,
             });
             self.syncing = true;
         } else {
             self.send(EngineCommand::SyncIfStale {
                 query_id: root_id,
                 query_str,
-                highlight_since,
             });
         }
         Some(root_id)
@@ -1319,11 +1297,9 @@ impl GlaucaApp {
         if query_str.is_empty() {
             return;
         }
-        let highlight_since = entry.last_viewed_at().map(str::to_string);
         self.send(EngineCommand::FullResync {
             query_id: root_id,
             query_str,
-            highlight_since,
         });
         self.syncing = true;
     }
@@ -1379,7 +1355,6 @@ impl GlaucaApp {
                         repo_owner: item.repo_owner,
                         repo_name: item.repo_name,
                         number,
-                        highlight_since: self.active_entry_last_viewed_at.clone(),
                     });
                     self.status = Some(format!("Refreshing #{number}…"));
                 }
@@ -1568,13 +1543,11 @@ impl GlaucaApp {
         });
     }
 
-    /// Set `is_new` flags (relative to the active entry's last-viewed time) and
-    /// install `items` as the visible list. Caller refilters / notifies.
+    /// Set each item's `is_new` flag (unread = updated since last read) and install
+    /// `items` as the visible list. Caller refilters / notifies.
     fn apply_items_to_view(&mut self, mut items: Vec<ItemEntry>) {
-        let highlight_since = self.active_entry_last_viewed_at.clone();
         for item in &mut items {
-            item.is_new =
-                is_item_new_since(&item.cached_at, highlight_since.as_deref()) && !item.read;
+            item.is_new = is_item_unread(&item.updated_at, item.last_read_updated_at.as_deref());
         }
         self.items = items;
     }
@@ -1609,9 +1582,10 @@ impl GlaucaApp {
     }
 
     /// Mark the currently-selected item read (it is shown in the detail pane):
-    /// flip its in-memory `read` flag, recompute the current query's unread
-    /// badges, and persist via the engine (fire-and-forget). No-op if there is no
-    /// selection or the item is already read.
+    /// record the `updated_at` it was read at, clear its in-memory `is_new`,
+    /// recompute the current query's unread badges, and persist via the engine
+    /// (fire-and-forget). No-op if there is no selection or the item is already read
+    /// (not currently unread).
     fn mark_current_item_read(&mut self, cx: &mut Context<Self>) {
         let Some(&idx) = self.filtered.get(self.item_cursor) else {
             return;
@@ -1619,10 +1593,10 @@ impl GlaucaApp {
         let Some(item) = self.items.get(idx) else {
             return;
         };
-        if item.read {
+        if !is_item_unread(&item.updated_at, item.last_read_updated_at.as_deref()) {
             return;
         }
-        self.items[idx].read = true;
+        self.items[idx].last_read_updated_at = Some(self.items[idx].updated_at.clone());
         self.items[idx].is_new = false;
         let (repo_owner, repo_name, number) = {
             let item = &self.items[idx];
@@ -1656,7 +1630,7 @@ impl GlaucaApp {
         // Only rebuild the filtered-index cache when items/filter/stream_filter
         // actually change. Background sync floods `apply` with messages that don't
         // touch the visible list (other queries' ItemsLoaded, Status, BgSync*,
-        // EntryViewed, …); recomputing on each would re-scan all items (~thousands)
+        // …); recomputing on each would re-scan all items (~thousands)
         // on the UI thread and make the app sluggish while sync runs. Selection and
         // filter edits recompute in their own handlers (`select_index`,
         // `preview_entry`, the filter debounce task).
@@ -1706,14 +1680,6 @@ impl GlaucaApp {
                         self.clear_pending();
                         needs_refilter = true;
                     }
-                }
-            }
-            AppMessage::EntryViewed {
-                entry_id,
-                viewed_at,
-            } => {
-                if let Some(entry) = self.entries.iter_mut().find(|e| e.id() == entry_id) {
-                    entry.set_last_viewed_at(Some(viewed_at));
                 }
             }
             AppMessage::SyncStarted { .. } => self.syncing = true,
@@ -1768,15 +1734,10 @@ impl GlaucaApp {
                     self.items.clear();
                     self.item_cursor = 0;
                     self.filter.clear();
-                    let highlight_since = self.active_entry_last_viewed_at.clone();
-                    self.send(EngineCommand::LoadCached {
-                        query_id: id,
-                        highlight_since: highlight_since.clone(),
-                    });
+                    self.send(EngineCommand::LoadCached { query_id: id });
                     self.send(EngineCommand::Sync {
                         query_id: id,
                         query_str: new_query,
-                        highlight_since,
                     });
                     self.syncing = true;
                     needs_refilter = true;

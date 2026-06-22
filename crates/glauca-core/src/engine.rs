@@ -3,7 +3,7 @@
 // ここには pool/gh/mpsc チャネルだけで完結するタスクと、それらが受け渡すメッセージ型を集約する。
 
 use crate::filter::FilterQuery;
-use crate::logic::cached_item_to_item_entry;
+use crate::logic::{cached_item_to_item_entry, is_item_unread};
 use crate::types::{
     CommentEntry, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
@@ -40,10 +40,6 @@ pub enum AppMessage {
         id: i64,
         new_name: String,
         new_filter: String,
-    },
-    EntryViewed {
-        entry_id: i64,
-        viewed_at: String,
     },
     Status(String),
     ActionDone(String),
@@ -330,16 +326,12 @@ pub async fn execute_merge(url: &str, strategy: &MergeStrategy) -> anyhow::Resul
 pub async fn load_items_task(
     pool: SqlitePool,
     query_id: i64,
-    last_viewed_at: Option<String>,
     background: bool,
     tx: mpsc::Sender<AppMessage>,
 ) {
     match db::fetch_items(&pool, query_id).await {
         Ok(cached) => {
-            let items = cached
-                .into_iter()
-                .map(|c| cached_item_to_item_entry(c, last_viewed_at.as_deref()))
-                .collect();
+            let items = cached.into_iter().map(cached_item_to_item_entry).collect();
             let _ = tx
                 .send(AppMessage::ItemsLoaded {
                     query_id,
@@ -380,7 +372,7 @@ const SEARCH_RESULT_CAP: usize = 1000;
 /// so the UI can show results as they arrive rather than waiting for all pages.
 #[allow(clippy::too_many_arguments)] // pool/gh/ids/opts/tx/gate are all genuinely needed
 #[instrument(
-    skip(pool, gh, query_str, last_viewed_at, opts, tx, gate),
+    skip(pool, gh, query_str, opts, tx, gate),
     fields(background = opts.background, incremental = opts.incremental)
 )]
 pub async fn sync_task(
@@ -388,7 +380,6 @@ pub async fn sync_task(
     gh: Octocrab,
     query_id: i64,
     query_str: String,
-    last_viewed_at: Option<String>,
     opts: SyncOpts,
     tx: mpsc::Sender<AppMessage>,
     gate: RateLimitGate,
@@ -413,15 +404,7 @@ pub async fn sync_task(
 
     // Reload the query's items from the DB and push them to the UI. Called after
     // each page (incremental display) and after a prune actually removes rows.
-    let reload = || {
-        load_items_task(
-            pool.clone(),
-            query_id,
-            last_viewed_at.clone(),
-            opts.background,
-            tx.clone(),
-        )
-    };
+    let reload = || load_items_task(pool.clone(), query_id, opts.background, tx.clone());
 
     let mut after: Option<String> = None;
     let mut total_count = 0usize;
@@ -649,7 +632,6 @@ pub async fn sync_worker_task(
                 gh.clone(),
                 job.query_id,
                 job.query_str,
-                None,
                 SyncOpts {
                     background: true,
                     incremental: true,
@@ -722,38 +704,6 @@ pub async fn refresh_timer_task(
     }
 }
 
-pub fn spawn_mark_entry_viewed(
-    pool: SqlitePool,
-    entry_id: i64,
-    is_filter_stream: bool,
-    viewed_at: String,
-    tx: mpsc::Sender<AppMessage>,
-) {
-    tokio::spawn(async move {
-        let result = if is_filter_stream {
-            db::mark_filter_stream_viewed(&pool, entry_id).await
-        } else {
-            db::mark_query_viewed(&pool, entry_id).await
-        };
-
-        match result {
-            Ok(()) => {
-                let _ = tx
-                    .send(AppMessage::EntryViewed {
-                        entry_id,
-                        viewed_at,
-                    })
-                    .await;
-            }
-            Err(e) => {
-                let _ = tx
-                    .send(AppMessage::Status(format!("mark viewed error: {e}")))
-                    .await;
-            }
-        }
-    });
-}
-
 // ── Engine: command-driven async facade ───────────────────────────────────────
 
 /// Initial state produced by `Engine::start`: the left-pane entries (root queries
@@ -774,27 +724,23 @@ pub enum EngineCommand {
     /// Load cached items for a root query (no GitHub sync).
     LoadCached {
         query_id: i64,
-        highlight_since: Option<String>,
     },
     /// Unconditional GitHub sync for a root query (incremental: only items
     /// updated since the last fetch).
     Sync {
         query_id: i64,
         query_str: String,
-        highlight_since: Option<String>,
     },
     /// Forced full re-fetch of a root query, ignoring `last_fetched_at`. Re-pages
     /// the whole result set and prunes cached items that no longer match.
     FullResync {
         query_id: i64,
         query_str: String,
-        highlight_since: Option<String>,
     },
     /// GitHub sync only if the query's cache is stale (sends `SyncStarted` if it runs).
     SyncIfStale {
         query_id: i64,
         query_str: String,
-        highlight_since: Option<String>,
     },
     /// Re-fetch a single item from GitHub and upsert it into `query_id`'s cache,
     /// then reload that query's items. Used by the per-item refresh action.
@@ -803,12 +749,6 @@ pub enum EngineCommand {
         repo_owner: String,
         repo_name: String,
         number: i64,
-        highlight_since: Option<String>,
-    },
-    MarkEntryViewed {
-        entry_id: i64,
-        is_filter_stream: bool,
-        viewed_at: String,
     },
     /// Enqueue all stale queries for background refresh, optionally skipping one
     /// (the query already being synced manually).
@@ -921,7 +861,6 @@ impl Engine {
                 label,
                 query_str: r.query.clone(),
                 kind: kind.clone(),
-                last_viewed_at: r.last_viewed_at,
             }));
             for s in streams {
                 entries.push(LeftPaneEntry::FilterStream(FilterStreamEntry {
@@ -930,7 +869,6 @@ impl Engine {
                     name: s.name,
                     filter: s.filter,
                     kind: kind.clone(),
-                    last_viewed_at: s.last_viewed_at,
                 }));
             }
         }
@@ -1027,14 +965,10 @@ async fn command_loop(
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            EngineCommand::LoadCached {
-                query_id,
-                highlight_since,
-            } => {
+            EngineCommand::LoadCached { query_id } => {
                 tokio::spawn(load_items_task(
                     pool.clone(),
                     query_id,
-                    highlight_since,
                     false, // user-driven load
                     msg_tx.clone(),
                 ));
@@ -1042,14 +976,12 @@ async fn command_loop(
             EngineCommand::Sync {
                 query_id,
                 query_str,
-                highlight_since,
             } => {
                 tokio::spawn(sync_task(
                     pool.clone(),
                     gh.clone(),
                     query_id,
                     query_str,
-                    highlight_since,
                     SyncOpts {
                         background: false,
                         incremental: true,
@@ -1061,7 +993,6 @@ async fn command_loop(
             EngineCommand::FullResync {
                 query_id,
                 query_str,
-                highlight_since,
             } => {
                 // Forced full fetch (incremental: false → no `updated:>=` filter),
                 // which re-pages the whole result set and prunes items that no
@@ -1071,7 +1002,6 @@ async fn command_loop(
                     gh.clone(),
                     query_id,
                     query_str,
-                    highlight_since,
                     SyncOpts {
                         background: false,
                         incremental: false,
@@ -1083,7 +1013,6 @@ async fn command_loop(
             EngineCommand::SyncIfStale {
                 query_id,
                 query_str,
-                highlight_since,
             } => {
                 let pool2 = pool.clone();
                 let gh2 = gh.clone();
@@ -1100,7 +1029,6 @@ async fn command_loop(
                             gh2,
                             query_id,
                             query_str,
-                            highlight_since,
                             SyncOpts {
                                 background: false,
                                 incremental: true,
@@ -1117,7 +1045,6 @@ async fn command_loop(
                 repo_owner,
                 repo_name,
                 number,
-                highlight_since,
             } => {
                 // Re-fetch one item, upsert it into this query's cache, reload the
                 // list, and report via Status (a light notice, not the sync spinner).
@@ -1134,8 +1061,7 @@ async fn command_loop(
                                     .await;
                                 return;
                             }
-                            load_items_task(pool2, query_id, highlight_since, false, tx2.clone())
-                                .await;
+                            load_items_task(pool2, query_id, false, tx2.clone()).await;
                             let _ = tx2
                                 .send(AppMessage::Status(format!("Refreshed #{number}")))
                                 .await;
@@ -1152,19 +1078,6 @@ async fn command_loop(
                         }
                     }
                 });
-            }
-            EngineCommand::MarkEntryViewed {
-                entry_id,
-                is_filter_stream,
-                viewed_at,
-            } => {
-                spawn_mark_entry_viewed(
-                    pool.clone(),
-                    entry_id,
-                    is_filter_stream,
-                    viewed_at,
-                    msg_tx.clone(),
-                );
             }
             EngineCommand::EnqueueStale { skip_query_id } => {
                 let pool2 = pool.clone();
@@ -1197,7 +1110,6 @@ async fn command_loop(
                                     label,
                                     query_str: query,
                                     kind: "pull_request".into(),
-                                    last_viewed_at: None,
                                 }))
                                 .await;
                         }
@@ -1227,7 +1139,6 @@ async fn command_loop(
                                     name,
                                     filter,
                                     kind,
-                                    last_viewed_at: None,
                                 }))
                                 .await;
                         }
@@ -1416,7 +1327,7 @@ async fn command_loop(
                         Some(f) => mark_filtered_items_read(&pool2, query_id, f).await,
                     };
                     match res {
-                        Ok(()) => load_items_task(pool2, query_id, None, false, tx2).await,
+                        Ok(()) => load_items_task(pool2, query_id, false, tx2).await,
                         Err(e) => {
                             let _ = tx2
                                 .send(AppMessage::Status(format!("mark all read error: {e}")))
@@ -1439,8 +1350,10 @@ async fn mark_filtered_items_read(
 ) -> anyhow::Result<()> {
     let fq = FilterQuery::parse(expanded_filter);
     for c in db::fetch_items(pool, query_id).await? {
-        let item = cached_item_to_item_entry(c, None);
-        if !item.read && fq.matches(&item) {
+        let item = cached_item_to_item_entry(c);
+        if is_item_unread(&item.updated_at, item.last_read_updated_at.as_deref())
+            && fq.matches(&item)
+        {
             db::mark_item_read(
                 pool,
                 query_id,

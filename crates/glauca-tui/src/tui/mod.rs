@@ -16,7 +16,7 @@ pub mod ui;
 
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
-use glauca_core::logic::{group_range, is_item_new_since, move_group_down, query_label};
+use glauca_core::logic::{group_range, is_item_unread, move_group_down, query_label};
 use glauca_core::notify::ItemTracker;
 use settings::TuiSettings;
 
@@ -67,7 +67,6 @@ pub struct App {
     pub items: Vec<ItemEntry>,
     pub item_cursor: usize,
     pub unread_counts: HashMap<(bool, i64), usize>,
-    pub active_entry_last_viewed_at: Option<String>,
     /// Freshly-synced items for the currently-viewed query, held back because
     /// they came from a background sync. Applied on explicit action (`u`).
     pub pending_items: Option<Vec<ItemEntry>>,
@@ -132,7 +131,6 @@ impl App {
             items: Vec::new(),
             item_cursor: 0,
             unread_counts: HashMap::new(),
-            active_entry_last_viewed_at: None,
             pending_items: None,
             pending_count: 0,
             filter: String::new(),
@@ -203,13 +201,11 @@ impl App {
         }
     }
 
-    /// Set `is_new` flags (relative to the active entry's last-viewed time) and
-    /// install `items` as the visible list, clamping the cursor.
+    /// Set each item's `is_new` flag (unread = updated since last read) and install
+    /// `items` as the visible list, clamping the cursor.
     fn apply_items_to_view(&mut self, mut items: Vec<ItemEntry>) {
-        let highlight_since = self.active_entry_last_viewed_at.clone();
         for item in &mut items {
-            item.is_new =
-                is_item_new_since(&item.cached_at, highlight_since.as_deref()) && !item.read;
+            item.is_new = is_item_unread(&item.updated_at, item.last_read_updated_at.as_deref());
         }
         self.items = items;
         self.clamp_item_cursor();
@@ -232,12 +228,6 @@ impl App {
             self.recompute_unread_counts_for_query(qid, &items);
         }
         self.apply_items_to_view(items);
-    }
-
-    fn mark_entry_viewed(&mut self, entry_id: i64, viewed_at: String) {
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id() == entry_id) {
-            entry.set_last_viewed_at(Some(viewed_at));
-        }
     }
 
     fn recompute_unread_counts_for_query(&mut self, query_id: i64, items: &[ItemEntry]) {
@@ -979,17 +969,14 @@ struct SelectedEntryLoad {
     root_id: i64,
     query_str: Option<String>,
     is_filter_stream: bool,
-    highlight_since: Option<String>,
 }
 
 fn prepare_selected_entry_load(app: &mut App) -> Option<SelectedEntryLoad> {
     let entry = app.entries.get(app.entry_cursor)?.clone();
     // Selecting an entry does NOT mark it viewed: the unread badge is kept and
     // cleared per-item as items are read (see `mark_selected_item_read`). Only the
-    // stream filter and the highlight baseline are updated here.
-    let highlight_since = entry.last_viewed_at().map(str::to_string);
+    // stream filter is updated here.
     app.stream_filter = entry.stream_filter().map(|s| s.to_string());
-    app.active_entry_last_viewed_at = highlight_since.clone();
     // Switching entries invalidates any held-back update for the previous one.
     app.clear_pending();
 
@@ -997,23 +984,19 @@ fn prepare_selected_entry_load(app: &mut App) -> Option<SelectedEntryLoad> {
         root_id: entry.root_query_id(),
         query_str: entry.root_query_str().map(str::to_string),
         is_filter_stream: entry.is_filter_stream(),
-        highlight_since,
     })
 }
 
-// `spawn_mark_entry_viewed` は glauca_core::engine へ移設（A6）。
-
 /// Issue the engine commands to (re)load the currently selected entry: load cached
-/// items, mark it viewed, and—for root queries—sync. With `always_sync`, sync
-/// unconditionally (and show the indicator immediately); otherwise sync only if the
-/// cache is stale. Returns the root query id when a query (not a filter stream) was
-/// selected, so the caller can skip it from the background-refresh sweep.
+/// items and—for root queries—sync. With `always_sync`, sync unconditionally (and
+/// show the indicator immediately); otherwise sync only if the cache is stale.
+/// Returns the root query id when a query (not a filter stream) was selected, so the
+/// caller can skip it from the background-refresh sweep.
 async fn select_current_entry(app: &mut App, engine: &Engine, always_sync: bool) -> Option<i64> {
     let load = prepare_selected_entry_load(app)?;
     engine
         .send(EngineCommand::LoadCached {
             query_id: load.root_id,
-            highlight_since: load.highlight_since.clone(),
         })
         .await;
     if load.is_filter_stream {
@@ -1025,7 +1008,6 @@ async fn select_current_entry(app: &mut App, engine: &Engine, always_sync: bool)
             .send(EngineCommand::Sync {
                 query_id: load.root_id,
                 query_str,
-                highlight_since: load.highlight_since,
             })
             .await;
         app.syncing = true;
@@ -1034,7 +1016,6 @@ async fn select_current_entry(app: &mut App, engine: &Engine, always_sync: bool)
             .send(EngineCommand::SyncIfStale {
                 query_id: load.root_id,
                 query_str,
-                highlight_since: load.highlight_since,
             })
             .await;
     }
@@ -1054,10 +1035,10 @@ fn root_query_str(app: &App, root_id: i64) -> Option<String> {
 /// Re-sync the list for the currently selected entry (its root query) without
 /// resetting the cursor/scroll, so a manual refresh keeps the user's place.
 async fn refresh_selected_list(app: &mut App, engine: &Engine) {
-    let Some((root_id, highlight_since)) = app
+    let Some(root_id) = app
         .entries
         .get(app.entry_cursor)
-        .map(|e| (e.root_query_id(), e.last_viewed_at().map(str::to_string)))
+        .map(|e| e.root_query_id())
     else {
         return;
     };
@@ -1069,7 +1050,6 @@ async fn refresh_selected_list(app: &mut App, engine: &Engine) {
         .send(EngineCommand::Sync {
             query_id: root_id,
             query_str,
-            highlight_since,
         })
         .await;
     app.syncing = true;
@@ -1079,10 +1059,10 @@ async fn refresh_selected_list(app: &mut App, engine: &Engine) {
 /// `last_fetched_at`): re-pages everything and prunes cached items that no longer
 /// match the query.
 async fn full_resync_selected(app: &mut App, engine: &Engine) {
-    let Some((root_id, highlight_since)) = app
+    let Some(root_id) = app
         .entries
         .get(app.entry_cursor)
-        .map(|e| (e.root_query_id(), e.last_viewed_at().map(str::to_string)))
+        .map(|e| e.root_query_id())
     else {
         return;
     };
@@ -1094,7 +1074,6 @@ async fn full_resync_selected(app: &mut App, engine: &Engine) {
         .send(EngineCommand::FullResync {
             query_id: root_id,
             query_str,
-            highlight_since,
         })
         .await;
     app.syncing = true;
@@ -1114,16 +1093,15 @@ async fn refresh_selected_item(app: &mut App, engine: &Engine) {
             repo_owner: item.repo_owner.clone(),
             repo_name: item.repo_name.clone(),
             number: item.number,
-            highlight_since: app.active_entry_last_viewed_at.clone(),
         })
         .await;
     app.status = Some(format!("Refreshing #{}…", item.number));
 }
 
-/// Mark the item under the cursor read (it is shown in the detail pane): flip its
-/// in-memory `read`/`is_new`, recompute the current query's unread badges, and
-/// persist via the engine (fire-and-forget). No-op if there is no selection or the
-/// item is already read.
+/// Mark the item under the cursor read (it is shown in the detail pane): record the
+/// `updated_at` it was read at, clear its in-memory `is_new`, recompute the current
+/// query's unread badges, and persist via the engine (fire-and-forget). No-op if
+/// there is no selection or the item is already read (not currently unread).
 async fn mark_selected_item_read(app: &mut App, engine: &Engine) {
     let Some(item) = app.selected_item().cloned() else {
         return;
@@ -1133,10 +1111,13 @@ async fn mark_selected_item_read(app: &mut App, engine: &Engine) {
     }) else {
         return;
     };
-    if app.items[idx].read {
+    if !is_item_unread(
+        &app.items[idx].updated_at,
+        app.items[idx].last_read_updated_at.as_deref(),
+    ) {
         return;
     }
-    app.items[idx].read = true;
+    app.items[idx].last_read_updated_at = Some(app.items[idx].updated_at.clone());
     app.items[idx].is_new = false;
     let Some(query_id) = app.selected_root_query_id() else {
         return;
@@ -1224,7 +1205,6 @@ where
         engine
             .send(EngineCommand::LoadCached {
                 query_id: *query_id,
-                highlight_since: None,
             })
             .await;
     }
@@ -1672,18 +1652,13 @@ where
                             app.item_cursor = 0;
                             app.detail_scroll = 0;
                             app.filter.clear();
-                            let highlight_since = app.active_entry_last_viewed_at.clone();
                             engine
-                                .send(EngineCommand::LoadCached {
-                                    query_id: id,
-                                    highlight_since: highlight_since.clone(),
-                                })
+                                .send(EngineCommand::LoadCached { query_id: id })
                                 .await;
                             engine
                                 .send(EngineCommand::Sync {
                                     query_id: id,
                                     query_str: new_query,
-                                    highlight_since,
                                 })
                                 .await;
                             app.syncing = true;
@@ -1721,9 +1696,6 @@ where
                             app.recompute_unread_counts_for_query(root_id, &items);
                         }
                         app.status = Some("Filter stream updated".into());
-                    }
-                    AppMessage::EntryViewed { entry_id, viewed_at } => {
-                        app.mark_entry_viewed(entry_id, viewed_at);
                     }
                     AppMessage::Status(s) => {
                         app.status = Some(s);
@@ -1861,7 +1833,6 @@ mod tests {
             label: "test query".into(),
             query_str: "test query".into(),
             kind: "pull_request".into(),
-            last_viewed_at: None,
         }]);
         app.items = titles
             .iter()
@@ -1952,7 +1923,6 @@ mod tests {
             label: "test".into(),
             query_str: "test".into(),
             kind: "pull_request".into(),
-            last_viewed_at: None,
         }]);
         app.items = vec![
             make_item(1, "Open PR"),
@@ -1968,7 +1938,7 @@ mod tests {
     }
 
     #[test]
-    fn recompute_unread_counts_uses_entry_last_viewed_at() {
+    fn recompute_unread_counts_excludes_read_and_applies_filter() {
         let mut app = App::new(vec![]);
         app.entries = vec![
             LeftPaneEntry::Query(QueryEntry {
@@ -1976,31 +1946,39 @@ mod tests {
                 label: "Open PRs".into(),
                 query_str: "is:pr is:open".into(),
                 kind: "pull_request".into(),
-                last_viewed_at: Some("2026-05-24 10:00:00".into()),
             }),
             LeftPaneEntry::FilterStream(FilterStreamEntry {
                 id: 2,
                 parent_id: 1,
-                name: "Fresh open".into(),
+                name: "Open only".into(),
                 filter: "state:open".into(),
                 kind: "pull_request".into(),
-                last_viewed_at: Some("2026-05-24 10:30:00".into()),
             }),
         ];
         let items = vec![
+            // Unread (never read).
             ItemEntry {
-                cached_at: "2026-05-24 10:15:00".into(),
-                ..make_item(1, "Older open")
+                updated_at: "2026-05-24T10:00:00Z".into(),
+                ..make_item(1, "Open unread")
             },
+            // Read: updated_at not newer than last_read_updated_at.
             ItemEntry {
-                cached_at: "2026-05-24 10:45:00".into(),
-                ..make_item(2, "Newest open")
+                updated_at: "2026-05-24T10:00:00Z".into(),
+                last_read_updated_at: Some("2026-05-24T10:00:00Z".into()),
+                ..make_item(2, "Open read")
+            },
+            // Unread but closed → excluded by the stream's state:open filter.
+            ItemEntry {
+                state: "closed".into(),
+                updated_at: "2026-05-24T10:00:00Z".into(),
+                ..make_item(3, "Closed unread")
             },
         ];
 
         app.recompute_unread_counts_for_query(1, &items);
 
-        // Query #1 → key (false, 1); filter stream #2 → key (true, 2).
+        // Query #1 (no filter) → items 1 and 3 are unread → 2.
+        // Filter stream #2 (state:open) → only item 1 (item 2 read, item 3 closed) → 1.
         assert_eq!(app.unread_counts.get(&(false, 1)), Some(&2));
         assert_eq!(app.unread_counts.get(&(true, 2)), Some(&1));
     }
@@ -2030,14 +2008,12 @@ mod tests {
                 label: "Open PRs".into(),
                 query_str: "is:pr is:open".into(),
                 kind: "pull_request".into(),
-                last_viewed_at: None,
             },
             QueryEntry {
                 id: 2,
                 label: "Open issues".into(),
                 query_str: "is:issue is:open".into(),
                 kind: "issue".into(),
-                last_viewed_at: None,
             },
         ];
 

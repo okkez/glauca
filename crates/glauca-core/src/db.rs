@@ -24,13 +24,12 @@ pub struct QueryRecord {
     pub kind: String,
     /// Optional display name. If None, the query string is used as the label.
     pub name: Option<String>,
-    pub last_viewed_at: Option<String>,
 }
 
 /// List all saved queries ordered by position.
 pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>> {
     let rows = sqlx::query!(
-        "SELECT id, query, kind, name, last_viewed_at FROM queries ORDER BY position ASC, created_at ASC"
+        "SELECT id, query, kind, name FROM queries ORDER BY position ASC, created_at ASC"
     )
     .fetch_all(pool)
     .await?;
@@ -41,7 +40,6 @@ pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>> {
             query: r.query,
             kind: r.kind,
             name: r.name,
-            last_viewed_at: r.last_viewed_at,
         })
         .collect())
 }
@@ -53,7 +51,6 @@ pub struct FilterStreamRecord {
     pub parent_id: i64,
     pub name: String,
     pub filter: String,
-    pub last_viewed_at: Option<String>,
 }
 
 /// List filter streams for a given parent query, ordered by position.
@@ -62,7 +59,7 @@ pub async fn list_filter_streams(
     parent_id: i64,
 ) -> Result<Vec<FilterStreamRecord>> {
     let rows = sqlx::query!(
-        "SELECT id, parent_id, name, filter, last_viewed_at FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
+        "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
         parent_id,
     )
     .fetch_all(pool)
@@ -74,7 +71,6 @@ pub async fn list_filter_streams(
             parent_id: r.parent_id,
             name: r.name,
             filter: r.filter,
-            last_viewed_at: r.last_viewed_at,
         })
         .collect())
 }
@@ -321,26 +317,6 @@ pub async fn prune_query_items(
     Ok(deleted)
 }
 
-pub async fn mark_query_viewed(pool: &SqlitePool, query_id: i64) -> Result<()> {
-    sqlx::query!(
-        "UPDATE queries SET last_viewed_at = datetime('now') WHERE id = ?",
-        query_id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn mark_filter_stream_viewed(pool: &SqlitePool, stream_id: i64) -> Result<()> {
-    sqlx::query!(
-        "UPDATE filter_streams SET last_viewed_at = datetime('now') WHERE id = ?",
-        stream_id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 pub struct CachedItem {
     pub query_id: i64,
     pub kind: String,
@@ -370,16 +346,15 @@ pub struct CachedItem {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
-    pub cached_at: String,
-    /// Whether the user has viewed this item (drives the unread badge together
-    /// with the "new since" check). Preserved across re-syncs.
-    pub read: bool,
+    /// The `updated_at` the user had seen when they last read this item. `None`
+    /// means never read. Preserved across re-syncs so a later update (advancing
+    /// `updated_at`) makes the item unread again. See `logic::is_item_unread`.
+    pub last_read_updated_at: Option<String>,
 }
 
 /// Insert or replace a cached item for a query.
 pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
     let is_draft_int = item.is_draft as i64;
-    let read_int = item.read as i64;
     let repo_private_int = item.repo_private as i64;
     sqlx::query!(
         r#"
@@ -387,8 +362,8 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
             (query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
              author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
              reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
-             review_decision, milestone, read, cached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             review_decision, milestone, last_read_updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
             title               = excluded.title,
@@ -410,12 +385,10 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
             head_ref            = excluded.head_ref,
             review_decision     = excluded.review_decision,
             milestone           = excluded.milestone
-            -- `cached_at` is intentionally NOT updated: it records when an item was
-            -- FIRST cached, so "new since last viewed" (is_item_new_since compares
-            -- cached_at > last_viewed_at) only counts items that newly appeared. If
-            -- it were refreshed on every upsert, a re-sync would stamp every item
-            -- (up to GitHub's 1000-result cap) with `now` and inflate the unread
-            -- count to the total. New rows still get datetime('now') on INSERT.
+            -- `last_read_updated_at` is intentionally NOT updated: it records the
+            -- `updated_at` the user had read up to. `updated_at` above IS refreshed,
+            -- so once a re-sync advances it past `last_read_updated_at` the item
+            -- becomes unread again (is_item_unread). New rows insert it as NULL.
         "#,
         item.query_id,
         item.kind,
@@ -441,7 +414,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         item.head_ref,
         item.review_decision,
         item.milestone,
-        read_int,
+        item.last_read_updated_at,
     )
     .execute(pool)
     .await?;
@@ -455,7 +428,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
         SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
                author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
                reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
-               review_decision, milestone, cached_at, read
+               review_decision, milestone, last_read_updated_at
         FROM items
         WHERE query_id = ?
         ORDER BY updated_at DESC
@@ -492,8 +465,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
             head_ref: r.head_ref,
             review_decision: r.review_decision,
             milestone: r.milestone,
-            cached_at: r.cached_at,
-            read: r.read != 0,
+            last_read_updated_at: r.last_read_updated_at,
         })
         .collect())
 }
@@ -508,7 +480,7 @@ pub async fn mark_item_read(
     number: i64,
 ) -> Result<()> {
     sqlx::query!(
-        "UPDATE items SET read = 1 \
+        "UPDATE items SET last_read_updated_at = updated_at \
          WHERE query_id = ? AND repo_owner = ? AND repo_name = ? AND number = ?",
         query_id,
         repo_owner,
@@ -523,9 +495,12 @@ pub async fn mark_item_read(
 /// Mark every cached item of a query as read. Used by "Mark all as read" on a
 /// root query (filter-stream scope marks matching items individually instead).
 pub async fn mark_all_items_read(pool: &SqlitePool, query_id: i64) -> Result<()> {
-    sqlx::query!("UPDATE items SET read = 1 WHERE query_id = ?", query_id)
-        .execute(pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE items SET last_read_updated_at = updated_at WHERE query_id = ?",
+        query_id
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -596,8 +571,7 @@ mod tests {
             head_ref: None,
             review_decision: None,
             milestone: None,
-            cached_at: "2026-05-22 00:00:00".into(),
-            read: false,
+            last_read_updated_at: None,
         }
     }
 
@@ -645,6 +619,45 @@ mod tests {
         assert_eq!(queries[0].query, "query:first");
         assert_eq!(queries[1].query, "query:second");
         assert_eq!(queries[2].query, "query:third");
+    }
+
+    #[tokio::test]
+    async fn mark_read_sets_last_read_and_resync_resurfaces() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        // Initially never read.
+        let mut item = make_item(qid, 1, "PR");
+        item.updated_at = "2026-05-22T00:00:00Z".into();
+        upsert_item(&pool, &item).await.expect("upsert");
+        assert_eq!(
+            fetch_items(&pool, qid).await.expect("fetch")[0].last_read_updated_at,
+            None
+        );
+
+        // Reading records the current updated_at.
+        mark_item_read(&pool, qid, "owner", "repo", 1)
+            .await
+            .expect("mark read");
+        assert_eq!(
+            fetch_items(&pool, qid).await.expect("fetch")[0]
+                .last_read_updated_at
+                .as_deref(),
+            Some("2026-05-22T00:00:00Z")
+        );
+
+        // A re-sync advancing updated_at preserves last_read_updated_at (DO UPDATE
+        // omits it), so the item is now unread again (updated_at > last_read).
+        item.updated_at = "2026-06-01T00:00:00Z".into();
+        upsert_item(&pool, &item).await.expect("re-upsert");
+        let fetched = fetch_items(&pool, qid).await.expect("fetch");
+        assert_eq!(fetched[0].updated_at, "2026-06-01T00:00:00Z");
+        assert_eq!(
+            fetched[0].last_read_updated_at.as_deref(),
+            Some("2026-05-22T00:00:00Z")
+        );
     }
 
     #[tokio::test]

@@ -9,7 +9,6 @@ pub struct QueryEntry {
     /// Actual GitHub search query string sent to the API.
     pub query_str: String,
     pub kind: String,
-    pub last_viewed_at: Option<String>,
 }
 
 #[derive(Clone)]
@@ -19,7 +18,6 @@ pub struct FilterStreamEntry {
     pub name: String,
     pub filter: String,
     pub kind: String,
-    pub last_viewed_at: Option<String>,
 }
 
 /// A single row in the left pane — either a root query or a filter stream.
@@ -78,20 +76,6 @@ impl LeftPaneEntry {
     pub fn is_filter_stream(&self) -> bool {
         matches!(self, Self::FilterStream(_))
     }
-
-    pub fn last_viewed_at(&self) -> Option<&str> {
-        match self {
-            Self::Query(q) => q.last_viewed_at.as_deref(),
-            Self::FilterStream(fs) => fs.last_viewed_at.as_deref(),
-        }
-    }
-
-    pub fn set_last_viewed_at(&mut self, last_viewed_at: Option<String>) {
-        match self {
-            Self::Query(q) => q.last_viewed_at = last_viewed_at,
-            Self::FilterStream(fs) => fs.last_viewed_at = last_viewed_at,
-        }
-    }
 }
 
 /// A GitHub user reference: login plus an optional avatar URL. `avatar_url` is
@@ -138,11 +122,11 @@ pub struct ItemEntry {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
-    pub cached_at: String,
+    /// The `updated_at` the user had seen when they last read this item, persisted
+    /// per cached row. `None` means never read. The item is unread (and highlighted
+    /// as new) iff `updated_at` is newer than this — see `logic::is_item_unread`.
+    pub last_read_updated_at: Option<String>,
     pub is_new: bool,
-    /// Whether the user has viewed this item (persisted per cached row). An item
-    /// that is read is neither counted as unread nor highlighted as new.
-    pub read: bool,
 }
 
 /// A single comment entry fetched from GitHub and displayed in the comments popup.
