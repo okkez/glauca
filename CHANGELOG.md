@@ -1,3 +1,9 @@
+## 0.1.3 (2026-06-22)
+
+### Fixes
+
+- fall back to `gh auth token` so the gh extension is authenticated ([#9](https://github.com/okkez/glauca/pull/9) by @okkez)
+
 ## 0.1.2 (2026-06-20)
 
 ### Features
