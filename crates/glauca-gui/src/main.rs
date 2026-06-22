@@ -1590,18 +1590,16 @@ impl GlaucaApp {
         let Some(&idx) = self.filtered.get(self.item_cursor) else {
             return;
         };
-        let Some(item) = self.items.get(idx) else {
+        let Some(row) = self.items.get_mut(idx) else {
             return;
         };
-        if !is_item_unread(&item.updated_at, item.last_read_updated_at.as_deref()) {
+        if !is_item_unread(&row.updated_at, row.last_read_updated_at.as_deref()) {
             return;
         }
-        self.items[idx].last_read_updated_at = Some(self.items[idx].updated_at.clone());
-        self.items[idx].is_new = false;
-        let (repo_owner, repo_name, number) = {
-            let item = &self.items[idx];
-            (item.repo_owner.clone(), item.repo_name.clone(), item.number)
-        };
+        row.last_read_updated_at = Some(row.updated_at.clone());
+        row.is_new = false;
+        let (repo_owner, repo_name, number) =
+            (row.repo_owner.clone(), row.repo_name.clone(), row.number);
         if let Some(query_id) = self.selected_root_query_id() {
             // Recompute from the live items (compute → then insert, to avoid
             // borrowing self mutably while reading self.items/entries).

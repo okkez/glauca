@@ -1111,14 +1111,12 @@ async fn mark_selected_item_read(app: &mut App, engine: &Engine) {
     }) else {
         return;
     };
-    if !is_item_unread(
-        &app.items[idx].updated_at,
-        app.items[idx].last_read_updated_at.as_deref(),
-    ) {
+    let row = &mut app.items[idx];
+    if !is_item_unread(&row.updated_at, row.last_read_updated_at.as_deref()) {
         return;
     }
-    app.items[idx].last_read_updated_at = Some(app.items[idx].updated_at.clone());
-    app.items[idx].is_new = false;
+    row.last_read_updated_at = Some(row.updated_at.clone());
+    row.is_new = false;
     let Some(query_id) = app.selected_root_query_id() else {
         return;
     };
