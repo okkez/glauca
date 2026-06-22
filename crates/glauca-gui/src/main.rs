@@ -1543,12 +1543,10 @@ impl GlaucaApp {
         });
     }
 
-    /// Set each item's `is_new` flag (unread = updated since last read) and install
-    /// `items` as the visible list. Caller refilters / notifies.
-    fn apply_items_to_view(&mut self, mut items: Vec<ItemEntry>) {
-        for item in &mut items {
-            item.is_new = is_item_unread(&item.updated_at, item.last_read_updated_at.as_deref());
-        }
+    /// Install `items` as the visible list. Caller refilters / notifies. `is_new`
+    /// (unread) is already set per item by `cached_item_to_item_entry` when the
+    /// engine builds them, so there is nothing to recompute here.
+    fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
         self.items = items;
     }
 
