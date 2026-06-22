@@ -6,25 +6,61 @@ use tracing::{info, warn};
 
 /// Build an authenticated Octocrab instance.
 ///
-/// Authentication priority:
-///   1. `GH_TOKEN` env var (set automatically by `gh` for extensions)
+/// Authentication priority (mirrors go-gh's `auth.TokenForHost`):
+///   1. `GH_TOKEN` env var (GitHub Actions / manual PAT)
 ///   2. `GITHUB_TOKEN` env var (GitHub Actions / manual PAT)
-///   3. Unauthenticated (rate-limited to 60 req/hour)
+///   3. `gh auth token` — covers gh's config file and system keyring.
+///      `gh` does NOT inject `GH_TOKEN` into an extension's environment, so this
+///      is what makes `gh glauca` authenticated (otherwise it falls back to the
+///      unauthenticated 60 req/hour-per-IP pool and rate-limits almost instantly).
+///   4. Unauthenticated (rate-limited to 60 req/hour)
 pub fn build_client() -> Result<Octocrab> {
-    let (token, auth_source) = match std::env::var("GH_TOKEN") {
-        Ok(t) => (Some(t), "GH_TOKEN"),
-        Err(_) => match std::env::var("GITHUB_TOKEN") {
-            Ok(t) => (Some(t), "GITHUB_TOKEN"),
-            Err(_) => (None, "unauthenticated"),
-        },
-    };
+    let (token, auth_source) = resolve_token(|k| std::env::var(k).ok(), gh_auth_token);
     info!(auth = auth_source, "building GitHub client");
+    if token.is_none() {
+        warn!(
+            "no GitHub token found; running unauthenticated (60 req/hour). Run `gh auth login` to authenticate."
+        );
+    }
 
     let mut builder = Octocrab::builder();
     if let Some(t) = token {
         builder = builder.personal_token(t);
     }
     builder.build().map_err(Into::into)
+}
+
+/// Resolve the auth token and a label for its source, given an env-var lookup and
+/// a `gh auth token` fallback. Split out from [`build_client`] so the precedence
+/// can be unit-tested without touching the real environment or spawning `gh`.
+fn resolve_token(
+    env: impl Fn(&str) -> Option<String>,
+    fetch_gh_token: impl Fn() -> Option<String>,
+) -> (Option<String>, &'static str) {
+    if let Some(t) = env("GH_TOKEN") {
+        return (Some(t), "GH_TOKEN");
+    }
+    if let Some(t) = env("GITHUB_TOKEN") {
+        return (Some(t), "GITHUB_TOKEN");
+    }
+    if let Some(t) = fetch_gh_token() {
+        return (Some(t), "gh auth token");
+    }
+    (None, "unauthenticated")
+}
+
+/// Retrieve the token via `gh auth token`. Returns `None` if `gh` is missing,
+/// the user is not logged in, or the output is empty.
+fn gh_auth_token() -> Option<String> {
+    let out = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!token.is_empty()).then_some(token)
 }
 
 /// The authenticated user's login, display name, and avatar.
@@ -505,6 +541,47 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Env lookup over a fixed map, for resolve_token tests.
+    fn env_from<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn resolve_token_prefers_gh_token() {
+        let (tok, src) = resolve_token(
+            env_from(&[("GH_TOKEN", "a"), ("GITHUB_TOKEN", "b")]),
+            || Some("gh".into()),
+        );
+        assert_eq!(tok.as_deref(), Some("a"));
+        assert_eq!(src, "GH_TOKEN");
+    }
+
+    #[test]
+    fn resolve_token_falls_back_to_github_token() {
+        let (tok, src) = resolve_token(env_from(&[("GITHUB_TOKEN", "b")]), || Some("gh".into()));
+        assert_eq!(tok.as_deref(), Some("b"));
+        assert_eq!(src, "GITHUB_TOKEN");
+    }
+
+    #[test]
+    fn resolve_token_falls_back_to_gh_auth_token() {
+        let (tok, src) = resolve_token(env_from(&[]), || Some("gh".into()));
+        assert_eq!(tok.as_deref(), Some("gh"));
+        assert_eq!(src, "gh auth token");
+    }
+
+    #[test]
+    fn resolve_token_unauthenticated_when_nothing_available() {
+        let (tok, src) = resolve_token(env_from(&[]), || None);
+        assert_eq!(tok, None);
+        assert_eq!(src, "unauthenticated");
+    }
 
     #[test]
     fn detects_graphql_rate_limit_error() {
