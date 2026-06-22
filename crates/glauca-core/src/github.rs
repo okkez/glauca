@@ -531,8 +531,9 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         head_ref,
         review_decision,
         milestone,
-        cached_at: String::new(),
-        read: false,
+        // A freshly fetched item carries no read marker; upsert preserves the
+        // existing row's `last_read_updated_at` via its DO UPDATE clause.
+        last_read_updated_at: None,
     })
 }
 

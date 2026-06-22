@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,\n               author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,\n               reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,\n               review_decision, milestone, cached_at, read\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
+  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,\n               author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,\n               reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,\n               review_decision, milestone, last_read_updated_at\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -124,14 +124,9 @@
         "type_info": "Text"
       },
       {
-        "name": "cached_at",
+        "name": "last_read_updated_at",
         "ordinal": 24,
         "type_info": "Text"
-      },
-      {
-        "name": "read",
-        "ordinal": 25,
-        "type_info": "Integer"
       }
     ],
     "parameters": {
@@ -162,9 +157,8 @@
       true,
       true,
       true,
-      false,
-      false
+      true
     ]
   },
-  "hash": "355e427181bd973142632a6cd9630de61fd27523b988b38b34c6abeb1f67ad3d"
+  "hash": "476bfb1c6ae1de574e96bc975fc390467a0739728399437b1d9acf38df13e236"
 }

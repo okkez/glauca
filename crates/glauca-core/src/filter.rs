@@ -202,9 +202,8 @@ mod tests {
             head_ref: None,
             review_decision: None,
             milestone: None,
-            cached_at: String::new(),
+            last_read_updated_at: None,
             is_new: false,
-            read: false,
         }
     }
 

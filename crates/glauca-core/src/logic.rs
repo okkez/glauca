@@ -6,10 +6,16 @@ use crate::db::CachedItem;
 use crate::filter::FilterQuery;
 use crate::types::{ItemEntry, LeftPaneEntry, UserRef};
 
-/// An item is "new" if it was cached after the entry was last viewed.
-pub fn is_item_new_since(cached_at: &str, last_viewed_at: Option<&str>) -> bool {
-    last_viewed_at
-        .map(|last_viewed_at| cached_at > last_viewed_at)
+/// An item is unread iff its current `updated_at` is newer than the `updated_at`
+/// the user had seen when they last read it. Never-read items (`None`) are always
+/// unread. Unread items are highlighted as "new" and counted in the unread badge.
+///
+/// String comparison is valid because every `updated_at` is RFC3339 UTC (`…Z`), so
+/// lexicographic order equals chronological order (the same assumption behind the
+/// `ORDER BY updated_at DESC` in `db::fetch_items`).
+pub fn is_item_unread(updated_at: &str, last_read_updated_at: Option<&str>) -> bool {
+    last_read_updated_at
+        .map(|seen| updated_at > seen)
         .unwrap_or(true)
 }
 
@@ -116,9 +122,9 @@ pub fn reviewer_overlays(item: &ItemEntry) -> Vec<(UserRef, ReviewState)> {
     out
 }
 
-pub fn cached_item_to_item_entry(c: CachedItem, last_viewed_at: Option<&str>) -> ItemEntry {
-    // A read item is neither "new" (no highlight) nor counted as unread.
-    let is_new = is_item_new_since(&c.cached_at, last_viewed_at) && !c.read;
+pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
+    // Unread (highlighted as new) iff updated since the user last read it.
+    let is_new = is_item_unread(&c.updated_at, c.last_read_updated_at.as_deref());
     ItemEntry {
         number: c.number,
         title: c.title,
@@ -145,9 +151,8 @@ pub fn cached_item_to_item_entry(c: CachedItem, last_viewed_at: Option<&str>) ->
         head_ref: c.head_ref,
         review_decision: c.review_decision,
         milestone: c.milestone,
-        cached_at: c.cached_at,
+        last_read_updated_at: c.last_read_updated_at,
         is_new,
-        read: c.read,
     }
 }
 
@@ -211,10 +216,10 @@ pub fn compute_unread_counts(
         .filter(|entry| entry.root_query_id() == query_id)
     {
         let unread = match entry {
-            LeftPaneEntry::Query(q) => items
+            LeftPaneEntry::Query(_) => items
                 .iter()
                 .filter(|item| {
-                    is_item_new_since(&item.cached_at, q.last_viewed_at.as_deref()) && !item.read
+                    is_item_unread(&item.updated_at, item.last_read_updated_at.as_deref())
                 })
                 .count(),
             LeftPaneEntry::FilterStream(fs) => {
@@ -222,8 +227,7 @@ pub fn compute_unread_counts(
                 items
                     .iter()
                     .filter(|item| {
-                        is_item_new_since(&item.cached_at, fs.last_viewed_at.as_deref())
-                            && !item.read
+                        is_item_unread(&item.updated_at, item.last_read_updated_at.as_deref())
                             && filter.matches(item)
                     })
                     .count()
@@ -375,5 +379,28 @@ mod tests {
     fn count_changed_counts_all_against_empty() {
         let fresh = vec![item_at(1, "t"), item_at(2, "t")];
         assert_eq!(count_changed(&[], &fresh), 2);
+    }
+
+    #[test]
+    fn is_item_unread_never_read_is_unread() {
+        assert!(is_item_unread("2026-06-01T00:00:00Z", None));
+    }
+
+    #[test]
+    fn is_item_unread_updated_after_read_resurfaces() {
+        // Read at the older updated_at; a newer update makes it unread again.
+        assert!(is_item_unread(
+            "2026-06-02T00:00:00Z",
+            Some("2026-06-01T00:00:00Z")
+        ));
+    }
+
+    #[test]
+    fn is_item_unread_same_updated_at_is_read() {
+        // No change since it was last read → stays read.
+        assert!(!is_item_unread(
+            "2026-06-01T00:00:00Z",
+            Some("2026-06-01T00:00:00Z")
+        ));
     }
 }
