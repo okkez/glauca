@@ -624,7 +624,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}{refresh_hint}{review_hint}  ?:help  q:quit"),
             Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}{refresh_hint}{review_hint}  ?:help  q:quit"),
         },
-        InputMode::Filter => "FILTER   Esc:exit  C-u:clear  state:open  author:name  label:bug  repo:owner/name".to_string(),
+        InputMode::Filter => "FILTER   Esc:exit  C-u:clear  is:pr  state:open  author:name  label:bug  repo:owner/name".to_string(),
         InputMode::NewQuery => "NEW QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
         InputMode::NewFilterStream => "NEW STREAM  Tab:switch field  Enter:save  Esc:cancel".to_string(),
         InputMode::EditQuery => "EDIT QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
@@ -737,7 +737,7 @@ fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
         [
             ("Display name:", &app.new_filter_stream_name),
             (
-                "Filter (e.g. state:open label:bug):",
+                "Filter (e.g. is:pr state:open label:bug):",
                 &app.new_filter_stream_filter,
             ),
         ],
@@ -771,7 +771,7 @@ fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
         [
             ("Display name:", &app.edit_input),
             (
-                "Filter (e.g. state:open label:bug repo:owner/name):",
+                "Filter (e.g. is:pr state:open label:bug repo:owner/name):",
                 &app.edit_input2,
             ),
         ],

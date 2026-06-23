@@ -6,8 +6,10 @@ use crate::types::UserRef;
 ///
 /// Syntax:
 ///   - Plain token: matches title, author, labels (case-insensitive substring)
+///   - `is:pr` / `is:issue` — filter by item kind (matches `item.kind`)
 ///   - `state:<value>` or `is:<value>` — filter by state (case-insensitive
-///     substring; e.g. open/closed/merged — values are not restricted)
+///     substring; e.g. open/closed/merged — values are not restricted).
+///     Note: `is:pr` and `is:issue` are treated as kind filters, not states.
 ///   - `author:<login>` — filter by author login
 ///   - `label:<name>` — filter by label (substring)
 ///   - `repo:<owner/name>` — filter by repository (substring)
@@ -17,11 +19,22 @@ use crate::types::UserRef;
 #[derive(Debug, Default, Clone)]
 pub struct FilterQuery {
     pub text_tokens: Vec<String>,
+    pub kinds: Vec<String>,
     pub states: Vec<String>,
     pub authors: Vec<String>,
     pub labels: Vec<String>,
     pub repos: Vec<String>,
     pub review_requested: Vec<String>,
+}
+
+/// Normalize an `is:<val>` value to a canonical item kind (`"pull_request"` /
+/// `"issue"`), or `None` if it is not a kind qualifier (e.g. `open`, `merged`).
+fn normalize_kind(val: &str) -> Option<&'static str> {
+    match val {
+        "pr" | "pull_request" | "pull-request" => Some("pull_request"),
+        "issue" | "issues" => Some("issue"),
+        _ => None,
+    }
 }
 
 impl FilterQuery {
@@ -32,7 +45,10 @@ impl FilterQuery {
             if let Some(val) = lower.strip_prefix("state:") {
                 q.states.push(val.to_string());
             } else if let Some(val) = lower.strip_prefix("is:") {
-                q.states.push(val.to_string());
+                match normalize_kind(val) {
+                    Some(kind) => q.kinds.push(kind.to_string()),
+                    None => q.states.push(val.to_string()),
+                }
             } else if let Some(val) = lower.strip_prefix("author:") {
                 q.authors.push(val.to_string());
             } else if let Some(val) = lower.strip_prefix("label:") {
@@ -50,6 +66,7 @@ impl FilterQuery {
 
     pub fn is_empty(&self) -> bool {
         self.text_tokens.is_empty()
+            && self.kinds.is_empty()
             && self.states.is_empty()
             && self.authors.is_empty()
             && self.labels.is_empty()
@@ -59,6 +76,12 @@ impl FilterQuery {
 
     /// Returns `true` if `item` matches all conditions in this query.
     pub fn matches(&self, item: &ItemEntry) -> bool {
+        // kind filter (is:pr / is:issue) — exact match on normalized kind
+        for k in &self.kinds {
+            if item.kind.to_lowercase() != k.as_str() {
+                return false;
+            }
+        }
         // state filter
         for s in &self.states {
             if !item.state.to_lowercase().contains(s.as_str()) {
@@ -255,6 +278,47 @@ mod tests {
         assert!(q.matches(&item("Fix crash", "a", "open", &["bug"], "o/r")));
         assert!(!q.matches(&item("Fix crash", "a", "closed", &["bug"], "o/r")));
         assert!(!q.matches(&item("Fix crash", "a", "open", &["enhancement"], "o/r")));
+    }
+
+    fn issue(title: &str, author: &str, state: &str) -> ItemEntry {
+        let mut i = item(title, author, state, &[], "o/r");
+        i.kind = "issue".into();
+        i
+    }
+
+    #[test]
+    fn is_pr_matches_pull_request_only() {
+        let q = FilterQuery::parse("is:pr");
+        assert!(q.matches(&item("PR", "a", "open", &[], "o/r")));
+        assert!(!q.matches(&issue("Issue", "a", "open")));
+    }
+
+    #[test]
+    fn is_issue_matches_issue_only() {
+        let q = FilterQuery::parse("is:issue");
+        assert!(q.matches(&issue("Issue", "a", "open")));
+        assert!(!q.matches(&item("PR", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn is_pr_combined_with_state_and_author() {
+        // Reproduces the reported case: a child-query filter that previously
+        // matched nothing because `is:pr` was checked against item.state.
+        // The `[bot]` brackets must be treated as literal characters.
+        let q = FilterQuery::parse("is:pr is:open author:repro-atlantis[bot]");
+        assert!(q.matches(&item("PR", "repro-atlantis[bot]", "open", &[], "o/r")));
+        // Wrong author, wrong state, and issue kind must all fail.
+        assert!(!q.matches(&item("PR", "someone-else", "open", &[], "o/r")));
+        assert!(!q.matches(&item("PR", "repro-atlantis[bot]", "closed", &[], "o/r")));
+        assert!(!q.matches(&issue("Issue", "repro-atlantis[bot]", "open")));
+    }
+
+    #[test]
+    fn is_pr_differs_from_state_pr() {
+        // `is:pr` is a kind filter; `state:pr` is a (never-matching) state filter.
+        let pr = item("PR", "a", "open", &[], "o/r");
+        assert!(FilterQuery::parse("is:pr").matches(&pr));
+        assert!(!FilterQuery::parse("state:pr").matches(&pr));
     }
 
     fn pr_with_reviewers(reviewers: &[&str]) -> ItemEntry {
