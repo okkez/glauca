@@ -1033,11 +1033,7 @@ fn root_query_str(app: &App, root_id: i64) -> Option<String> {
 /// Re-sync the list for the currently selected entry (its root query) without
 /// resetting the cursor/scroll, so a manual refresh keeps the user's place.
 async fn refresh_selected_list(app: &mut App, engine: &Engine) {
-    let Some(root_id) = app
-        .entries
-        .get(app.entry_cursor)
-        .map(|e| e.root_query_id())
-    else {
+    let Some(root_id) = app.entries.get(app.entry_cursor).map(|e| e.root_query_id()) else {
         return;
     };
     let Some(query_str) = root_query_str(app, root_id) else {
@@ -1057,11 +1053,7 @@ async fn refresh_selected_list(app: &mut App, engine: &Engine) {
 /// `last_fetched_at`): re-pages everything and prunes cached items that no longer
 /// match the query.
 async fn full_resync_selected(app: &mut App, engine: &Engine) {
-    let Some(root_id) = app
-        .entries
-        .get(app.entry_cursor)
-        .map(|e| e.root_query_id())
-    else {
+    let Some(root_id) = app.entries.get(app.entry_cursor).map(|e| e.root_query_id()) else {
         return;
     };
     let Some(query_str) = root_query_str(app, root_id) else {
