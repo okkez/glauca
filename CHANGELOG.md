@@ -1,3 +1,9 @@
+## 0.1.4 (2026-06-23)
+
+### Features
+
+- redefine unread as update-driven (Jasper-style) ([#11](https://github.com/okkez/glauca/pull/11) by @okkez)
+
 ## 0.1.3 (2026-06-22)
 
 ### Fixes
