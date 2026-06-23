@@ -737,7 +737,7 @@ fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
         [
             ("Display name:", &app.new_filter_stream_name),
             (
-                "Filter (e.g. is:pr state:open label:bug):",
+                "Filter (e.g. is:pr is:draft assignee:name label:bug):",
                 &app.new_filter_stream_filter,
             ),
         ],
@@ -771,7 +771,7 @@ fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
         [
             ("Display name:", &app.edit_input),
             (
-                "Filter (e.g. is:pr state:open label:bug repo:owner/name):",
+                "Filter (e.g. is:pr assignee:name milestone:v2 repo:owner/name):",
                 &app.edit_input2,
             ),
         ],
