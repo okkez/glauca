@@ -70,6 +70,36 @@ Glauca authenticates to GitHub using a personal access token from your environme
 easiest way is to install the [`gh` CLI](https://cli.github.com/) and run `gh auth login`,
 which sets `GH_TOKEN` for you.
 
+## Filtering: queries vs. filter streams
+
+Glauca has two distinct filtering layers:
+
+- **Saved queries** are sent verbatim to the GitHub search API, so any
+  [GitHub search qualifier](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests)
+  works (`created:`, `language:`, `involves:`, `linked:`, …).
+- **Filter streams** (and the inline filter) run locally against the cached items, so they
+  only understand the subset of qualifiers below. Unknown qualifiers match nothing.
+
+Supported local filter qualifiers (all conditions are ANDed; matching is a
+case-insensitive substring unless noted):
+
+| Qualifier | Matches |
+| --- | --- |
+| _plain text_ | title, author, or label |
+| `is:pr` / `is:issue` | item kind (exact) |
+| `is:open` / `is:closed` / `is:merged`, `state:<v>` | state |
+| `is:draft` | draft pull requests only |
+| `is:public` / `is:private` | repository visibility |
+| `author:<login>` | author login |
+| `assignee:<login>` | an assignee login |
+| `label:<name>` | a label |
+| `milestone:<title>` | milestone title (single word only) |
+| `repo:<owner/name>` | repository |
+| `base:<branch>` / `head:<branch>` | PR base / head branch |
+| `review-requested:<login>` | a requested reviewer login |
+
+`@me` is expanded to the current user in both layers.
+
 ## Configuration
 
 ### Environment variables
