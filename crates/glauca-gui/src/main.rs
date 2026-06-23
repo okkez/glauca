@@ -1202,7 +1202,7 @@ impl GlaucaApp {
         });
         let filter = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("filter (e.g. state:open label:bug)")
+                .placeholder("filter (e.g. is:pr state:open label:bug)")
                 .default_value(init_filter)
         });
         let this = cx.weak_entity();
