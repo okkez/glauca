@@ -1,3 +1,4 @@
+use crate::tui::icons::Icons;
 use crate::tui::{App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, item_actions};
 use chrono::Utc;
 use glauca_core::engine::ReviewEvent;
@@ -202,7 +203,7 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
 
             match entry {
                 LeftPaneEntry::Query(q) => {
-                    let mut spans = vec![Span::raw(format!("🔍 {}", q.label))];
+                    let mut spans = vec![Span::raw(format!("{} {}", app.icons.search, q.label))];
                     if let Some(badge) = badge {
                         spans.push(badge);
                     }
@@ -260,8 +261,8 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     };
     let (filter_area, list_area) = if has_banner {
         let banner = Paragraph::new(format!(
-            "↻ {} updated — press u to refresh",
-            app.pending_count
+            "{} {} updated — press u to refresh",
+            app.icons.refresh, app.pending_count
         ))
         .style(
             Style::default()
@@ -322,8 +323,8 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|item| {
             let state_style = state_style(&item.state);
-            let state_badge = state_badge(&item.state);
-            let kind_icon = kind_icon(&item.kind);
+            let state_badge = app.icons.state_badge(&item.state);
+            let kind_icon = app.icons.kind_icon(&item.kind);
             let repo = format!("{}/{}", item.repo_owner, item.repo_name);
             let updated = glauca_core::time::format_relative_time_since(&item.updated_at, now);
             let title_spans =
@@ -333,7 +334,10 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
             // wrapped, below). Kept separate so we can measure its width and
             // align wrapped title continuation lines under the title start.
             let mut prefix_spans = vec![if item.is_new {
-                Span::styled("● ", Style::default().fg(Color::Yellow))
+                Span::styled(
+                    format!("{} ", app.icons.new_item),
+                    Style::default().fg(Color::Yellow),
+                )
             } else {
                 Span::raw("  ")
             }];
@@ -365,7 +369,10 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
             // Last line: (indent)  [🔒]  repo  <pad>  updated (relative, right-aligned)
             let mut line2_spans = vec![Span::raw("        ")];
             if item.repo_private {
-                line2_spans.push(Span::styled("🔒 ", Style::default().fg(Color::Yellow)));
+                line2_spans.push(Span::styled(
+                    format!("{} ", app.icons.private),
+                    Style::default().fg(Color::Yellow),
+                ));
             }
             line2_spans.push(Span::styled(repo, Style::default().fg(Color::Gray)));
             // Right-align the relative update time to the row's content edge.
@@ -419,7 +426,7 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             let url = item.url.clone();
             let number = item.number;
             let comment_count = item.comment_count;
-            let kind_icon = kind_icon(&item.kind);
+            let kind_icon = app.icons.kind_icon(&item.kind);
             let is_pr = item.kind == "pull_request";
 
             let labels = if item.labels.is_empty() {
@@ -444,7 +451,7 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             let reviewer_spans: Vec<Span> = {
                 let mut spans = Vec::new();
                 for (user, state) in &item.reviews {
-                    let (badge, style) = review_state_badge(state);
+                    let (badge, style) = app.icons.review_state_badge(state);
                     if !spans.is_empty() {
                         spans.push(Span::raw("  "));
                     }
@@ -456,7 +463,10 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                         if !spans.is_empty() {
                             spans.push(Span::raw("  "));
                         }
-                        spans.push(Span::styled("○", Style::default().fg(Color::Yellow)));
+                        spans.push(Span::styled(
+                            app.icons.pending_reviewer,
+                            Style::default().fg(Color::Yellow),
+                        ));
                         spans.push(Span::raw(format!(" {}", user.login)));
                     }
                 }
@@ -488,7 +498,7 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                 Line::from({
                     let mut spans = vec![
                         Span::styled("State:    ", Style::default().fg(Color::Gray)),
-                        Span::styled(state_badge(&state), state_style(&state)),
+                        Span::styled(app.icons.state_badge(&state), state_style(&state)),
                         Span::raw(format!(" {state}")),
                     ];
                     if is_pr && item.is_draft {
@@ -543,15 +553,12 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                     ]));
                 }
                 if let Some(rd) = &item.review_decision {
-                    let (badge, style) = match rd.as_str() {
-                        "APPROVED" => ("✓ APPROVED", Style::default().fg(Color::Green)),
-                        "CHANGES_REQUESTED" => {
-                            ("✗ CHANGES REQUESTED", Style::default().fg(Color::Red))
-                        }
-                        "REVIEW_REQUIRED" => {
-                            ("○ REVIEW REQUIRED", Style::default().fg(Color::Yellow))
-                        }
-                        other => (other, Style::default()),
+                    let (icon, style) = app.icons.review_decision_badge(rd);
+                    let badge = match rd.as_str() {
+                        "APPROVED" => format!("{icon} APPROVED"),
+                        "CHANGES_REQUESTED" => format!("{icon} CHANGES REQUESTED"),
+                        "REVIEW_REQUIRED" => format!("{icon} REVIEW REQUIRED"),
+                        other => other.to_string(),
                     };
                     lines.push(Line::from(vec![
                         Span::styled("Review:   ", Style::default().fg(Color::Gray)),
@@ -635,13 +642,20 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // of enumerating every on/off combination of syncing / pending / status.
     let mut segments = vec![mode_text];
     if app.syncing {
-        segments.push("⟳ Syncing…".to_string());
+        segments.push(format!("{} Syncing…", app.icons.syncing));
     }
     if app.bg_sync_pending > 0 {
-        segments.push(format!("⟳ Auto ({})", app.bg_sync_pending));
+        segments.push(format!(
+            "{} Auto ({})",
+            app.icons.syncing, app.bg_sync_pending
+        ));
     }
     if app.notifications_enabled {
-        segments.push("🔔".to_string());
+        segments.push(app.icons.bell.to_string());
+    }
+    // Present only while the Nerd Font set is active, so it only shows where it renders.
+    if let Some(badge) = app.icons.mode_badge {
+        segments.push(badge.to_string());
     }
     if let Some(msg) = &app.status {
         segments.push(msg.clone());
@@ -1014,33 +1028,6 @@ fn state_style(state: &str) -> Style {
     }
 }
 
-fn state_badge(state: &str) -> &'static str {
-    match state {
-        "open" => "●",
-        "merged" => "⬡",
-        "closed" => "✕",
-        _ => "?",
-    }
-}
-
-fn kind_icon(kind: &str) -> &'static str {
-    match kind {
-        "pull_request" => "⎇",
-        _ => "○", // issue
-    }
-}
-
-/// Returns (badge_str, style) for a reviewer's submitted review state.
-fn review_state_badge(state: &str) -> (&'static str, Style) {
-    match state {
-        "APPROVED" => ("✅", Style::default().fg(Color::Green)),
-        "CHANGES_REQUESTED" => ("✗", Style::default().fg(Color::Red)),
-        "COMMENTED" => ("💬", Style::default().fg(Color::Blue)),
-        "DISMISSED" => ("↩", Style::default().fg(Color::Cyan)),
-        _ => ("?", Style::default()),
-    }
-}
-
 /// Returns a centered `Rect` of fixed height and `percent_x` width.
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
     let popup_width = area.width * percent_x / 100;
@@ -1098,8 +1085,12 @@ fn draw_comments_popup(f: &mut Frame, app: &App, area: Rect) {
         if app.comments_sort_desc {
             ordered.reverse();
         }
-        let lines =
-            build_comment_lines(&ordered, chunks[0].width as usize, app.comments_show_hidden);
+        let lines = build_comment_lines(
+            &ordered,
+            chunks[0].width as usize,
+            app.comments_show_hidden,
+            &app.icons,
+        );
         let total = lines.len();
         // Clamp scroll
         let max_scroll = total.saturating_sub(chunks[0].height as usize);
@@ -1159,6 +1150,7 @@ fn build_comment_lines<'a>(
     comments: &[&'a CommentEntry],
     width: usize,
     show_hidden: bool,
+    icons: &Icons,
 ) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
     let sep_width = width.max(4) - 4; // account for block padding
@@ -1218,7 +1210,7 @@ fn build_comment_lines<'a>(
                     if c.created_at.is_empty() {
                         String::new()
                     } else {
-                        format!("   🕐 {}", c.created_at)
+                        format!("   {} {}", icons.clock, c.created_at)
                     },
                     Style::default().fg(Color::White),
                 ),
