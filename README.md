@@ -93,7 +93,7 @@ case-insensitive substring unless noted):
 | `author:<login>` | author login |
 | `assignee:<login>` | an assignee login |
 | `label:<name>` | a label |
-| `milestone:<title>` | milestone title (single word only) |
+| `milestone:<title>` | milestone title (substring; value cannot contain spaces) |
 | `repo:<owner/name>` | repository |
 | `base:<branch>` / `head:<branch>` | PR base / head branch |
 | `review-requested:<login>` | a requested reviewer login |
