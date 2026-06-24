@@ -202,12 +202,7 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
 
             match entry {
                 LeftPaneEntry::Query(q) => {
-                    let kind_badge = if q.kind == "pull_request" {
-                        " PR "
-                    } else {
-                        " IS "
-                    };
-                    let mut spans = vec![Span::raw(format!("{kind_badge} {}", q.label))];
+                    let mut spans = vec![Span::raw(format!("🔍 {}", q.label))];
                     if let Some(badge) = badge {
                         spans.push(badge);
                     }
