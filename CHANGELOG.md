@@ -1,3 +1,16 @@
+## 0.1.5 (2026-06-24)
+
+### Features
+
+- support more GitHub qualifiers in local filter streams ([#14](https://github.com/okkez/glauca/pull/14) by @okkez)
+- mark parent query rows with a 🔍 badge ([#16](https://github.com/okkez/glauca/pull/16) by @okkez)
+- show created in detail header and render times in local zone ([#17](https://github.com/okkez/glauca/pull/17) by @okkez)
+- add opt-in Nerd Font icon set toggled with F
+
+### Fixes
+
+- match is:pr / is:issue in local filter streams ([#14](https://github.com/okkez/glauca/pull/14) by @okkez)
+
 ## 0.1.4 (2026-06-23)
 
 ### Features
