@@ -2473,7 +2473,18 @@ impl GlaucaApp {
             .when_some(item.milestone.as_ref(), |e, m| {
                 e.child(detail_field("milestone", m, cx))
             })
-            .child(detail_field("updated", &item.updated_at, cx));
+            .when_some(item.created_at_item.as_deref(), |e, created| {
+                e.child(detail_field(
+                    "created",
+                    &glauca_core::time::format_local_datetime(created),
+                    cx,
+                ))
+            })
+            .child(detail_field(
+                "updated",
+                &glauca_core::time::format_local_datetime(&item.updated_at),
+                cx,
+            ));
 
         // Body rendered as Markdown via gpui-component's `TextView`, in its
         // virtualized `scrollable(true)` mode: only the visible part is laid out

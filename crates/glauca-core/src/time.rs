@@ -1,5 +1,5 @@
 //! Human-friendly relative time formatting shared by the TUI and GUI front-ends.
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 
 const MINUTE: i64 = 60;
 const HOUR: i64 = 60 * MINUTE;
@@ -49,6 +49,19 @@ pub fn format_relative_time(rfc3339: &str) -> String {
     format_relative_time_since(rfc3339, Utc::now())
 }
 
+/// Parse a RFC3339 timestamp and render it in the local timezone with seconds
+/// and offset (e.g. "2026-06-24 15:30:45 +09:00"). On parse failure, returns
+/// the input unchanged.
+pub fn format_local_datetime(rfc3339: &str) -> String {
+    match DateTime::parse_from_rfc3339(rfc3339) {
+        Ok(dt) => dt
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S %:z")
+            .to_string(),
+        Err(_) => rfc3339.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +95,27 @@ mod tests {
         );
         // Unparseable input passes through unchanged.
         assert_eq!(format_relative_time_since("not-a-date", now), "not-a-date");
+    }
+
+    #[test]
+    fn format_local_datetime_renders_in_local_zone() {
+        // The local timezone is environment-dependent, so instead of asserting
+        // an exact string we round-trip: the output must be parseable as the
+        // declared `%Y-%m-%d %H:%M:%S %:z` format and denote the same instant
+        // as the input. This verifies both the format and that the local-zone
+        // conversion preserves the instant, regardless of the test machine's TZ.
+        let input = "2026-06-19T09:00:00Z";
+        let formatted = format_local_datetime(input);
+        let reparsed = DateTime::parse_from_str(&formatted, "%Y-%m-%d %H:%M:%S %:z")
+            .expect("output should match the declared format");
+        assert_eq!(
+            reparsed.with_timezone(&Utc),
+            DateTime::parse_from_rfc3339(input)
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+
+        // Unparseable input passes through unchanged.
+        assert_eq!(format_local_datetime("not-a-date"), "not-a-date");
     }
 }
