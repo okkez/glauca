@@ -1,5 +1,5 @@
 use crate::tui::{App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, item_actions};
-use chrono::{DateTime, Local, Utc};
+use chrono::Utc;
 use glauca_core::engine::ReviewEvent;
 use glauca_core::filter::FilterQuery;
 use ratatui::{
@@ -410,11 +410,11 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or_else(|| "—".to_string());
             let state = item.state.clone();
             let title = item.title.clone();
-            let updated_at = format_local_datetime(&item.updated_at);
+            let updated_at = glauca_core::time::format_local_datetime(&item.updated_at);
             let created_at = item
                 .created_at_item
                 .as_deref()
-                .map(format_local_datetime)
+                .map(glauca_core::time::format_local_datetime)
                 .unwrap_or_else(|| "—".to_string());
             let url = item.url.clone();
             let number = item.number;
@@ -1039,19 +1039,6 @@ fn review_state_badge(state: &str) -> (&'static str, Style) {
         "DISMISSED" => ("↩", Style::default().fg(Color::Cyan)),
         _ => ("?", Style::default()),
     }
-}
-
-/// Parse a RFC3339 UTC string and format it as local time `YYYY-MM-DD HH:MM`.
-fn format_local_datetime(s: &str) -> String {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| {
-            let local: DateTime<Local> = dt.with_timezone(&Local);
-            local.format("%Y-%m-%d %H:%M").to_string()
-        })
-        .unwrap_or_else(|_| {
-            // Fall back: strip trailing Z/offset if present, return as-is trimmed
-            s.get(..16).unwrap_or(s).replace('T', " ")
-        })
 }
 
 /// Returns a centered `Rect` of fixed height and `percent_x` width.
