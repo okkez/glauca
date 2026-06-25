@@ -858,6 +858,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
         entry("S", "full resync (+prune)"),
         entry("u", "apply pending updates"),
         entry("N", "toggle desktop notifications"),
+        entry("F", "toggle Nerd Font icons"),
         Line::raw(""),
         header("Query list"),
         entry("j k", "move selection"),
