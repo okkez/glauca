@@ -17,8 +17,8 @@ use ratatui::style::{Color, Style};
 /// The glyph for each semantic icon the TUI renders.
 ///
 /// Public fields are glyphs a call site reads directly. The fields below
-/// `mode_badge` are private and reached only through the `*_badge` / `kind_icon`
-/// methods, which map a domain string (item state, kind, review state/decision)
+/// `mode_badge` are private and reached only through the `item_icon` / `review_*`
+/// methods, which map a domain string (item kind+state, review state/decision)
 /// to a glyph — keeping that mapping in one place instead of at every call site.
 #[derive(Debug, Clone)]
 pub struct Icons {
@@ -34,9 +34,7 @@ pub struct Icons {
     /// never renders as tofu on a terminal without the icon font), `Some` in
     /// the icon-font set.
     pub mode_badge: Option<&'static str>,
-    open: &'static str,
     merged: &'static str,
-    closed: &'static str,
     pr: &'static str,
     issue: &'static str,
     /// Plain check mark for a PR's overall review decision (distinct from the
@@ -70,9 +68,7 @@ impl Icons {
             bell: "🔔",
             clock: "🕐",
             mode_badge: None,
-            open: "●",
             merged: "⬡",
-            closed: "✕",
             pr: "⎇",
             issue: "○",
             check: "✓",
@@ -99,9 +95,7 @@ impl Icons {
             bell: "\u{f0f3}",             // fa bell
             clock: "\u{f017}",            // fa clock
             mode_badge: Some("\u{f6be}"), // fa cat
-            open: "\u{f111}",             // fa circle
             merged: "\u{f387}",           // fa code-merge
-            closed: "\u{f057}",           // fa circle-xmark
             pr: "\u{e13c}",               // fa code-pull-request
             issue: "\u{f192}",            // fa circle-dot
             check: "\u{f00c}",            // fa check
@@ -109,24 +103,6 @@ impl Icons {
             review_changes: "\u{f00d}",   // fa xmark
             review_commented: "\u{f075}", // fa comment
             review_dismissed: "\u{f3e5}", // fa reply
-        }
-    }
-
-    /// Open/merged/closed state badge for an item.
-    pub fn state_badge(&self, state: &str) -> &'static str {
-        match state {
-            "open" => self.open,
-            "merged" => self.merged,
-            "closed" => self.closed,
-            _ => "?",
-        }
-    }
-
-    /// PR vs issue kind icon.
-    pub fn kind_icon(&self, kind: &str) -> &'static str {
-        match kind {
-            "pull_request" => self.pr,
-            _ => self.issue,
         }
     }
 
@@ -186,14 +162,8 @@ mod tests {
     }
 
     #[test]
-    fn badges_map_states() {
+    fn review_state_badge_maps() {
         let i = Icons::unicode();
-        assert_eq!(i.state_badge("open"), "●");
-        assert_eq!(i.state_badge("merged"), "⬡");
-        assert_eq!(i.state_badge("closed"), "✕");
-        assert_eq!(i.state_badge("???"), "?");
-        assert_eq!(i.kind_icon("pull_request"), "⎇");
-        assert_eq!(i.kind_icon("issue"), "○");
         assert_eq!(i.review_state_badge("APPROVED").0, "✅");
         assert_eq!(i.review_state_badge("unknown").0, "?");
     }

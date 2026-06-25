@@ -436,7 +436,7 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             let url = item.url.clone();
             let number = item.number;
             let comment_count = item.comment_count;
-            let kind_icon = app.icons.kind_icon(&item.kind);
+            let item_icon = app.icons.item_icon(&item.kind, &state);
             let is_pr = item.kind == "pull_request";
 
             let labels = if item.labels.is_empty() {
@@ -487,12 +487,11 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let mut lines = vec![
-                // Title header
+                // Title header: combined kind+state icon (same as the list row),
+                // coloured by state; number in cyan; title bold.
                 Line::from(vec![
-                    Span::styled(
-                        format!("{kind_icon} #{number} "),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(item_icon, state_style(&state)),
+                    Span::styled(format!("  #{number} "), Style::default().fg(Color::Cyan)),
                     Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
                 ]),
                 Line::default(),
@@ -506,10 +505,11 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                     Span::raw(author),
                 ]),
                 Line::from({
+                    // State is shown by the header icon's colour; here just the
+                    // word, coloured to match (the badge would be redundant).
                     let mut spans = vec![
                         Span::styled("State:    ", Style::default().fg(Color::Gray)),
-                        Span::styled(app.icons.state_badge(&state), state_style(&state)),
-                        Span::raw(format!(" {state}")),
+                        Span::styled(state.clone(), state_style(&state)),
                     ];
                     if is_pr && item.is_draft {
                         spans.push(Span::styled(
