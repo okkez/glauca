@@ -29,11 +29,12 @@ pub struct TuiSettings {
     /// `DEFAULT_SYNC_INTERVAL_SECS`; the engine clamps it to a sane minimum.
     #[serde(default = "default_sync_interval_secs")]
     pub sync_interval_secs: u64,
-    /// Whether to render semantic icons using Nerd Font glyphs instead of the
-    /// default emoji/Unicode set. Defaults to `false` (opt-in): Nerd Font
-    /// glyphs only display in a terminal configured with a Nerd Font.
+    /// Whether to render semantic icons using icon-font glyphs (Font Awesome /
+    /// Nerd Font) instead of the default emoji/Unicode set. Defaults to `false`
+    /// (opt-in): these glyphs only display in a terminal whose font provides
+    /// them (e.g. `fonts-font-awesome`, or a Nerd Font).
     #[serde(default)]
-    pub use_nerd_font_icons: bool,
+    pub use_icon_font: bool,
 }
 
 impl Default for TuiSettings {
@@ -41,7 +42,7 @@ impl Default for TuiSettings {
         Self {
             notifications_enabled: false,
             sync_interval_secs: default_sync_interval_secs(),
-            use_nerd_font_icons: false,
+            use_icon_font: false,
         }
     }
 }
@@ -90,23 +91,23 @@ mod tests {
     }
 
     #[test]
-    fn nerd_font_icons_default_off() {
-        assert!(!TuiSettings::default().use_nerd_font_icons);
+    fn icon_font_default_off() {
+        assert!(!TuiSettings::default().use_icon_font);
     }
 
     #[test]
-    fn nerd_font_icons_round_trip() {
+    fn icon_font_round_trip() {
         let settings = TuiSettings {
-            use_nerd_font_icons: true,
+            use_icon_font: true,
             ..Default::default()
         };
         let serialized = toml::to_string(&settings).unwrap();
         assert!(
-            serialized.contains("use_nerd_font_icons = true"),
+            serialized.contains("use_icon_font = true"),
             "expected the flag in output, got:\n{serialized}"
         );
         let back: TuiSettings = toml::from_str(&serialized).unwrap();
-        assert!(back.use_nerd_font_icons);
+        assert!(back.use_icon_font);
     }
 
     #[test]
@@ -114,7 +115,7 @@ mod tests {
         // A file predating the fields (or an empty one) must fill the defaults.
         let s: TuiSettings = toml::from_str("").unwrap();
         assert!(!s.notifications_enabled);
-        assert!(!s.use_nerd_font_icons);
+        assert!(!s.use_icon_font);
         assert_eq!(
             s.sync_interval_secs,
             glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS

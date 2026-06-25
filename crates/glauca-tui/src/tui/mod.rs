@@ -121,8 +121,8 @@ pub struct App {
     /// first load of each query establishes a baseline without notifying (no
     /// startup storm). See `glauca_core::notify::ItemTracker`.
     pub notif_tracker: ItemTracker,
-    /// Active semantic-icon set (emoji/Unicode vs Nerd Font). Loaded from
-    /// `TuiSettings::use_nerd_font_icons`; toggled with `F`.
+    /// Active semantic-icon set (emoji/Unicode vs icon-font glyphs). Loaded from
+    /// `TuiSettings::use_icon_font`; toggled with `F`.
     pub icons: Icons,
 }
 
@@ -495,15 +495,15 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             ));
         }
 
-        // Toggle Nerd Font icons and persist the choice.
+        // Toggle the icon font and persist the choice.
         KeyCode::Char('F') => {
             let mut s = TuiSettings::load();
-            s.use_nerd_font_icons = !s.use_nerd_font_icons;
+            s.use_icon_font = !s.use_icon_font;
             s.save();
-            app.icons = Icons::new(s.use_nerd_font_icons);
+            app.icons = Icons::new(s.use_icon_font);
             app.status = Some(format!(
-                "Nerd Font icons {}",
-                if s.use_nerd_font_icons { "on" } else { "off" }
+                "Icon font {}",
+                if s.use_icon_font { "on" } else { "off" }
             ));
         }
 
@@ -1198,7 +1198,7 @@ where
     app.entries = init.entries;
     app.current_user = init.current_user;
     app.notifications_enabled = tui_settings.notifications_enabled;
-    app.icons = Icons::new(tui_settings.use_nerd_font_icons);
+    app.icons = Icons::new(tui_settings.use_icon_font);
 
     // Prime unread counts for every root query via a cached load (no sync).
     let root_query_ids: Vec<i64> = app
