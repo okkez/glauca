@@ -653,7 +653,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     if app.notifications_enabled {
         segments.push(app.icons.bell.to_string());
     }
-    // Present only while the Nerd Font set is active, so it only shows where it renders.
+    // Present only while the icon-font set is active, so it only shows where it renders.
     if let Some(badge) = app.icons.mode_badge {
         segments.push(badge.to_string());
     }
@@ -858,7 +858,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
         entry("S", "full resync (+prune)"),
         entry("u", "apply pending updates"),
         entry("N", "toggle desktop notifications"),
-        entry("F", "toggle Nerd Font icons"),
+        entry("F", "toggle icon font"),
         Line::raw(""),
         header("Query list"),
         entry("j k", "move selection"),

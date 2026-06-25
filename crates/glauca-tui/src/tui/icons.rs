@@ -2,10 +2,11 @@
 //!
 //! Every glyph that *represents a thing* (issue, PR, merged, approved, comment,
 //! lock, bell, search, …) is defined here once, in two variants: the default
-//! emoji/Unicode set that renders in virtually any terminal font, and a Nerd
-//! Font (octicon/Font-Awesome) set that requires a Nerd Font in the terminal.
-//! The active set is chosen from `TuiSettings::use_nerd_font_icons` and held on
-//! `App::icons`, so draw code reads `app.icons.*` without re-deciding per frame.
+//! emoji/Unicode set that renders in virtually any terminal font, and an
+//! icon-font set (Font Awesome glyphs) for terminals whose font provides them
+//! (`fonts-font-awesome`, or a Nerd Font). The active set is chosen from
+//! `TuiSettings::use_icon_font` and held on `App::icons`, so draw code reads
+//! `app.icons.*` without re-deciding per frame.
 //!
 //! Structural/ornamental glyphs (selection cursor ▶, separators ━ ─, bars ▌,
 //! expanders ▸) are layout chrome, not semantic icons, and stay hardcoded in
@@ -30,8 +31,8 @@ pub struct Icons {
     pub bell: &'static str,
     pub clock: &'static str,
     /// Status-bar badge for the active set: `None` in the Unicode set (so it
-    /// never renders as tofu on a non-Nerd-Font terminal), `Some` in the Nerd
-    /// Font set.
+    /// never renders as tofu on a terminal without the icon font), `Some` in
+    /// the icon-font set.
     pub mode_badge: Option<&'static str>,
     open: &'static str,
     merged: &'static str,
@@ -49,9 +50,9 @@ pub struct Icons {
 
 impl Icons {
     /// Pick the icon set for the given preference.
-    pub fn new(use_nerd_font: bool) -> Self {
-        if use_nerd_font {
-            Self::nerd()
+    pub fn new(use_icon_font: bool) -> Self {
+        if use_icon_font {
+            Self::icon_font()
         } else {
             Self::unicode()
         }
@@ -82,31 +83,32 @@ impl Icons {
         }
     }
 
-    /// Nerd Font glyphs (Private Use Area). Git-specific icons use octicons;
-    /// the rest use Font Awesome. Requires a Nerd Font in the terminal — these
-    /// codepoints render as tofu/blank otherwise. Comments give the glyph name;
-    /// verify the rendering visually if a glyph looks wrong.
-    pub fn nerd() -> Self {
+    /// Font Awesome glyphs (Private Use Area), verified against
+    /// `fonts-font-awesome` 7.2.0 Solid (`fa-solid-900.ttf`, family name
+    /// "Font Awesome 6 Free"); a Nerd Font renders them too. These require an
+    /// icon font in the terminal — they render as tofu/blank otherwise.
+    /// Comments give the FA glyph name.
+    pub fn icon_font() -> Self {
         Self {
-            search: "\u{f002}",            // nf-fa-search
-            refresh: "\u{f021}",           // nf-fa-refresh
-            new_item: "\u{f111}",          // nf-fa-circle (filled dot)
-            private: "\u{f023}",           // nf-fa-lock
-            pending_reviewer: "\u{f10c}",  // nf-fa-circle_o (hollow dot)
-            syncing: "\u{f021}",           // nf-fa-refresh
-            bell: "\u{f0f3}",              // nf-fa-bell
-            clock: "\u{f017}",             // nf-fa-clock_o
-            mode_badge: Some("\u{f011b}"), // nf-md-cat
-            open: "\u{f111}",              // nf-fa-circle (filled dot)
-            merged: "\u{f419}",            // nf-oct-git_merge
-            closed: "\u{f057}",            // nf-fa-times_circle
-            pr: "\u{f407}",                // nf-oct-git_pull_request
-            issue: "\u{f41b}",             // nf-oct-issue_opened
-            check: "\u{f00c}",             // nf-fa-check
-            review_approved: "\u{f00c}",   // nf-fa-check
-            review_changes: "\u{f00d}",    // nf-fa-times
-            review_commented: "\u{f075}",  // nf-fa-comment
-            review_dismissed: "\u{f112}",  // nf-fa-reply
+            search: "\u{f002}",           // fa magnifying-glass
+            refresh: "\u{f021}",          // fa arrows-rotate
+            new_item: "\u{f111}",         // fa circle
+            private: "\u{f023}",          // fa lock
+            pending_reviewer: "\u{f192}", // fa circle-dot
+            syncing: "\u{f021}",          // fa arrows-rotate
+            bell: "\u{f0f3}",             // fa bell
+            clock: "\u{f017}",            // fa clock
+            mode_badge: Some("\u{f6be}"), // fa cat
+            open: "\u{f111}",             // fa circle
+            merged: "\u{f387}",           // fa code-merge
+            closed: "\u{f057}",           // fa circle-xmark
+            pr: "\u{e13c}",               // fa code-pull-request
+            issue: "\u{f192}",            // fa circle-dot
+            check: "\u{f00c}",            // fa check
+            review_approved: "\u{f058}",  // fa circle-check
+            review_changes: "\u{f00d}",   // fa xmark
+            review_commented: "\u{f075}", // fa comment
+            review_dismissed: "\u{f3e5}", // fa reply
         }
     }
 
@@ -167,8 +169,8 @@ mod tests {
     fn new_selects_set() {
         // The two sets differ, and `new` picks between them by the flag.
         assert_eq!(Icons::new(false).pr, Icons::unicode().pr);
-        assert_eq!(Icons::new(true).pr, Icons::nerd().pr);
-        assert_ne!(Icons::unicode().pr, Icons::nerd().pr);
+        assert_eq!(Icons::new(true).pr, Icons::icon_font().pr);
+        assert_ne!(Icons::unicode().pr, Icons::icon_font().pr);
     }
 
     #[test]
