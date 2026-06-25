@@ -15,6 +15,15 @@ use unicode_width::UnicodeWidthChar;
 /// Selection marker drawn in the item list's left gutter (reserved on every row).
 const HIGHLIGHT_SYMBOL: &str = "▶ ";
 
+/// Item-list left-gutter layout, in display columns. The unread marker and the
+/// non-unread blank are both `MARKER_CELL_W` wide so item icons line up across
+/// rows. `ROW_INDENT_W` is a fixed approximation of line 1's prefix width that
+/// keeps the line-2 (repo) column aligned across rows — intentionally not the
+/// per-row `prefix_w`, which shifts with the number's digit count. Keep both in
+/// sync with the prefix layout in `draw_item_list`.
+const MARKER_CELL_W: usize = 3;
+const ROW_INDENT_W: usize = 10;
+
 /// Build styled spans for `text`, highlighting the earliest filter-token match
 /// (range computed by `FilterQuery::highlight_range`).
 fn highlight_spans<'a>(
@@ -322,30 +331,30 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = filtered
         .iter()
         .map(|item| {
-            let state_style = state_style(&item.state);
-            let state_badge = app.icons.state_badge(&item.state);
-            let kind_icon = app.icons.kind_icon(&item.kind);
+            let item_style = state_style(&item.state);
+            let item_icon = app.icons.item_icon(&item.kind, &item.state);
             let repo = format!("{}/{}", item.repo_owner, item.repo_name);
             let updated = glauca_core::time::format_relative_time_since(&item.updated_at, now);
             let title_spans =
                 highlight_spans(&filter_query, &item.title, match_normal, match_highlight);
 
-            // Line 1 prefix: new●  state●  kind⎇  #number  (title is appended,
-            // wrapped, below). Kept separate so we can measure its width and
-            // align wrapped title continuation lines under the title start.
+            // Line 1 prefix: "new-marker  item-icon  #number", then the title
+            // (appended, wrapped below). The item icon is one glyph encoding the
+            // kind (issue/PR/merge), coloured by state. Both marker branches are
+            // `MARKER_CELL_W` wide (see its doc) so the icons line up; kept as
+            // separate spans so we can measure the prefix width and indent the
+            // wrapped title continuation lines to match.
             let mut prefix_spans = vec![if item.is_new {
                 Span::styled(
-                    format!("{} ", app.icons.new_item),
+                    format!("{}{}", app.icons.new_item, " ".repeat(MARKER_CELL_W - 1)),
                     Style::default().fg(Color::Yellow),
                 )
             } else {
-                Span::raw("  ")
+                Span::raw(" ".repeat(MARKER_CELL_W))
             }];
             prefix_spans.extend([
-                Span::styled(state_badge, state_style),
-                Span::raw(" "),
-                Span::styled(kind_icon, Style::default().fg(Color::Cyan)),
-                Span::raw(format!(" #{} ", item.number)),
+                Span::styled(item_icon, item_style),
+                Span::raw(format!("  #{} ", item.number)),
             ]);
             let prefix_w: usize = prefix_spans.iter().map(Span::width).sum();
 
@@ -366,8 +375,9 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(spans));
             }
 
-            // Last line: (indent)  [🔒]  repo  <pad>  updated (relative, right-aligned)
-            let mut line2_spans = vec![Span::raw("        ")];
+            // Last line: (indent)  [🔒]  repo  <pad>  updated (relative, right-aligned).
+            // Indent by the fixed `ROW_INDENT_W` so repo lines up across rows (see its doc).
+            let mut line2_spans = vec![Span::raw(" ".repeat(ROW_INDENT_W))];
             if item.repo_private {
                 line2_spans.push(Span::styled(
                     format!("{} ", app.icons.private),

@@ -153,6 +153,18 @@ impl Icons {
             _ => ("", Style::default()),
         }
     }
+
+    /// Combined kind+state glyph for the item list: the glyph shows the kind
+    /// (issue vs PR, with a merged PR shown as a merge), and the caller colours
+    /// it by state (see `ui::state_style`). Mirrors GitHub's single stateful
+    /// item icon, replacing a separate state dot + kind icon shown side by side.
+    pub fn item_icon(&self, kind: &str, state: &str) -> &'static str {
+        match (kind, state) {
+            ("pull_request", "merged") => self.merged,
+            ("pull_request", _) => self.pr,
+            _ => self.issue,
+        }
+    }
 }
 
 impl Default for Icons {
@@ -184,5 +196,17 @@ mod tests {
         assert_eq!(i.kind_icon("issue"), "○");
         assert_eq!(i.review_state_badge("APPROVED").0, "✅");
         assert_eq!(i.review_state_badge("unknown").0, "?");
+    }
+
+    #[test]
+    fn item_icon_combines_kind_and_state() {
+        let i = Icons::unicode();
+        // PR: kind glyph, but a merged PR swaps to the merge glyph.
+        assert_eq!(i.item_icon("pull_request", "open"), i.pr);
+        assert_eq!(i.item_icon("pull_request", "closed"), i.pr);
+        assert_eq!(i.item_icon("pull_request", "merged"), i.merged);
+        // Issue: kind glyph regardless of state (state is conveyed by colour).
+        assert_eq!(i.item_icon("issue", "open"), i.issue);
+        assert_eq!(i.item_icon("issue", "closed"), i.issue);
     }
 }
