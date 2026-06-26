@@ -1,3 +1,9 @@
+## 0.1.6 (2026-06-26)
+
+### Features
+
+- combine state and kind into one item-list icon ([#22](https://github.com/okkez/glauca/pull/22) by @okkez)
+
 ## 0.1.5 (2026-06-24)
 
 ### Features
