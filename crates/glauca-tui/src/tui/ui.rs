@@ -189,8 +189,7 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::QueryList;
-    let block = pane_block("Filter Streams", focused)
-        .title_bottom(Line::from(" n:new  f:stream  e:edit  d:del  a:read all ").right_aligned());
+    let block = pane_block("Filter Streams", focused);
 
     let items: Vec<ListItem> = app
         .entries
