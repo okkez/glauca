@@ -1,3 +1,4 @@
 /target
 dev.db
 /mise.toml
+/crates/glauca-tauri/gen/schemas/
