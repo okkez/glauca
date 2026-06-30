@@ -30,6 +30,8 @@ pub struct Icons {
     pub syncing: &'static str,
     pub bell: &'static str,
     pub clock: &'static str,
+    /// Marker shown before a filter stream (a saved filter nested under a query).
+    pub filter_stream: &'static str,
     /// Status-bar badge for the active set: `None` in the Unicode set (so it
     /// never renders as tofu on a terminal without the icon font), `Some` in
     /// the icon-font set.
@@ -67,6 +69,7 @@ impl Icons {
             syncing: "⟳",
             bell: "🔔",
             clock: "🕐",
+            filter_stream: "↳",
             mode_badge: None,
             merged: "⬡",
             pr: "⎇",
@@ -94,6 +97,7 @@ impl Icons {
             syncing: "\u{f021}",          // fa arrows-rotate
             bell: "\u{f0f3}",             // fa bell
             clock: "\u{f017}",            // fa clock
+            filter_stream: "\u{f160}",    // fa arrow-down-wide-short
             mode_badge: Some("\u{f6be}"), // fa cat
             merged: "\u{f387}",           // fa code-merge
             pr: "\u{e13c}",               // fa code-pull-request
