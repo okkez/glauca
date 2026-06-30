@@ -2187,11 +2187,19 @@ impl GlaucaApp {
             .when(!selected, |e| e.hover(|e| e.bg(cx.theme().list_hover)))
             .on_click({
                 let view = view.clone();
-                move |_, _window, cx: &mut App| {
+                move |event: &ClickEvent, _window, cx: &mut App| {
+                    // Shift+click opens the row in the browser (mouse-only
+                    // equivalent of the `o` key), in addition to selecting it.
+                    let shift = event.modifiers().shift;
                     view.update(cx, |this, cx| {
                         this.focus = Focus::ItemList;
                         this.item_cursor = ix;
                         this.mark_current_item_read(cx);
+                        if shift && let Some(item) = this.selected_item() {
+                            this.send(EngineCommand::OpenBrowser {
+                                item: Box::new(item),
+                            });
+                        }
                         cx.notify();
                     });
                 }
