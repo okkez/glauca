@@ -10,7 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Selection marker drawn in the item list's left gutter (reserved on every row).
 const HIGHLIGHT_SYMBOL: &str = "▶ ";
@@ -457,32 +457,70 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             // Build combined reviewer list: submitted reviews + pending requests
             let reviewed_logins: std::collections::HashSet<&str> =
                 item.reviews.iter().map(|(u, _)| u.login.as_str()).collect();
-            let reviewer_spans: Vec<Span> = {
-                let mut spans = Vec::new();
-                for (user, state) in &item.reviews {
-                    let (badge, style) = app.icons.review_state_badge(state);
-                    if !spans.is_empty() {
-                        spans.push(Span::raw("  "));
-                    }
-                    spans.push(Span::styled(badge, style));
-                    spans.push(Span::raw(format!(" {}", user.login)));
+            // Collect reviewers (submitted reviews first, then still-pending
+            // requests) as (badge, style, login) groups so we can pack them onto
+            // lines as indivisible units below.
+            let mut reviewer_groups: Vec<(&'static str, Style, String)> = Vec::new();
+            for (user, state) in &item.reviews {
+                let (badge, style) = app.icons.review_state_badge(state);
+                reviewer_groups.push((badge, style, user.login.clone()));
+            }
+            for user in &item.requested_reviewers {
+                if !reviewed_logins.contains(user.login.as_str()) {
+                    reviewer_groups.push((
+                        app.icons.pending_reviewer,
+                        Style::default().fg(Color::Yellow),
+                        user.login.clone(),
+                    ));
                 }
-                for user in &item.requested_reviewers {
-                    if !reviewed_logins.contains(user.login.as_str()) {
-                        if !spans.is_empty() {
-                            spans.push(Span::raw("  "));
+            }
+
+            // Wrap the reviewer list by hand so a break never lands inside an
+            // "icon  login" group: each group stays whole, groups are separated by
+            // 3 spaces, and a continuation line is indented to sit under the first
+            // reviewer. (ratatui's word wrap would split on the icon↔login space,
+            // and NBSP doesn't help — it counts as whitespace there too.)
+            let label = "Reviewers:";
+            let label_style = Style::default().fg(Color::Gray);
+            let gap = "  "; // gap between a reviewer's icon and login
+            let indent = label.width() + 1; // label + the single space after it
+            let inner_w = block.inner(area).width as usize; // content width, sans border/padding
+            let sep_w = 3usize; // spaces between reviewers
+            let reviewer_lines: Vec<Line> = {
+                let mut lines: Vec<Line> = Vec::new();
+                if reviewer_groups.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled(label, label_style),
+                        Span::raw(" —"),
+                    ]));
+                } else {
+                    let mut cur: Vec<Span> = vec![Span::styled(label, label_style), Span::raw(" ")];
+                    let mut used_w = indent;
+                    let mut first_on_line = true;
+                    for (badge, style, login) in reviewer_groups {
+                        let group_w = badge.width() + gap.width() + login.width();
+
+                        // Move to a fresh, indented line when this group (with its
+                        // separator) would overflow — but never break before the
+                        // first group on a line, even if it overflows alone.
+                        if !first_on_line && used_w + sep_w + group_w > inner_w {
+                            lines.push(Line::from(std::mem::take(&mut cur)));
+                            cur.push(Span::raw(" ".repeat(indent)));
+                            used_w = indent;
+                            first_on_line = true;
                         }
-                        spans.push(Span::styled(
-                            app.icons.pending_reviewer,
-                            Style::default().fg(Color::Yellow),
-                        ));
-                        spans.push(Span::raw(format!(" {}", user.login)));
+                        if !first_on_line {
+                            cur.push(Span::raw(" ".repeat(sep_w)));
+                            used_w += sep_w;
+                        }
+                        cur.push(Span::styled(badge, style));
+                        cur.push(Span::raw(format!("{gap}{login}")));
+                        used_w += group_w;
+                        first_on_line = false;
                     }
+                    lines.push(Line::from(cur));
                 }
-                if spans.is_empty() {
-                    spans.push(Span::raw("—"));
-                }
-                spans
+                lines
             };
 
             let mut lines = vec![
@@ -539,19 +577,12 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                     Span::styled("Assignees:", Style::default().fg(Color::Gray)),
                     Span::raw(format!(" {assignees}")),
                 ]),
-                Line::from({
-                    let mut spans = vec![
-                        Span::styled("Reviewers:", Style::default().fg(Color::Gray)),
-                        Span::raw(" "),
-                    ];
-                    spans.extend(reviewer_spans);
-                    spans
-                }),
-                Line::from(vec![
-                    Span::styled("Comments: ", Style::default().fg(Color::Gray)),
-                    Span::raw(format!("{comment_count}")),
-                ]),
             ];
+            lines.extend(reviewer_lines);
+            lines.push(Line::from(vec![
+                Span::styled("Comments: ", Style::default().fg(Color::Gray)),
+                Span::raw(format!("{comment_count}")),
+            ]));
 
             // PR-only fields
             if is_pr {
@@ -564,9 +595,9 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                 if let Some(rd) = &item.review_decision {
                     let (icon, style) = app.icons.review_decision_badge(rd);
                     let badge = match rd.as_str() {
-                        "APPROVED" => format!("{icon} APPROVED"),
-                        "CHANGES_REQUESTED" => format!("{icon} CHANGES REQUESTED"),
-                        "REVIEW_REQUIRED" => format!("{icon} REVIEW REQUIRED"),
+                        "APPROVED" => format!("{icon}  APPROVED"),
+                        "CHANGES_REQUESTED" => format!("{icon}  CHANGES REQUESTED"),
+                        "REVIEW_REQUIRED" => format!("{icon}  REVIEW REQUIRED"),
                         other => other.to_string(),
                     };
                     lines.push(Line::from(vec![
