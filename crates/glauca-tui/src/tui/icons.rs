@@ -22,7 +22,9 @@ use ratatui::style::{Color, Style};
 /// to a glyph — keeping that mapping in one place instead of at every call site.
 #[derive(Debug, Clone)]
 pub struct Icons {
-    /// Marker shown before a saved query in the left pane.
+    /// Marker shown before a saved query in the left pane: the GitHub logo in
+    /// the icon-font set, a magnifying glass in the Unicode set (GitHub has no
+    /// emoji).
     pub query: &'static str,
     pub refresh: &'static str,
     pub new_item: &'static str,
@@ -88,11 +90,11 @@ impl Icons {
     /// "Font Awesome 6 Free"); a Nerd Font renders them too. These require an
     /// icon font in the terminal — they render as tofu/blank otherwise.
     /// Comments give the FA glyph name. The lone exception is `query`, a
-    /// *brands* glyph (the GitHub logo) that lives in `fa-brands-400.ttf`, not
-    /// the Solid font — it needs a Nerd Font (or the brands font) to render.
+    /// *brands* glyph that lives in `fa-brands-400.ttf`, not the Solid font —
+    /// it needs a Nerd Font (or the brands font) to render.
     pub fn icon_font() -> Self {
         Self {
-            query: "\u{f09b}",            // fa github (brands; needs a Nerd Font)
+            query: "\u{f09b}",            // fa github (brands)
             refresh: "\u{f021}",          // fa arrows-rotate
             new_item: "\u{f111}",         // fa circle
             private: "\u{f023}",          // fa lock
