@@ -211,7 +211,7 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
 
             match entry {
                 LeftPaneEntry::Query(q) => {
-                    let mut spans = vec![Span::raw(format!("{}  {}", app.icons.search, q.label))];
+                    let mut spans = vec![Span::raw(format!("{}  {}", app.icons.query, q.label))];
                     if let Some(badge) = badge {
                         spans.push(badge);
                     }
