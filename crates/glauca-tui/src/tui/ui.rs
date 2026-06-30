@@ -211,7 +211,7 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
 
             match entry {
                 LeftPaneEntry::Query(q) => {
-                    let mut spans = vec![Span::raw(format!("{} {}", app.icons.search, q.label))];
+                    let mut spans = vec![Span::raw(format!("{}  {}", app.icons.search, q.label))];
                     if let Some(badge) = badge {
                         spans.push(badge);
                     }
@@ -219,7 +219,7 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
                 }
                 LeftPaneEntry::FilterStream(fs) => {
                     let mut spans = vec![Span::styled(
-                        format!("   ↳ {}", fs.name),
+                        format!("   {}  {}", app.icons.filter_stream, fs.name),
                         Style::default().fg(Color::Gray),
                     )];
                     if let Some(badge) = badge {
