@@ -2,6 +2,7 @@
 // フェーズ A で db/github/model をここへ移設済み。
 // フェーズ A6 で engine（非同期タスク／メッセージ型）も移設済み。
 
+pub mod actions;
 pub mod db;
 pub mod engine;
 pub mod filter;

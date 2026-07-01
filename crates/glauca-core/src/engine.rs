@@ -247,6 +247,36 @@ pub async fn execute_open_browser(item: &ItemEntry) -> anyhow::Result<String> {
     Ok("Opened in browser".into())
 }
 
+/// Run a user-defined custom action against `item`. Each argv element (and each
+/// env value) is rendered with `{{ key }}` placeholders from the item's context,
+/// then the command is run directly (no shell) in the background — so `gh` and
+/// user scripts inherit the environment and run as-is.
+pub async fn execute_custom_action(
+    action: &crate::actions::CustomAction,
+    item: &ItemEntry,
+) -> anyhow::Result<String> {
+    let ctx = crate::actions::build_action_context(item);
+    let argv = action
+        .command
+        .iter()
+        .map(|t| crate::actions::render_template(t, &ctx))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("custom action '{}' has an empty command", action.name))?;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args);
+    for (key, value) in &action.env {
+        cmd.env(key, crate::actions::render_template(value, &ctx)?);
+    }
+    run_background_command(
+        cmd,
+        &format!("Custom action '{}' failed", action.display_label()),
+    )
+    .await?;
+    Ok(format!("Ran: {}", action.display_label()))
+}
+
 pub async fn execute_comment(url: &str, kind: &str, body: &str) -> anyhow::Result<String> {
     let sub = gh_subcommand(kind);
     let mut cmd = tokio::process::Command::new("gh");
@@ -799,6 +829,11 @@ pub enum EngineCommand {
     OpenBrowser {
         item: Box<ItemEntry>,
     },
+    /// Run a user-defined custom action against an item (see `actions` module).
+    RunCustomAction {
+        action: Box<crate::actions::CustomAction>,
+        item: Box<ItemEntry>,
+    },
     Comment {
         url: String,
         kind: String,
@@ -1280,6 +1315,11 @@ async fn command_loop(
                     async move { execute_open_browser(&item).await },
                 );
             }
+            EngineCommand::RunCustomAction { action, item } => {
+                spawn_action(msg_tx.clone(), async move {
+                    execute_custom_action(&action, &item).await
+                });
+            }
             EngineCommand::Comment { url, kind, body } => {
                 spawn_action(msg_tx.clone(), async move {
                     execute_comment(&url, &kind, &body).await
@@ -1377,6 +1417,59 @@ mod tests {
         assert_eq!(effective_interval(5), MIN_SYNC_INTERVAL_SECS);
         assert_eq!(effective_interval(60), 60);
         assert_eq!(effective_interval(120), 120);
+    }
+
+    fn custom_action(command: Vec<&str>) -> crate::actions::CustomAction {
+        crate::actions::CustomAction {
+            name: "test".into(),
+            label: None,
+            command: command.into_iter().map(String::from).collect(),
+            kinds: vec![],
+            env: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_action_substitutes_into_argv() {
+        // Renders to `test 5 -eq 5` → exit 0. If substitution failed the shell
+        // expression would be malformed and exit non-zero.
+        let item = ItemEntry {
+            number: 5,
+            ..Default::default()
+        };
+        let action = custom_action(vec!["sh", "-c", "test {{ number }} -eq 5"]);
+        let msg = execute_custom_action(&action, &item).await.unwrap();
+        assert!(msg.contains("test"), "unexpected message: {msg}");
+    }
+
+    #[tokio::test]
+    async fn custom_action_empty_command_errors() {
+        let action = custom_action(vec![]);
+        assert!(
+            execute_custom_action(&action, &ItemEntry::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_action_nonzero_exit_errors() {
+        let action = custom_action(vec!["sh", "-c", "exit 1"]);
+        assert!(
+            execute_custom_action(&action, &ItemEntry::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_action_unknown_variable_errors() {
+        let action = custom_action(vec!["echo", "{{ bogus }}"]);
+        assert!(
+            execute_custom_action(&action, &ItemEntry::default())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

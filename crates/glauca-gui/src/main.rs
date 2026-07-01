@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
+use glauca_core::actions::{CustomAction, CustomActions};
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, EngineInit, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{
@@ -128,6 +129,7 @@ gpui::actions!(
         OpenInBrowser,
         OpenComments,
         CopyUrl,
+        RunCustomAction,
         Refresh,
         CommentsScrollDown,
         CommentsScrollUp,
@@ -161,6 +163,12 @@ enum MenuKind {
     Entry { index: usize, is_query: bool },
     /// Empty area of the left pane: only "New query".
     NewQueryOnly,
+    /// User-defined custom actions for an item (opened with `x`), pre-filtered to
+    /// the item's kind.
+    CustomActions {
+        item: Box<ItemEntry>,
+        actions: Vec<CustomAction>,
+    },
 }
 
 /// Inputs to `open_filter_stream_form` (add when `edit` is `None`, edit otherwise).
@@ -276,6 +284,9 @@ struct GlaucaApp {
     /// first load of each query establishes a baseline without notifying (no
     /// startup storm). See `glauca_core::notify::ItemTracker`.
     notif_tracker: ItemTracker,
+    /// User-defined custom actions loaded from `actions.toml` (see
+    /// `glauca_core::actions`). Offered via the `x` picker, filtered by kind.
+    custom_actions: CustomActions,
     /// Keeps the `filter_input` subscription alive for the view's lifetime.
     _subscriptions: Vec<Subscription>,
 }
@@ -391,6 +402,7 @@ impl GlaucaApp {
             theme_pref: theme,
             notifications_enabled,
             notif_tracker: ItemTracker::new(),
+            custom_actions: CustomActions::load(),
             _subscriptions: vec![subscription],
         };
         // Apply the saved theme up front (System follows the OS appearance).
@@ -719,6 +731,43 @@ impl GlaucaApp {
         if let Some(item) = self.selected_item() {
             cx.write_to_clipboard(ClipboardItem::new_string(item.url));
         }
+    }
+
+    /// `x` — open the custom-action picker for the selected item, anchored near
+    /// the last pointer position (mirroring the Enter action menu). No-op with a
+    /// status hint when no defined action applies to the item's kind.
+    fn on_run_custom_action(
+        &mut self,
+        _: &RunCustomAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focus == Focus::QueryList {
+            return;
+        }
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let actions: Vec<CustomAction> = self
+            .custom_actions
+            .for_kind(&item.kind)
+            .into_iter()
+            .cloned()
+            .collect();
+        if actions.is_empty() {
+            self.status = Some("No custom actions for this item".into());
+            cx.notify();
+            return;
+        }
+        self.open_menu(
+            self.last_pointer,
+            MenuKind::CustomActions {
+                item: Box::new(item),
+                actions,
+            },
+            window,
+            cx,
+        );
     }
 
     /// The query string of the root query with `root_id` (found in the left-pane
@@ -2782,6 +2831,19 @@ fn populate_menu(mut menu: PopupMenu, app: &Entity<GlaucaApp>, kind: MenuKind) -
                 this.new_query(window, cx);
             });
         }
+        MenuKind::CustomActions { item, actions } => {
+            let item = *item;
+            for action in actions {
+                let item = item.clone();
+                let label = action.display_label().to_string();
+                menu = app_menu_item(menu, app, label, move |this, _w, _cx| {
+                    this.send(EngineCommand::RunCustomAction {
+                        action: Box::new(action.clone()),
+                        item: Box::new(item.clone()),
+                    });
+                });
+            }
+        }
     }
     menu
 }
@@ -3061,6 +3123,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("o", "Open selected item in browser"),
     ("c", "View comments for selected item"),
     ("y", "Copy selected item URL to clipboard"),
+    ("x", "Run a custom action on selected item"),
     ("r", "Refresh selected list (left pane) or item"),
     ("q", "Quit"),
     ("Comments overlay", ""),
@@ -3254,6 +3317,7 @@ impl Render for GlaucaApp {
             .on_action(cx.listener(Self::on_edit_entry))
             .on_action(cx.listener(Self::on_open_in_browser))
             .on_action(cx.listener(Self::on_copy_url))
+            .on_action(cx.listener(Self::on_run_custom_action))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_open_comments))
             .on_action(cx.listener(Self::on_comments_scroll_down))
@@ -3440,6 +3504,7 @@ fn main() -> Result<()> {
                 KeyBinding::new("o", OpenInBrowser, Some(NAV_CONTEXT)),
                 KeyBinding::new("c", OpenComments, Some(NAV_CONTEXT)),
                 KeyBinding::new("y", CopyUrl, Some(NAV_CONTEXT)),
+                KeyBinding::new("x", RunCustomAction, Some(NAV_CONTEXT)),
                 KeyBinding::new("r", Refresh, Some(NAV_CONTEXT)),
                 // Comments overlay controls (active only while the overlay is focused).
                 KeyBinding::new("j", CommentsScrollDown, Some(COMMENTS_CONTEXT)),
