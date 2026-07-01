@@ -1,5 +1,8 @@
 use crate::tui::icons::Icons;
-use crate::tui::{App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, item_actions};
+use crate::tui::{
+    App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, field_text, item_actions,
+    modal_fields_ref,
+};
 use chrono::Utc;
 use glauca_core::engine::ReviewEvent;
 use glauca_core::filter::FilterQuery;
@@ -10,6 +13,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+use ratatui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Selection marker drawn in the item list's left gutter (reserved on every row).
@@ -146,16 +150,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_main(f, app, root[0]);
     draw_status_bar(f, app, root[1]);
 
-    // Overlay modals on top if active
-    if app.input_mode == InputMode::NewQuery {
-        draw_new_query_modal(f, app, area);
-    } else if app.input_mode == InputMode::NewFilterStream {
-        draw_new_filter_stream_modal(f, app, area);
-    } else if app.input_mode == InputMode::EditQuery {
-        draw_edit_query_modal(f, app, area);
-    } else if app.input_mode == InputMode::EditFilterStream {
-        draw_edit_filter_stream_modal(f, app, area);
-    }
+    // Overlay the two-field input modal on top if one is active (no-op otherwise).
+    draw_modal(f, app, area);
 
     if app.input_mode == InputMode::ActionMenu {
         draw_action_popup(f, app, area);
@@ -285,25 +281,35 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     };
 
     // Filter input bar
-    let filter_label = if filter_mode {
-        format!("/ {}_", app.filter)
-    } else if app.filter.is_empty() {
-        " /:filter".to_string()
-    } else {
-        format!("/ {}  (Esc:exit  C-u:clear)", app.filter)
-    };
-    let filter_style = if filter_mode {
-        Style::default().fg(Color::Yellow)
-    } else if !app.filter.is_empty() {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
     let filter_block = pane_block("", filter_mode);
-    let filter_para = Paragraph::new(filter_label)
-        .style(filter_style)
-        .block(filter_block);
-    f.render_widget(filter_para, filter_area);
+    if filter_mode {
+        // Editable: draw the "/ " prompt, then the TextArea (which renders its
+        // own cursor and scrolls horizontally when the text overflows).
+        let inner = filter_block.inner(filter_area);
+        f.render_widget(filter_block, filter_area);
+        draw_prompted_field(
+            f,
+            inner,
+            "/ ",
+            Style::default().fg(Color::Yellow),
+            &app.filter,
+        );
+    } else {
+        let filter_label = if app.filter.is_empty() {
+            " /:filter".to_string()
+        } else {
+            format!("/ {}  (Esc:exit  C-u:clear)", field_text(&app.filter))
+        };
+        let filter_style = if !app.filter.is_empty() {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let filter_para = Paragraph::new(filter_label)
+            .style(filter_style)
+            .block(filter_block);
+        f.render_widget(filter_para, filter_area);
+    }
 
     // Item list
     let filtered = app.filtered_items();
@@ -711,15 +717,16 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 // ── New query modal ───────────────────────────────────────────────────────────
 
 /// Draw a centered two-field input modal (a name field plus a second field).
-/// `border_color` tints the border and whichever field is `active_field` (0 or
-/// 1); the active field also shows a trailing `_` cursor. Shared by the
-/// new/edit query and filter-stream modals, which differ only in these strings.
+/// `border_color` tints the border and the active field's label. Each field is
+/// an editable `TextArea` that renders its own cursor (visible only on the
+/// active field; see `sync_modal_cursors`). Shared by the new/edit query and
+/// filter-stream modals, which differ only in these strings.
 fn draw_two_field_modal(
     f: &mut Frame,
     area: Rect,
     title: &str,
     border_color: Color,
-    fields: [(&str, &str); 2],
+    fields: [(&str, &TextArea); 2],
     active_field: usize,
 ) {
     let popup_area = centered_rect(60, 9, area);
@@ -732,6 +739,8 @@ fn draw_two_field_modal(
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
+    // Five one-line rows: [label0, input0, label1, input1, key hint].
+    // Field i occupies rows i*2 (label) and i*2+1 (input); row 4 is the hint.
     let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1); 5])
@@ -739,16 +748,13 @@ fn draw_two_field_modal(
 
     for (i, (label, value)) in fields.iter().enumerate() {
         let active = active_field == i;
-        let style = if active {
+        let label_style = if active {
             Style::default().fg(border_color)
         } else {
             Style::default().fg(Color::Gray)
         };
-        f.render_widget(Paragraph::new(*label), split[i * 2]);
-        f.render_widget(
-            Paragraph::new(format!("> {}{}", value, if active { "_" } else { "" })).style(style),
-            split[i * 2 + 1],
-        );
+        f.render_widget(Paragraph::new(*label).style(label_style), split[i * 2]);
+        draw_prompted_field(f, split[i * 2 + 1], "> ", label_style, value);
     }
     f.render_widget(
         Paragraph::new("Tab:switch  Enter:save  Esc:cancel")
@@ -757,73 +763,74 @@ fn draw_two_field_modal(
     );
 }
 
-fn draw_new_query_modal(f: &mut Frame, app: &App, area: Rect) {
-    draw_two_field_modal(
-        f,
-        area,
-        " New Query ",
-        Color::Yellow,
-        [
-            (
+/// Draw a fixed 2-column `prompt` (in `prompt_style`) followed by the editable
+/// `ta` in the remaining width. The prompt cell is 2 columns, so `prompt` must
+/// be 2 display columns (e.g. `"> "`, `"/ "`). `ta` renders its own cursor and
+/// scrolls horizontally when the text overflows. Shared by the modal fields and
+/// the filter bar so the prompt width and layout stay in one place.
+fn draw_prompted_field(
+    f: &mut Frame,
+    area: Rect,
+    prompt: &str,
+    prompt_style: Style,
+    ta: &TextArea,
+) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(area);
+    f.render_widget(Paragraph::new(prompt).style(prompt_style), cols[0]);
+    f.render_widget(ta, cols[1]);
+}
+
+/// Draw the active two-field input modal (new/edit × query/filter stream). The
+/// title, border color and field labels are selected per `input_mode`; the two
+/// `TextArea` fields come from `modal_fields_ref`. No-op outside those modals.
+fn draw_modal(f: &mut Frame, app: &App, area: Rect) {
+    let (title, color, labels): (&str, Color, [&str; 2]) = match app.input_mode {
+        InputMode::NewQuery => (
+            " New Query ",
+            Color::Yellow,
+            [
                 "Display name (optional — leave blank to use query):",
-                &app.new_query_name,
-            ),
-            (
                 "GitHub search query (e.g. repo:owner/name is:pr is:open):",
-                &app.new_query_input,
-            ),
-        ],
-        app.modal_field,
-    );
-}
-
-fn draw_new_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
-    draw_two_field_modal(
-        f,
-        area,
-        " New Filter Stream ",
-        Color::Magenta,
-        [
-            ("Display name:", &app.new_filter_stream_name),
-            (
+            ],
+        ),
+        InputMode::NewFilterStream => (
+            " New Filter Stream ",
+            Color::Magenta,
+            [
+                "Display name:",
                 "Filter (e.g. is:pr is:draft assignee:name label:bug):",
-                &app.new_filter_stream_filter,
-            ),
-        ],
-        app.modal_field,
-    );
-}
-
-fn draw_edit_query_modal(f: &mut Frame, app: &App, area: Rect) {
-    draw_two_field_modal(
-        f,
-        area,
-        " Edit Query ",
-        Color::Cyan,
-        [
-            (
+            ],
+        ),
+        InputMode::EditQuery => (
+            " Edit Query ",
+            Color::Cyan,
+            [
                 "Display name (empty = use query string as label):",
-                &app.edit_input,
-            ),
-            ("GitHub search query:", &app.edit_input2),
-        ],
-        app.modal_field,
-    );
-}
-
-fn draw_edit_filter_stream_modal(f: &mut Frame, app: &App, area: Rect) {
+                "GitHub search query:",
+            ],
+        ),
+        InputMode::EditFilterStream => (
+            " Edit Filter Stream ",
+            Color::Cyan,
+            [
+                "Display name:",
+                "Filter (e.g. is:pr assignee:name milestone:v2 repo:owner/name):",
+            ],
+        ),
+        _ => return,
+    };
+    let Some((f0, f1)) = modal_fields_ref(app) else {
+        return;
+    };
     draw_two_field_modal(
         f,
         area,
-        " Edit Filter Stream ",
-        Color::Cyan,
-        [
-            ("Display name:", &app.edit_input),
-            (
-                "Filter (e.g. is:pr assignee:name milestone:v2 repo:owner/name):",
-                &app.edit_input2,
-            ),
-        ],
+        title,
+        color,
+        [(labels[0], f0), (labels[1], f1)],
         app.modal_field,
     );
 }
