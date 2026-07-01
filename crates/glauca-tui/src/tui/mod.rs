@@ -17,6 +17,7 @@ pub mod ui;
 
 use icons::Icons;
 
+use glauca_core::actions::{CustomAction, CustomActions};
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{group_range, is_item_unread, move_group_down, query_label};
@@ -50,6 +51,8 @@ pub enum InputMode {
     /// Edit filter stream modal (name + filter, Tab to switch fields).
     EditFilterStream,
     ActionMenu,
+    /// User-defined custom-action picker (opened with `x`).
+    CustomActionMenu,
     MergeMenu,
     /// Review-event selection (Comment / Approve / Request changes), shown after
     /// the review-comment editor closes so the submit can be confirmed/cancelled.
@@ -124,6 +127,12 @@ pub struct App {
     /// Active semantic-icon set (emoji/Unicode vs icon-font glyphs). Loaded from
     /// `TuiSettings::use_icon_font`; toggled with `F`.
     pub icons: Icons,
+    /// User-defined custom actions loaded from `actions.toml` (see
+    /// `glauca_core::actions`). Offered via the picker (`x`), filtered by kind.
+    pub custom_actions: CustomActions,
+    /// Selection cursor within the custom-action picker (indexes the list
+    /// returned by `custom_actions_for_selected`).
+    pub custom_action_cursor: usize,
 }
 
 impl App {
@@ -165,6 +174,27 @@ impl App {
             notifications_enabled: false,
             notif_tracker: ItemTracker::new(),
             icons: Icons::default(),
+            custom_actions: CustomActions::default(),
+            custom_action_cursor: 0,
+        }
+    }
+
+    /// Custom actions applicable to the currently selected item, in definition
+    /// order. Empty when nothing is selected or none match the item's kind.
+    pub fn custom_actions_for_selected(&self) -> Vec<&CustomAction> {
+        match self.selected_item() {
+            Some(item) => self.custom_actions.for_kind(&item.kind),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether any custom action applies to the selected item. Cheaper than
+    /// `custom_actions_for_selected` for the common "is the list non-empty?"
+    /// check (per-frame status hint, `x` guard) — it allocates nothing.
+    pub fn has_custom_actions_for_selected(&self) -> bool {
+        match self.selected_item() {
+            Some(item) => self.custom_actions.has_for_kind(&item.kind),
+            None => false,
         }
     }
 
@@ -264,6 +294,8 @@ enum Action {
     ConfirmReviewEvent,
     OpenBrowser,
     CopyUrl,
+    /// Confirm the highlighted entry in the custom-action picker.
+    ConfirmCustom,
     ReviewOctorus,
     RefreshList,
     RefreshItem,
@@ -303,6 +335,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         InputMode::EditQuery => handle_key_edit_query(app, key),
         InputMode::EditFilterStream => handle_key_edit_filter_stream(app, key),
         InputMode::ActionMenu => handle_key_action_menu(app, key),
+        InputMode::CustomActionMenu => handle_key_custom_action_menu(app, key),
         InputMode::MergeMenu => handle_key_merge_menu(app, key),
         InputMode::ReviewMenu => handle_key_review_menu(app, key),
         InputMode::CommentsPopup => handle_key_comments_popup(app, key),
@@ -447,6 +480,20 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             return Action::CopyUrl;
         }
 
+        // Open the custom-action picker for the selected item (`x`). No-op with a
+        // hint when no defined action applies to this item's kind.
+        KeyCode::Char('x')
+            if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
+                && app.selected_item().is_some() =>
+        {
+            if !app.has_custom_actions_for_selected() {
+                app.status = Some("No custom actions for this item".into());
+            } else {
+                app.input_mode = InputMode::CustomActionMenu;
+                app.custom_action_cursor = 0;
+            }
+        }
+
         // Review the selected PR with octorus (`or`). PR-only.
         KeyCode::Char('R')
             if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
@@ -537,6 +584,29 @@ fn handle_key_action_menu(app: &mut App, key: KeyEvent) -> Action {
             app.action_cursor = app.action_cursor.saturating_sub(1);
         }
         KeyCode::Enter => return Action::Confirm,
+        _ => {}
+    }
+
+    Action::None
+}
+
+fn handle_key_custom_action_menu(app: &mut App, key: KeyEvent) -> Action {
+    let available_len = app.custom_actions_for_selected().len();
+
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            let max = available_len.saturating_sub(1);
+            if app.custom_action_cursor < max {
+                app.custom_action_cursor += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.custom_action_cursor = app.custom_action_cursor.saturating_sub(1);
+        }
+        KeyCode::Enter => return Action::ConfirmCustom,
         _ => {}
     }
 
@@ -1199,6 +1269,7 @@ where
     app.current_user = init.current_user;
     app.notifications_enabled = tui_settings.notifications_enabled;
     app.icons = Icons::new(tui_settings.use_icon_font);
+    app.custom_actions = CustomActions::load();
 
     // Prime unread counts for every root query via a cached load (no sync).
     let root_query_ids: Vec<i64> = app
@@ -1544,6 +1615,23 @@ where
                                     Ok(()) => "Copied URL to clipboard".into(),
                                     Err(e) => format!("Copy failed: {e}"),
                                 });
+                            }
+                        }
+                        Action::ConfirmCustom => {
+                            let action = app
+                                .custom_actions_for_selected()
+                                .get(app.custom_action_cursor)
+                                .map(|&a| a.clone());
+                            if let (Some(action), Some(item)) =
+                                (action, app.selected_item().cloned())
+                            {
+                                app.input_mode = InputMode::Normal;
+                                engine
+                                    .send(EngineCommand::RunCustomAction {
+                                        action: Box::new(action),
+                                        item: Box::new(item),
+                                    })
+                                    .await;
                             }
                         }
                         Action::ReviewOctorus => {
@@ -2312,6 +2400,93 @@ mod tests {
 
         let action = handle_key_action_menu(&mut app, make_key(KeyCode::Enter));
         assert!(matches!(action, Action::Confirm));
+    }
+
+    fn make_custom_action(name: &str, kinds: &[&str]) -> CustomAction {
+        CustomAction {
+            name: name.into(),
+            label: None,
+            command: vec!["true".into()],
+            kinds: kinds.iter().map(|s| s.to_string()).collect(),
+            env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn x_opens_custom_action_menu_when_an_action_matches() {
+        let mut app = make_app_with_items(&["First"]);
+        app.focus = Focus::ItemList;
+        app.custom_actions = CustomActions {
+            actions: vec![make_custom_action("review", &["pull_request"])],
+        };
+
+        let action = handle_key_normal(&mut app, make_key(KeyCode::Char('x')));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.input_mode, InputMode::CustomActionMenu);
+        assert_eq!(app.custom_action_cursor, 0);
+    }
+
+    #[test]
+    fn x_stays_normal_with_status_when_no_action_matches() {
+        let mut app = make_app_with_items(&["First"]); // items are PRs
+        app.focus = Focus::ItemList;
+        app.custom_actions = CustomActions {
+            actions: vec![make_custom_action("issue-only", &["issue"])],
+        };
+
+        let action = handle_key_normal(&mut app, make_key(KeyCode::Char('x')));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn custom_action_menu_navigation_and_confirm_work() {
+        let mut app = make_app_with_items(&["First"]);
+        app.custom_actions = CustomActions {
+            actions: vec![make_custom_action("a", &[]), make_custom_action("b", &[])],
+        };
+        app.input_mode = InputMode::CustomActionMenu;
+
+        handle_key_custom_action_menu(&mut app, make_key(KeyCode::Down));
+        assert_eq!(app.custom_action_cursor, 1);
+        // Cursor clamps at the last entry.
+        handle_key_custom_action_menu(&mut app, make_key(KeyCode::Down));
+        assert_eq!(app.custom_action_cursor, 1);
+
+        let action = handle_key_custom_action_menu(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::ConfirmCustom));
+    }
+
+    #[test]
+    fn custom_action_menu_escape_returns_to_normal() {
+        let mut app = make_app_with_items(&["First"]);
+        app.input_mode = InputMode::CustomActionMenu;
+
+        let action = handle_key_custom_action_menu(&mut app, make_key(KeyCode::Esc));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn custom_actions_for_selected_filters_by_kind() {
+        let mut app = make_app_with_items(&["First"]); // PR
+        app.custom_actions = CustomActions {
+            actions: vec![
+                make_custom_action("pr", &["pull_request"]),
+                make_custom_action("issue", &["issue"]),
+                make_custom_action("any", &[]),
+            ],
+        };
+        let names: Vec<&str> = app
+            .custom_actions_for_selected()
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["pr", "any"]);
     }
 
     #[test]

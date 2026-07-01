@@ -159,6 +159,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if app.input_mode == InputMode::ActionMenu {
         draw_action_popup(f, app, area);
+    } else if app.input_mode == InputMode::CustomActionMenu {
+        draw_custom_action_popup(f, app, area);
     } else if app.input_mode == InputMode::MergeMenu {
         draw_merge_menu_popup(f, app, area);
     } else if app.input_mode == InputMode::ReviewMenu {
@@ -659,12 +661,18 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     } else {
         ""
     };
+    // Only hint `x` when the selected item actually has an applicable action.
+    let custom_hint = if on_item && app.has_custom_actions_for_selected() {
+        "  x:actions"
+    } else {
+        ""
+    };
 
     let mode_text = match app.input_mode {
         InputMode::Normal => match app.focus {
             Focus::QueryList => "QUERIES  h/l:pane  j/k:move  J/K:reorder  n:new query  f:new stream  e:edit  d:delete  r:refresh  a:mark all read  ?:help  q:quit".to_string(),
-            Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}{refresh_hint}{review_hint}  ?:help  q:quit"),
-            Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}{refresh_hint}{review_hint}  ?:help  q:quit"),
+            Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}{refresh_hint}{review_hint}{custom_hint}  ?:help  q:quit"),
+            Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}{refresh_hint}{review_hint}{custom_hint}  ?:help  q:quit"),
         },
         InputMode::Filter => "FILTER   Esc:exit  C-u:clear  is:pr  state:open  author:name  label:bug  repo:owner/name".to_string(),
         InputMode::NewQuery => "NEW QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
@@ -672,6 +680,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::EditQuery => "EDIT QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
         InputMode::EditFilterStream => "EDIT STREAM  Tab:switch field  Enter:save  Esc:cancel".to_string(),
         InputMode::ActionMenu => "ACTIONS  j/k:move  Enter:confirm  Esc:cancel".to_string(),
+        InputMode::CustomActionMenu => {
+            "CUSTOM   j/k:move  Enter:run  Esc:cancel".to_string()
+        }
         InputMode::MergeMenu => "MERGE    j/k:move  Enter:confirm  Esc:back".to_string(),
         InputMode::ReviewMenu => "REVIEW   j/k:move  Enter:submit  Esc:cancel".to_string(),
         InputMode::CommentsPopup => "COMMENTS  j/k:scroll  g/G:top/bottom  Esc/q:close".to_string(),
@@ -872,6 +883,53 @@ fn draw_action_popup(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Custom-action picker (opened with `x`). Lists the user-defined actions that
+/// apply to the selected item's kind; Enter runs the highlighted one.
+fn draw_custom_action_popup(f: &mut Frame, app: &App, area: Rect) {
+    let actions = app.custom_actions_for_selected();
+    if actions.is_empty() {
+        return;
+    }
+    let popup_area = centered_rect_fixed(48, actions.len() as u16 + 3, area);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Custom actions ");
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = actions
+        .iter()
+        .enumerate()
+        .map(|(i, action)| {
+            if i == app.custom_action_cursor {
+                ListItem::new(format!(" ▶ {} ", action.display_label())).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ListItem::new(format!("   {} ", action.display_label()))
+            }
+        })
+        .collect();
+
+    f.render_widget(List::new(items), chunks[0]);
+    f.render_widget(
+        Paragraph::new("j/k: move  Enter: run  Esc: cancel")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+}
+
 /// Keybinding cheat-sheet overlay (opened with `?`). Static two-column list so it
 /// fits without scrolling; closed with Esc / `?` / `q` (see `handle_key_help`).
 fn draw_help_popup(f: &mut Frame, area: Rect) {
@@ -917,6 +975,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
         entry("Enter", "actions menu"),
         entry("o", "open in browser"),
         entry("y", "copy URL"),
+        entry("x", "custom actions"),
         entry("r", "refresh item"),
         entry("R", "review w/ octorus (PR)"),
     ];

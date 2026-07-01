@@ -22,6 +22,8 @@ It ships as two frontends sharing the same core: a terminal UI and a desktop GUI
 - **Desktop notifications** — optional OS-level notifications for new/updated items (toggleable).
 - **Markdown rendering** — read issue and PR bodies with formatting.
 - **Item actions** — comment, approve, and merge pull requests from within the app.
+- **Custom actions** — run your own commands (or `gh`) against the selected item with
+  templated arguments (`x`); see [Custom actions](#custom-actions).
 - **Read tracking** — per-item read status and unread counts per query.
 - **Keyboard-driven** — navigate entirely from the keyboard.
 
@@ -131,6 +133,42 @@ The TUI reads `~/.config/glauca/tui.toml`:
 notifications_enabled = false        # toggle desktop notifications
 sync_interval_secs = 60              # background sync interval, in seconds
 ```
+
+### Custom actions
+
+Both frontends can run user-defined commands against the selected PR/Issue. Press `x`
+on an item to open a picker of the actions that apply to it, then choose one to run.
+
+Actions are shared by both frontends and defined in `~/.config/glauca/actions.toml`:
+
+```toml
+[[actions]]
+name = "review"                       # identifier (also the fallback label)
+label = "AI review"                   # optional display label
+command = ["my-review-script", "{{ repo_full }}", "{{ number }}"]
+kinds = ["pull_request"]              # optional; empty/omitted = every kind
+
+[[actions]]
+name = "checkout"
+label = "gh pr checkout"
+command = ["gh", "pr", "checkout", "{{ number }}", "-R", "{{ repo_full }}"]
+kinds = ["pull_request"]
+```
+
+Each `command` is an argv list (the first element is the program). It is run directly —
+no shell — so `gh` and your own scripts are invoked as-is and inherit the environment.
+Every element is a template: `{{ key }}` placeholders are substituted from the selected
+item before the command runs. An unknown key is an error (surfacing typos rather than
+running a wrong command). An optional `env` table sets extra environment variables, whose
+values are templated the same way.
+
+Available template variables (all strings):
+
+`owner`, `repo`, `repo_full` (`owner/repo`), `number`, `kind`, `url`, `title`, `author`,
+`state`, `is_draft`, `base_ref`, `head_ref`, `created_at`, `updated_at`.
+
+Output is not captured; the action runs in the background and reports success or failure
+(with stderr on failure) via the status line and desktop notifications.
 
 ### Cache location
 
