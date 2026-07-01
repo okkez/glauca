@@ -1,3 +1,17 @@
+## 0.1.7 (2026-07-01)
+
+### Features
+
+- show the GitHub logo before saved queries in the left pane ([#25](https://github.com/okkez/glauca/pull/25) by @okkez)
+- open item in browser on Shift+click ([#27](https://github.com/okkez/glauca/pull/27) by @okkez)
+- run custom user-defined actions on the selected item ([#28](https://github.com/okkez/glauca/pull/28) by @okkez)
+- support cursor movement in text input fields ([#29](https://github.com/okkez/glauca/pull/29) by @okkez)
+
+### Fixes
+
+- space out icons in reviewers and review detail lines ([#25](https://github.com/okkez/glauca/pull/25) by @okkez)
+- space out left-pane query icons and theme the stream marker ([#25](https://github.com/okkez/glauca/pull/25) by @okkez)
+
 ## 0.1.6 (2026-06-26)
 
 ### Features
