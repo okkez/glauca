@@ -1,6 +1,7 @@
 use crate::tui::icons::Icons;
+use crate::tui::single_line_input::SingleLineInput;
 use crate::tui::{
-    App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, field_text, item_actions,
+    App, CommentEntry, Focus, InputMode, LeftPaneEntry, MergeStrategy, item_actions,
     modal_fields_ref,
 };
 use chrono::Utc;
@@ -13,7 +14,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
-use ratatui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Selection marker drawn in the item list's left gutter (reserved on every row).
@@ -300,7 +300,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         let filter_label = if app.filter.is_empty() {
             " /:filter".to_string()
         } else {
-            format!("/ {}  (Esc:exit  C-u:clear)", field_text(&app.filter))
+            format!("/ {}  (Esc:exit  C-u:clear)", app.filter.value())
         };
         let filter_style = if !app.filter.is_empty() {
             Style::default().fg(Color::Cyan)
@@ -737,7 +737,7 @@ fn draw_two_field_modal(
     area: Rect,
     title: &str,
     border_color: Color,
-    fields: [(&str, &TextArea); 2],
+    fields: [(&str, &SingleLineInput); 2],
     active_field: usize,
 ) {
     let popup_area = centered_rect(60, 9, area);
@@ -784,7 +784,7 @@ fn draw_prompted_field(
     area: Rect,
     prompt: &str,
     prompt_style: Style,
-    ta: &TextArea,
+    ta: &SingleLineInput,
 ) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
