@@ -1,9 +1,11 @@
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use octocrab::Octocrab;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::style::{Modifier, Style};
+use ratatui_textarea::TextArea;
 use sqlx::SqlitePool;
 use std::{
     collections::HashMap,
@@ -29,6 +31,117 @@ use settings::TuiSettings;
 pub use glauca_core::types::{
     CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
+
+/// Current text of a single-line input field. A `TextArea` always holds at
+/// least one line, so this borrows the first (and only) line's contents.
+fn field_text<'a>(ta: &'a TextArea) -> &'a str {
+    ta.lines().first().map(String::as_str).unwrap_or("")
+}
+
+/// A single-line input field pre-filled with `text`, cursor at the end (so
+/// typing continues after the existing value). Unlike `TextArea::default()`,
+/// the active line is not underlined (that highlight reads as noise here).
+///
+/// Any newline in `text` is stripped: stored values should never contain one,
+/// but a stray `\n` (e.g. an out-of-band DB edit) must not build a multi-line
+/// buffer that [`field_text`] would silently truncate on the next save.
+fn single_line_from(text: String) -> TextArea<'static> {
+    let line = text.replace(['\n', '\r'], "");
+    let mut ta = TextArea::new(vec![line]);
+    ta.set_cursor_line_style(Style::default());
+    ta.move_cursor(ratatui_textarea::CursorMove::End);
+    ta
+}
+
+/// An empty single-line input field.
+fn single_line() -> TextArea<'static> {
+    single_line_from(String::new())
+}
+
+/// Forward `key` to a single-line `TextArea`, dropping any key that would break
+/// the one-line invariant by inserting a newline or a tab. `TextArea::input`
+/// treats Enter, Ctrl+M, a literal `\n`/`\r` Char, Tab and BackTab (Shift+Tab)
+/// as newline/tab insertion, and Ctrl+Y as paste (which splices multi-line
+/// content via `insert_str`), so guarding only `KeyCode::Enter`/`Tab` at the
+/// call site is not enough — `field_text` would then silently drop everything
+/// past the first line. Returns whether the text buffer actually changed (false
+/// for a dropped key or a pure cursor move), so callers can react only to edits.
+fn input_single_line(ta: &mut TextArea, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => return false,
+        KeyCode::Char('\n' | '\r') => return false,
+        // Ctrl+M inserts a newline; Ctrl+Y pastes (multi-line via insert_str).
+        KeyCode::Char('m' | 'y') if ctrl => return false,
+        _ => {}
+    }
+    ta.input(key)
+}
+
+/// The two `TextArea` fields of the active two-field modal (name/value order),
+/// or `None` outside the input modals. Single source of the input_mode → field
+/// pair mapping used by cursor sync and field clearing. Keep [`modal_fields_ref`]
+/// (the render-path counterpart) in sync with this mapping.
+fn modal_fields(app: &mut App) -> Option<(&mut TextArea<'static>, &mut TextArea<'static>)> {
+    match app.input_mode {
+        InputMode::NewQuery => Some((&mut app.new_query_name, &mut app.new_query_input)),
+        InputMode::NewFilterStream => Some((
+            &mut app.new_filter_stream_name,
+            &mut app.new_filter_stream_filter,
+        )),
+        InputMode::EditQuery | InputMode::EditFilterStream => {
+            Some((&mut app.edit_input, &mut app.edit_input2))
+        }
+        _ => None,
+    }
+}
+
+/// Immutable counterpart of [`modal_fields`] for the render path (see
+/// `ui::draw_*_modal`), so the draw side doesn't re-hand-code the field pairing.
+pub fn modal_fields_ref(app: &App) -> Option<(&TextArea<'static>, &TextArea<'static>)> {
+    match app.input_mode {
+        InputMode::NewQuery => Some((&app.new_query_name, &app.new_query_input)),
+        InputMode::NewFilterStream => {
+            Some((&app.new_filter_stream_name, &app.new_filter_stream_filter))
+        }
+        InputMode::EditQuery | InputMode::EditFilterStream => {
+            Some((&app.edit_input, &app.edit_input2))
+        }
+        _ => None,
+    }
+}
+
+/// Show the blinking text cursor only on the active field of a two-field modal
+/// (the inactive field's cursor is hidden). No-op outside the input modals.
+fn sync_modal_cursors(app: &mut App) {
+    let field = app.modal_field;
+    let Some((f0, f1)) = modal_fields(app) else {
+        return;
+    };
+    let shown = Style::default().add_modifier(Modifier::REVERSED);
+    let hidden = Style::default();
+    let (s0, s1) = if field == 0 {
+        (shown, hidden)
+    } else {
+        (hidden, shown)
+    };
+    f0.set_cursor_style(s0);
+    f1.set_cursor_style(s1);
+}
+
+/// Clear the active field of a two-field modal. Keeps Ctrl+U consistent with
+/// the filter bar's "C-u:clear" (TextArea's own Ctrl+U is undo). No-op outside
+/// the input modals.
+fn clear_active_modal_field(app: &mut App) {
+    let field = app.modal_field;
+    if let Some((f0, f1)) = modal_fields(app) {
+        if field == 0 {
+            *f0 = single_line();
+        } else {
+            *f1 = single_line();
+        }
+    }
+}
 
 // ── Application state ────────────────────────────────────────────────────────
 
@@ -78,18 +191,18 @@ pub struct App {
     pub pending_items: Option<Vec<ItemEntry>>,
     /// How many of `pending_items` are new/updated vs the displayed list.
     pub pending_count: usize,
-    pub filter: String,
+    pub filter: TextArea<'static>,
     /// Active filter stream filter applied before the inline filter (if any).
     pub stream_filter: Option<String>,
 
-    pub new_query_input: String,
-    pub new_query_name: String,
-    pub new_filter_stream_name: String,
-    pub new_filter_stream_filter: String,
+    pub new_query_input: TextArea<'static>,
+    pub new_query_name: TextArea<'static>,
+    pub new_filter_stream_name: TextArea<'static>,
+    pub new_filter_stream_filter: TextArea<'static>,
     /// Input buffer reused for edit modals (display name or step-1 field).
-    pub edit_input: String,
+    pub edit_input: TextArea<'static>,
     /// Second input buffer for edit modals (query string or filter string).
-    pub edit_input2: String,
+    pub edit_input2: TextArea<'static>,
     /// Which field (0 or 1) is active in a 2-field modal.
     pub modal_field: usize,
     pub action_cursor: usize,
@@ -148,14 +261,14 @@ impl App {
             unread_counts: HashMap::new(),
             pending_items: None,
             pending_count: 0,
-            filter: String::new(),
+            filter: single_line(),
             stream_filter: None,
-            new_query_input: String::new(),
-            new_query_name: String::new(),
-            new_filter_stream_name: String::new(),
-            new_filter_stream_filter: String::new(),
-            edit_input: String::new(),
-            edit_input2: String::new(),
+            new_query_input: single_line(),
+            new_query_name: single_line(),
+            new_filter_stream_name: single_line(),
+            new_filter_stream_filter: single_line(),
+            edit_input: single_line(),
+            edit_input2: single_line(),
             modal_field: 0,
             action_cursor: 0,
             merge_strategy_cursor: 0,
@@ -199,7 +312,7 @@ impl App {
     }
 
     pub fn parsed_filter(&self) -> FilterQuery {
-        FilterQuery::parse(&self.expand_me(&self.filter))
+        FilterQuery::parse(&self.expand_me(field_text(&self.filter)))
     }
 
     /// Replace `@me` with the authenticated user's login (case-insensitive).
@@ -212,7 +325,7 @@ impl App {
         glauca_core::logic::filter_items(
             &self.items,
             self.stream_filter.as_deref(),
-            &self.filter,
+            field_text(&self.filter),
             self.current_user.as_deref(),
         )
     }
@@ -421,29 +534,29 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char('n') if app.focus == Focus::QueryList => {
             app.input_mode = InputMode::NewQuery;
             app.modal_field = 0;
-            app.new_query_name.clear();
-            app.new_query_input.clear();
+            app.new_query_name = single_line();
+            app.new_query_input = single_line();
         }
         // New filter stream (left pane) — only when a root query or filter stream is selected
         KeyCode::Char('f') if app.focus == Focus::QueryList && !app.entries.is_empty() => {
             app.input_mode = InputMode::NewFilterStream;
             app.modal_field = 0;
-            app.new_filter_stream_name.clear();
-            app.new_filter_stream_filter.clear();
+            app.new_filter_stream_name = single_line();
+            app.new_filter_stream_filter = single_line();
         }
         // Edit selected entry (left pane)
         KeyCode::Char('e') if app.focus == Focus::QueryList => {
             if let Some(entry) = app.entries.get(app.entry_cursor) {
                 match entry {
                     LeftPaneEntry::Query(q) => {
-                        app.edit_input = q.label.clone();
-                        app.edit_input2 = q.query_str.clone();
+                        app.edit_input = single_line_from(q.label.clone());
+                        app.edit_input2 = single_line_from(q.query_str.clone());
                         app.modal_field = 0;
                         app.input_mode = InputMode::EditQuery;
                     }
                     LeftPaneEntry::FilterStream(fs) => {
-                        app.edit_input = fs.name.clone();
-                        app.edit_input2 = fs.filter.clone();
+                        app.edit_input = single_line_from(fs.name.clone());
+                        app.edit_input2 = single_line_from(fs.filter.clone());
                         app.modal_field = 0;
                         app.input_mode = InputMode::EditFilterStream;
                     }
@@ -695,179 +808,137 @@ fn handle_key_filter(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
         }
-        KeyCode::Backspace => {
-            app.filter.pop();
-            app.item_cursor = 0;
-        }
+        // Clear the whole filter (matches the "C-u:clear" hint). TextArea's own
+        // Ctrl+U is undo, so intercept it here before forwarding.
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.filter.clear();
+            app.filter = single_line();
             app.item_cursor = 0;
         }
-        KeyCode::Char(c) => {
-            app.filter.push(c);
-            app.item_cursor = 0;
+        // Single-line field: never insert a newline or a tab.
+        KeyCode::Enter | KeyCode::Tab => {}
+        // Everything else (text, Backspace/Delete, cursor moves, Emacs keys) is
+        // handled by the TextArea widget's own key bindings. Only reset the item
+        // selection when the filter text actually changed — a pure cursor move
+        // (Left/Home/Ctrl+A/…) leaves the filtered list unchanged.
+        _ => {
+            if input_single_line(&mut app.filter, key) {
+                app.item_cursor = 0;
+            }
         }
-        _ => {}
     }
     Action::None
 }
 
-fn handle_key_new_query(app: &mut App, key: KeyEvent) -> Action {
-    // field 0 = display name (optional), field 1 = GitHub search query
+/// Outcome of pressing Enter in a two-field modal.
+enum EnterOutcome {
+    /// Submit the modal with this action.
+    Save(Action),
+    /// Move focus to the given field index (0 or 1). Focusing the current field
+    /// is the "do nothing" outcome.
+    Focus(usize),
+}
+
+/// Shared key handling for the two-field input modals (new/edit × query/filter
+/// stream). They differ only in the Enter policy and the field pair (resolved
+/// via `modal_fields`); `on_enter` receives the two fields' text and the active
+/// field index and decides what Enter does. Esc/Tab/Ctrl+U and per-key text
+/// forwarding (newline/tab-inserting keys dropped) are common to all four.
+fn handle_two_field_modal(
+    app: &mut App,
+    key: KeyEvent,
+    on_enter: impl Fn(&str, &str, usize) -> EnterOutcome,
+) -> Action {
     match key.code {
         KeyCode::Esc => {
+            // Clear the fields before leaving the modal — `modal_fields` keys off
+            // `input_mode`, so it must still be the modal mode here.
+            if let Some((f0, f1)) = modal_fields(app) {
+                *f0 = single_line();
+                *f1 = single_line();
+            }
             app.input_mode = InputMode::Normal;
-            app.new_query_name.clear();
-            app.new_query_input.clear();
             app.modal_field = 0;
         }
         KeyCode::Tab => {
             app.modal_field = 1 - app.modal_field;
         }
+        // Clear the active field, consistent with the filter bar's "C-u:clear"
+        // (TextArea's own Ctrl+U is undo).
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            clear_active_modal_field(app);
+        }
         KeyCode::Enter => {
-            if app.modal_field == 0 {
-                // Move focus to the query field
-                app.modal_field = 1;
-            } else if !app.new_query_input.trim().is_empty() {
-                return Action::SaveNewQuery;
+            let field = app.modal_field;
+            let outcome = match modal_fields(app) {
+                Some((f0, f1)) => on_enter(field_text(f0), field_text(f1), field),
+                None => return Action::None,
+            };
+            match outcome {
+                EnterOutcome::Save(action) => return action,
+                EnterOutcome::Focus(i) => app.modal_field = i,
             }
         }
-        KeyCode::Backspace => {
-            if app.modal_field == 0 {
-                app.new_query_name.pop();
-            } else {
-                app.new_query_input.pop();
+        // Text, Backspace/Delete, cursor moves and Emacs keys go to the active
+        // field; newline/tab-inserting keys are dropped by input_single_line.
+        _ => {
+            let field = app.modal_field;
+            if let Some((f0, f1)) = modal_fields(app) {
+                input_single_line(if field == 0 { f0 } else { f1 }, key);
             }
         }
-        KeyCode::Char(c) => {
-            if app.modal_field == 0 {
-                app.new_query_name.push(c);
-            } else {
-                app.new_query_input.push(c);
-            }
-        }
-        _ => {}
     }
     Action::None
 }
 
-fn handle_key_new_filter_stream(app: &mut App, key: KeyEvent) -> Action {
-    // field 0 = name, field 1 = filter
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-            app.new_filter_stream_name.clear();
-            app.new_filter_stream_filter.clear();
-        }
-        KeyCode::Tab => {
-            app.modal_field = 1 - app.modal_field;
-        }
-        KeyCode::Enter => {
-            if !app.new_filter_stream_name.trim().is_empty()
-                && !app.new_filter_stream_filter.trim().is_empty()
-            {
-                return Action::SaveNewFilterStream;
-            }
-            // Move to the empty field if one is missing
-            if app.new_filter_stream_name.trim().is_empty() {
-                app.modal_field = 0;
-            } else {
-                app.modal_field = 1;
-            }
-        }
-        KeyCode::Backspace => {
-            if app.modal_field == 0 {
-                app.new_filter_stream_name.pop();
-            } else {
-                app.new_filter_stream_filter.pop();
-            }
-        }
-        KeyCode::Char(c) => {
-            if app.modal_field == 0 {
-                app.new_filter_stream_name.push(c);
-            } else {
-                app.new_filter_stream_filter.push(c);
-            }
-        }
-        _ => {}
+/// Enter policy for the filter-stream modals: save when both fields are
+/// non-empty, otherwise focus the empty one.
+fn both_required(name: &str, filter: &str, save: Action) -> EnterOutcome {
+    let name_present = !name.trim().is_empty();
+    let filter_present = !filter.trim().is_empty();
+    if name_present && filter_present {
+        EnterOutcome::Save(save)
+    } else {
+        // Focus the first empty field.
+        EnterOutcome::Focus(if name_present { 1 } else { 0 })
     }
-    Action::None
+}
+
+fn handle_key_new_query(app: &mut App, key: KeyEvent) -> Action {
+    // field 0 = display name (optional), field 1 = GitHub search query
+    handle_two_field_modal(app, key, |_name, query, field| {
+        if field == 1 && !query.trim().is_empty() {
+            EnterOutcome::Save(Action::SaveNewQuery)
+        } else {
+            // On the name field, or an empty query, move to (or stay on) the
+            // query field.
+            EnterOutcome::Focus(1)
+        }
+    })
 }
 
 fn handle_key_edit_query(app: &mut App, key: KeyEvent) -> Action {
     // field 0 = display name, field 1 = GitHub search query
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-            app.edit_input.clear();
-            app.edit_input2.clear();
+    handle_two_field_modal(app, key, |_name, query, _field| {
+        if !query.trim().is_empty() {
+            EnterOutcome::Save(Action::SaveEditQuery)
+        } else {
+            EnterOutcome::Focus(1) // move focus to the query field
         }
-        KeyCode::Tab => {
-            app.modal_field = 1 - app.modal_field;
-        }
-        KeyCode::Enter => {
-            if !app.edit_input2.trim().is_empty() {
-                return Action::SaveEditQuery;
-            }
-            app.modal_field = 1; // move focus to the query field
-        }
-        KeyCode::Backspace => {
-            if app.modal_field == 0 {
-                app.edit_input.pop();
-            } else {
-                app.edit_input2.pop();
-            }
-        }
-        KeyCode::Char(c) => {
-            if app.modal_field == 0 {
-                app.edit_input.push(c);
-            } else {
-                app.edit_input2.push(c);
-            }
-        }
-        _ => {}
-    }
-    Action::None
+    })
+}
+
+fn handle_key_new_filter_stream(app: &mut App, key: KeyEvent) -> Action {
+    // field 0 = name, field 1 = filter (both required)
+    handle_two_field_modal(app, key, |name, filter, _field| {
+        both_required(name, filter, Action::SaveNewFilterStream)
+    })
 }
 
 fn handle_key_edit_filter_stream(app: &mut App, key: KeyEvent) -> Action {
-    // field 0 = name, field 1 = filter
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-            app.edit_input.clear();
-            app.edit_input2.clear();
-        }
-        KeyCode::Tab => {
-            app.modal_field = 1 - app.modal_field;
-        }
-        KeyCode::Enter => {
-            if !app.edit_input.trim().is_empty() && !app.edit_input2.trim().is_empty() {
-                return Action::SaveEditFilterStream;
-            }
-            if app.edit_input.trim().is_empty() {
-                app.modal_field = 0;
-            } else {
-                app.modal_field = 1;
-            }
-        }
-        KeyCode::Backspace => {
-            if app.modal_field == 0 {
-                app.edit_input.pop();
-            } else {
-                app.edit_input2.pop();
-            }
-        }
-        KeyCode::Char(c) => {
-            if app.modal_field == 0 {
-                app.edit_input.push(c);
-            } else {
-                app.edit_input2.push(c);
-            }
-        }
-        _ => {}
-    }
-    Action::None
+    // field 0 = name, field 1 = filter (both required)
+    handle_two_field_modal(app, key, |name, filter, _field| {
+        both_required(name, filter, Action::SaveEditFilterStream)
+    })
 }
 
 // ── Editor / terminal helpers (TUI-only) ─────────────────────────────────────
@@ -1306,6 +1377,14 @@ where
         tokio::select! {
             Some(Ok(event)) = events.next() => {
                 if let Event::Key(key) = event {
+                    // Ignore key-release events. Terminals with the keyboard-
+                    // enhancement protocol (or Windows) emit them, and acting on
+                    // both press and release would double-fire actions like
+                    // 'd'/'J'/'K'. Repeat events are kept so held-key repeat still
+                    // works if enhancement flags are ever enabled.
+                    if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
                     // 'd' in query list → delete selected entry (UI updates on the
                     // QueryDeleted / FilterStreamDeleted message once the DB op succeeds).
                     if key.code == KeyCode::Char('d')
@@ -1366,22 +1445,24 @@ where
                     }
 
                     let action = handle_key(&mut app, key);
+                    // Keep the visible text cursor on the active modal field.
+                    sync_modal_cursors(&mut app);
                     match action {
                         Action::Quit => break,
                         Action::LoadEntry => {
-                            app.filter.clear();
+                            app.filter = single_line();
                             app.item_cursor = 0;
                             app.detail_scroll = 0;
                             app.items.clear();
                             select_current_entry(&mut app, &engine, true).await;
                         }
                         Action::SaveNewQuery => {
-                            let query_str = app.new_query_input.trim().to_string();
-                            let name_str = app.new_query_name.trim().to_string();
+                            let query_str = field_text(&app.new_query_input).trim().to_string();
+                            let name_str = field_text(&app.new_query_name).trim().to_string();
                             app.input_mode = InputMode::Normal;
                             app.modal_field = 0;
-                            app.new_query_input.clear();
-                            app.new_query_name.clear();
+                            app.new_query_input = single_line();
+                            app.new_query_name = single_line();
                             let name = if name_str.is_empty() {
                                 None
                             } else {
@@ -1395,11 +1476,12 @@ where
                                 .await;
                         }
                         Action::SaveNewFilterStream => {
-                            let name = app.new_filter_stream_name.trim().to_string();
-                            let filter = app.new_filter_stream_filter.trim().to_string();
+                            let name = field_text(&app.new_filter_stream_name).trim().to_string();
+                            let filter =
+                                field_text(&app.new_filter_stream_filter).trim().to_string();
                             app.input_mode = InputMode::Normal;
-                            app.new_filter_stream_name.clear();
-                            app.new_filter_stream_filter.clear();
+                            app.new_filter_stream_name = single_line();
+                            app.new_filter_stream_filter = single_line();
 
                             // Determine parent: root_query_id of the currently selected entry
                             if let Some(entry) = app.entries.get(app.entry_cursor) {
@@ -1416,11 +1498,11 @@ where
                             }
                         }
                         Action::SaveEditFilterStream => {
-                            let name = app.edit_input.trim().to_string();
-                            let filter = app.edit_input2.trim().to_string();
+                            let name = field_text(&app.edit_input).trim().to_string();
+                            let filter = field_text(&app.edit_input2).trim().to_string();
                             app.input_mode = InputMode::Normal;
-                            app.edit_input.clear();
-                            app.edit_input2.clear();
+                            app.edit_input = single_line();
+                            app.edit_input2 = single_line();
 
                             if let Some(LeftPaneEntry::FilterStream(fs)) =
                                 app.entries.get(app.entry_cursor)
@@ -1435,11 +1517,11 @@ where
                             }
                         }
                         Action::SaveEditQuery => {
-                            let name_input = app.edit_input.trim().to_string();
-                            let new_query = app.edit_input2.trim().to_string();
+                            let name_input = field_text(&app.edit_input).trim().to_string();
+                            let new_query = field_text(&app.edit_input2).trim().to_string();
                             app.input_mode = InputMode::Normal;
-                            app.edit_input.clear();
-                            app.edit_input2.clear();
+                            app.edit_input = single_line();
+                            app.edit_input2 = single_line();
 
                             if let Some(LeftPaneEntry::Query(q)) =
                                 app.entries.get(app.entry_cursor)
@@ -1713,7 +1795,7 @@ where
                         app.entries.push(LeftPaneEntry::Query(q));
                         app.entry_cursor = app.entries.len() - 1;
                         app.items.clear();
-                        app.filter.clear();
+                        app.filter = single_line();
                         app.stream_filter = None;
                         select_current_entry(&mut app, &engine, true).await;
                     }
@@ -1728,7 +1810,7 @@ where
                         app.entries.insert(insert_pos, LeftPaneEntry::FilterStream(fs));
                         // Select the newly added filter stream
                         app.entry_cursor = insert_pos;
-                        app.filter.clear();
+                        app.filter = single_line();
                         app.item_cursor = 0;
                         app.detail_scroll = 0;
                         select_current_entry(&mut app, &engine, true).await;
@@ -1747,7 +1829,7 @@ where
                             app.items.clear();
                             app.item_cursor = 0;
                             app.detail_scroll = 0;
-                            app.filter.clear();
+                            app.filter = single_line();
                             engine
                                 .send(EngineCommand::LoadCached { query_id: id })
                                 .await;
@@ -1848,7 +1930,7 @@ where
                             .min(app.entries.len().saturating_sub(1));
                         app.items.clear();
                         app.item_cursor = 0;
-                        app.filter.clear();
+                        app.filter = single_line();
                         app.stream_filter = None;
                         select_current_entry(&mut app, &engine, true).await;
                     }
@@ -1859,7 +1941,7 @@ where
                             .min(app.entries.len().saturating_sub(1));
                         app.items.clear();
                         app.item_cursor = 0;
-                        app.filter.clear();
+                        app.filter = single_line();
                         app.stream_filter = None;
                         select_current_entry(&mut app, &engine, true).await;
                     }
@@ -1944,7 +2026,7 @@ mod tests {
         app.item_cursor = 2; // points to "Add gamma"
 
         // Apply filter that matches only 2 items.
-        app.filter = "fix".into();
+        app.filter = ta("fix");
         app.clamp_item_cursor();
 
         // Cursor should clamp to 1 (last index in the 2-item filtered list).
@@ -1960,7 +2042,7 @@ mod tests {
     #[test]
     fn filtered_items_plain_text() {
         let mut app = make_app_with_items(&["Fix the bug", "Add feature", "Fix crash"]);
-        app.filter = "fix".into();
+        app.filter = ta("fix");
         let filtered = app.filtered_items();
         assert_eq!(filtered.len(), 2);
         assert!(
@@ -1983,7 +2065,7 @@ mod tests {
     #[test]
     fn selected_item_respects_filter() {
         let mut app = make_app_with_items(&["Fix alpha", "Add beta", "Fix gamma"]);
-        app.filter = "fix".into();
+        app.filter = ta("fix");
         app.item_cursor = 1;
         // filtered = ["Fix alpha", "Fix gamma"], cursor=1 → "Fix gamma"
         assert_eq!(
@@ -2007,7 +2089,7 @@ mod tests {
         assert_eq!(app.filtered_items().len(), 3);
 
         // Now add inline filter
-        app.filter = "fix".into();
+        app.filter = ta("fix");
         // Only "Fix bug" and "Fix crash closed" match "fix", and all pass stream filter
         assert_eq!(app.filtered_items().len(), 2);
     }
@@ -2198,6 +2280,12 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::CONTROL)
     }
 
+    /// Build a single-line input field pre-filled with `s`, cursor at the end
+    /// (mimics text the user has just typed).
+    fn ta(s: &str) -> TextArea<'static> {
+        single_line_from(s.to_string())
+    }
+
     #[test]
     fn question_mark_opens_help_overlay() {
         let mut app = App::new(vec![]);
@@ -2242,7 +2330,7 @@ mod tests {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::NewQuery;
         app.modal_field = 1;
-        app.new_query_input.clear();
+        app.new_query_input = single_line();
         let action = handle_key_new_query(&mut app, make_key(KeyCode::Enter));
         assert!(matches!(action, Action::None));
     }
@@ -2252,7 +2340,7 @@ mod tests {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::NewQuery;
         app.modal_field = 1;
-        app.new_query_input = "is:pr is:open".into();
+        app.new_query_input = ta("is:pr is:open");
         let action = handle_key_new_query(&mut app, make_key(KeyCode::Enter));
         assert!(matches!(action, Action::SaveNewQuery));
     }
@@ -2262,8 +2350,8 @@ mod tests {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::NewQuery;
         app.modal_field = 1;
-        app.new_query_name = "My name".into();
-        app.new_query_input = "is:pr".into();
+        app.new_query_name = ta("My name");
+        app.new_query_input = ta("is:pr");
         handle_key_new_query(&mut app, make_key(KeyCode::Esc));
         assert!(matches!(app.input_mode, InputMode::Normal));
         assert!(app.new_query_name.is_empty());
@@ -2295,16 +2383,16 @@ mod tests {
     fn filter_backspace_removes_last_char() {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::Filter;
-        app.filter = "fix".into();
+        app.filter = ta("fix");
         handle_key_filter(&mut app, make_key(KeyCode::Backspace));
-        assert_eq!(app.filter, "fi");
+        assert_eq!(field_text(&app.filter), "fi");
     }
 
     #[test]
     fn filter_ctrl_u_clears_filter() {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::Filter;
-        app.filter = "some filter text".into();
+        app.filter = ta("some filter text");
         handle_key_filter(&mut app, make_ctrl_key(KeyCode::Char('u')));
         assert!(app.filter.is_empty());
     }
@@ -2313,9 +2401,247 @@ mod tests {
     fn filter_char_appends() {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::Filter;
-        app.filter = "fi".into();
+        app.filter = ta("fi");
         handle_key_filter(&mut app, make_key(KeyCode::Char('x')));
-        assert_eq!(app.filter, "fix");
+        assert_eq!(field_text(&app.filter), "fix");
+    }
+
+    // ── cursor movement (wiring to the TextArea widget) ──────────────────────────
+
+    #[test]
+    fn filter_left_then_insert_goes_midway() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("fix"); // cursor at end
+        handle_key_filter(&mut app, make_key(KeyCode::Left));
+        handle_key_filter(&mut app, make_key(KeyCode::Char('e')));
+        assert_eq!(field_text(&app.filter), "fiex");
+    }
+
+    #[test]
+    fn filter_home_then_insert_prepends() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("fix");
+        handle_key_filter(&mut app, make_key(KeyCode::Home));
+        handle_key_filter(&mut app, make_key(KeyCode::Char('z')));
+        assert_eq!(field_text(&app.filter), "zfix");
+    }
+
+    #[test]
+    fn filter_ctrl_a_moves_to_line_start() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("fix");
+        handle_key_filter(&mut app, make_ctrl_key(KeyCode::Char('a')));
+        handle_key_filter(&mut app, make_key(KeyCode::Char('z')));
+        assert_eq!(field_text(&app.filter), "zfix");
+    }
+
+    #[test]
+    fn filter_delete_removes_char_at_cursor() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("fix");
+        handle_key_filter(&mut app, make_key(KeyCode::Home));
+        handle_key_filter(&mut app, make_key(KeyCode::Delete));
+        assert_eq!(field_text(&app.filter), "ix");
+    }
+
+    #[test]
+    fn filter_enter_does_not_insert_newline() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("fix");
+        handle_key_filter(&mut app, make_key(KeyCode::Enter));
+        assert_eq!(app.filter.lines().len(), 1);
+        assert_eq!(field_text(&app.filter), "fix");
+    }
+
+    #[test]
+    fn filter_move_left_respects_multibyte_boundary() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("あい"); // cursor at end
+        handle_key_filter(&mut app, make_key(KeyCode::Left));
+        handle_key_filter(&mut app, make_key(KeyCode::Char('う')));
+        assert_eq!(field_text(&app.filter), "あうい");
+    }
+
+    #[test]
+    fn new_query_forwards_edit_to_active_field() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewQuery;
+        app.modal_field = 1;
+        app.new_query_input = ta("ab"); // cursor at end
+        handle_key_new_query(&mut app, make_key(KeyCode::Left));
+        handle_key_new_query(&mut app, make_key(KeyCode::Char('X')));
+        assert_eq!(field_text(&app.new_query_input), "aXb");
+        // The inactive name field is untouched.
+        assert!(app.new_query_name.is_empty());
+    }
+
+    // ── single-line invariant: newline/tab keys must never split the field ───────
+
+    #[test]
+    fn filter_ctrl_m_does_not_insert_newline() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("fix");
+        handle_key_filter(&mut app, make_ctrl_key(KeyCode::Char('m')));
+        assert_eq!(app.filter.lines().len(), 1);
+        assert_eq!(field_text(&app.filter), "fix");
+    }
+
+    #[test]
+    fn filter_literal_newline_char_does_not_split() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("fix");
+        handle_key_filter(&mut app, make_key(KeyCode::Char('\n')));
+        handle_key_filter(&mut app, make_key(KeyCode::Char('\r')));
+        assert_eq!(app.filter.lines().len(), 1);
+        assert_eq!(field_text(&app.filter), "fix");
+    }
+
+    // ── Enter policies for the other three modals ───────────────────────────────
+
+    #[test]
+    fn edit_query_enter_saves_when_query_nonempty() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::EditQuery;
+        app.modal_field = 0; // even while on the name field
+        app.edit_input = ta("My name");
+        app.edit_input2 = ta("is:pr is:open");
+        let action = handle_key_edit_query(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::SaveEditQuery));
+    }
+
+    #[test]
+    fn edit_query_enter_empty_query_focuses_query_field() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::EditQuery;
+        app.modal_field = 0;
+        app.edit_input = ta("My name");
+        app.edit_input2 = single_line(); // empty query
+        let action = handle_key_edit_query(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.modal_field, 1);
+    }
+
+    #[test]
+    fn new_filter_stream_enter_saves_when_both_filled() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewFilterStream;
+        app.new_filter_stream_name = ta("Drafts");
+        app.new_filter_stream_filter = ta("is:draft");
+        let action = handle_key_new_filter_stream(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::SaveNewFilterStream));
+    }
+
+    #[test]
+    fn new_filter_stream_enter_focuses_empty_field() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewFilterStream;
+        app.modal_field = 1;
+        app.new_filter_stream_name = single_line(); // name empty
+        app.new_filter_stream_filter = ta("is:draft");
+        let action = handle_key_new_filter_stream(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.modal_field, 0); // jumps to the empty name field
+    }
+
+    #[test]
+    fn edit_filter_stream_enter_saves_when_both_filled() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::EditFilterStream;
+        app.edit_input = ta("Drafts");
+        app.edit_input2 = ta("is:draft");
+        let action = handle_key_edit_filter_stream(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::SaveEditFilterStream));
+    }
+
+    // ── modal field routing (non-NewQuery modes) and cursor sync ─────────────────
+
+    #[test]
+    fn edit_query_ctrl_u_clears_field0_only() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::EditQuery;
+        app.modal_field = 0;
+        app.edit_input = ta("clear me");
+        app.edit_input2 = ta("is:pr");
+        handle_key_edit_query(&mut app, make_ctrl_key(KeyCode::Char('u')));
+        assert!(app.edit_input.is_empty());
+        assert_eq!(field_text(&app.edit_input2), "is:pr");
+    }
+
+    #[test]
+    fn edit_filter_stream_forwards_edit_to_active_field() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::EditFilterStream;
+        app.modal_field = 1;
+        app.edit_input = ta("name");
+        app.edit_input2 = ta("is:pr");
+        handle_key_edit_filter_stream(&mut app, make_key(KeyCode::Char('x')));
+        assert_eq!(field_text(&app.edit_input2), "is:prx");
+        assert_eq!(field_text(&app.edit_input), "name"); // other field untouched
+    }
+
+    #[test]
+    fn sync_modal_cursors_shows_only_active_field() {
+        let reversed = Style::default().add_modifier(Modifier::REVERSED);
+        let hidden = Style::default();
+
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::EditFilterStream;
+        app.modal_field = 1;
+        sync_modal_cursors(&mut app);
+        assert_eq!(app.edit_input.cursor_style(), hidden);
+        assert_eq!(app.edit_input2.cursor_style(), reversed);
+
+        app.modal_field = 0;
+        sync_modal_cursors(&mut app);
+        assert_eq!(app.edit_input.cursor_style(), reversed);
+        assert_eq!(app.edit_input2.cursor_style(), hidden);
+    }
+
+    #[test]
+    fn new_query_ctrl_u_clears_active_field() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewQuery;
+        app.modal_field = 1;
+        app.new_query_name = ta("keep me");
+        app.new_query_input = ta("is:pr is:open");
+        handle_key_new_query(&mut app, make_ctrl_key(KeyCode::Char('u')));
+        // Active field (1) cleared; the other field is untouched.
+        assert!(app.new_query_input.is_empty());
+        assert_eq!(field_text(&app.new_query_name), "keep me");
+    }
+
+    #[test]
+    fn new_query_back_tab_does_not_insert_tab() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewQuery;
+        app.modal_field = 0;
+        handle_key_new_query(&mut app, make_key(KeyCode::BackTab));
+        assert_eq!(field_text(&app.new_query_name), "");
+    }
+
+    // ── item selection is preserved on pure cursor moves in the filter ───────────
+
+    #[test]
+    fn filter_cursor_move_keeps_item_cursor() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("fix");
+        app.item_cursor = 3;
+        // Pure cursor moves must not reset the item selection.
+        handle_key_filter(&mut app, make_key(KeyCode::Left));
+        handle_key_filter(&mut app, make_key(KeyCode::Home));
+        assert_eq!(app.item_cursor, 3);
+        // An actual text edit does reset it.
+        handle_key_filter(&mut app, make_key(KeyCode::Char('z')));
+        assert_eq!(app.item_cursor, 0);
     }
 
     #[test]
