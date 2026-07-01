@@ -24,8 +24,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 octocrab = "0.44"
 url = "2"
-ratatui = { version = "0.30", features = ["crossterm_0_28"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 unicode-width = "0.2"
 futures = "0.3"
 chrono = { version = "0.4.44", features = ["clock"] }
