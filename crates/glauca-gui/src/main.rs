@@ -285,7 +285,8 @@ struct GlaucaApp {
     /// startup storm). See `glauca_core::notify::ItemTracker`.
     notif_tracker: ItemTracker,
     /// User-defined custom actions loaded from `actions.toml` (see
-    /// `glauca_core::actions`). Offered via the `x` picker, filtered by kind.
+    /// `glauca_core::actions`). Offered via the `x` picker and the item menu's
+    /// "Custom actions" submenu, filtered by kind.
     custom_actions: CustomActions,
     /// Keeps the `filter_input` subscription alive for the view's lifetime.
     _subscriptions: Vec<Subscription>,
@@ -748,12 +749,7 @@ impl GlaucaApp {
         let Some(item) = self.selected_item() else {
             return;
         };
-        let actions: Vec<CustomAction> = self
-            .custom_actions
-            .for_kind(&item.kind)
-            .into_iter()
-            .cloned()
-            .collect();
+        let actions = self.actions_for_item(&item);
         if actions.is_empty() {
             self.status = Some("No custom actions for this item".into());
             cx.notify();
@@ -768,6 +764,17 @@ impl GlaucaApp {
             window,
             cx,
         );
+    }
+
+    /// Custom actions from `actions.toml` applicable to `item`'s kind, owned.
+    /// Read here rather than inside `populate_menu` (which runs while the app
+    /// entity is leased and must not `read` it).
+    fn actions_for_item(&self, item: &ItemEntry) -> Vec<CustomAction> {
+        self.custom_actions
+            .for_kind(&item.kind)
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// The query string of the root query with `root_id` (found in the left-pane
@@ -1365,9 +1372,15 @@ impl GlaucaApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Custom actions for the item menu, computed here (not in `populate_menu`,
+        // which runs while the app entity is leased). See `actions_for_item`.
+        let custom_actions = match &kind {
+            MenuKind::Item(item) => self.actions_for_item(item),
+            _ => Vec::new(),
+        };
         let app = cx.entity();
-        let menu = PopupMenu::build(window, cx, move |menu, _w, _cx| {
-            populate_menu(menu, &app, kind)
+        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+            populate_menu(menu, &app, kind, custom_actions, window, cx)
         });
         cx.subscribe(&menu, |this, _menu, _e: &DismissEvent, cx| {
             this.menu = None;
@@ -2787,7 +2800,14 @@ fn apply_github_dark_overlay(cx: &mut App) {
 
 /// Build the action menu for a given `MenuKind`, reusing `dispatch_action` and the
 /// index-based entry helpers. Shared by right-click and the Enter action menu.
-fn populate_menu(mut menu: PopupMenu, app: &Entity<GlaucaApp>, kind: MenuKind) -> PopupMenu {
+fn populate_menu(
+    mut menu: PopupMenu,
+    app: &Entity<GlaucaApp>,
+    kind: MenuKind,
+    custom_actions: Vec<CustomAction>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
     match kind {
         MenuKind::Item(item) => {
             let item = *item;
@@ -2796,6 +2816,15 @@ fn populate_menu(mut menu: PopupMenu, app: &Entity<GlaucaApp>, kind: MenuKind) -
                 let label = action.label().to_string();
                 menu = app_menu_item(menu, app, label, move |this, window, cx| {
                     this.dispatch_action(action.clone(), item.clone(), window, cx);
+                });
+            }
+            // Cascading submenu of user-defined custom actions applicable to this
+            // item's kind (precomputed by the caller). Hidden when none apply.
+            if !custom_actions.is_empty() {
+                menu = menu.separator();
+                let app = app.clone();
+                menu = menu.submenu("Custom actions", window, cx, move |submenu, _w, _cx| {
+                    add_custom_action_items(submenu, &app, &item, &custom_actions)
                 });
             }
         }
@@ -2832,18 +2861,31 @@ fn populate_menu(mut menu: PopupMenu, app: &Entity<GlaucaApp>, kind: MenuKind) -
             });
         }
         MenuKind::CustomActions { item, actions } => {
-            let item = *item;
-            for action in actions {
-                let item = item.clone();
-                let label = action.display_label().to_string();
-                menu = app_menu_item(menu, app, label, move |this, _w, _cx| {
-                    this.send(EngineCommand::RunCustomAction {
-                        action: Box::new(action.clone()),
-                        item: Box::new(item.clone()),
-                    });
-                });
-            }
+            menu = add_custom_action_items(menu, app, &item, &actions);
         }
+    }
+    menu
+}
+
+/// Populate `menu` with one item per custom `action`, each sending
+/// `RunCustomAction` for `item` on click. Shared by the item menu's "Custom
+/// actions" submenu and the `x` picker (`MenuKind::CustomActions`).
+fn add_custom_action_items(
+    mut menu: PopupMenu,
+    app: &Entity<GlaucaApp>,
+    item: &ItemEntry,
+    actions: &[CustomAction],
+) -> PopupMenu {
+    for action in actions {
+        let item = item.clone();
+        let action = action.clone();
+        let label = action.display_label().to_string();
+        menu = app_menu_item(menu, app, label, move |this, _w, _cx| {
+            this.send(EngineCommand::RunCustomAction {
+                action: Box::new(action.clone()),
+                item: Box::new(item.clone()),
+            });
+        });
     }
     menu
 }
