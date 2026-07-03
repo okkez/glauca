@@ -286,7 +286,7 @@ impl FilterQuery {
         // multibyte chars intact when a matched byte lands mid-character.
         let mut out: Vec<(usize, usize)> = Vec::new();
         let mut run_start = byte_hits[0];
-        let mut prev = byte_hits[0];
+        let mut run_end = byte_hits[0]; // last byte in the current run (inclusive)
         let flush = |start: usize, last: usize, out: &mut Vec<(usize, usize)>| {
             let s = text.floor_char_boundary(start);
             let e = text.ceil_char_boundary(last + 1);
@@ -296,15 +296,15 @@ impl FilterQuery {
             }
         };
         for &b in &byte_hits[1..] {
-            if b == prev + 1 {
-                prev = b;
+            if b == run_end + 1 {
+                run_end = b;
             } else {
-                flush(run_start, prev, &mut out);
+                flush(run_start, run_end, &mut out);
                 run_start = b;
-                prev = b;
+                run_end = b;
             }
         }
-        flush(run_start, prev, &mut out);
+        flush(run_start, run_end, &mut out);
         out
     }
 }

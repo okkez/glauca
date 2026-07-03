@@ -144,6 +144,11 @@ pub struct App {
     pub entries: Vec<LeftPaneEntry>,
     pub entry_cursor: usize,
 
+    /// The visible item list. Change it structurally only through
+    /// `apply_items_to_view` / `clear_items`, which bump `items_version` to
+    /// invalidate `filtered_cache`; a direct replace/reorder here would leave the
+    /// memoized filter indices stale (in-place field edits like marking-read are
+    /// fine, since they don't affect which items match).
     pub items: Vec<ItemEntry>,
     /// Bumped whenever `items` is replaced, to invalidate `filtered_cache`.
     items_version: u64,
@@ -289,22 +294,33 @@ impl App {
     }
 
     pub fn filtered_items(&self) -> Vec<&ItemEntry> {
-        let key = (
-            self.items_version,
-            self.stream_filter.clone(),
-            self.filter.value().to_string(),
-            self.current_user.clone(),
-        );
         {
             let mut cache = self.filtered_cache.borrow_mut();
-            if cache.key.as_ref() != Some(&key) {
+            // Compare inputs against the cached key by reference first — this runs
+            // several times per render, so we only allocate an owned key on an
+            // actual miss (filter/stream/user changed or items were replaced).
+            let stale = match &cache.key {
+                Some((version, stream, inline, user)) => {
+                    *version != self.items_version
+                        || stream.as_deref() != self.stream_filter.as_deref()
+                        || inline.as_str() != self.filter.value()
+                        || user.as_deref() != self.current_user.as_deref()
+                }
+                None => true,
+            };
+            if stale {
                 cache.indices = glauca_core::logic::filter_item_indices(
                     &self.items,
                     self.stream_filter.as_deref(),
                     self.filter.value(),
                     self.current_user.as_deref(),
                 );
-                cache.key = Some(key);
+                cache.key = Some((
+                    self.items_version,
+                    self.stream_filter.clone(),
+                    self.filter.value().to_string(),
+                    self.current_user.clone(),
+                ));
             }
         }
         self.filtered_cache
