@@ -190,15 +190,32 @@ pub fn filter_items<'a>(
     inline_filter: &str,
     current_user: Option<&str>,
 ) -> Vec<&'a ItemEntry> {
+    filter_item_indices(items, stream_filter, inline_filter, current_user)
+        .into_iter()
+        .map(|i| &items[i])
+        .collect()
+}
+
+/// Like [`filter_items`], but returns the indices of the matching items instead
+/// of borrowing them. Callers that memoize the filter result store these
+/// (indices don't borrow `items`, so they can be cached) and map back on demand.
+pub fn filter_item_indices(
+    items: &[ItemEntry],
+    stream_filter: Option<&str>,
+    inline_filter: &str,
+    current_user: Option<&str>,
+) -> Vec<usize> {
     let stream_q = stream_filter.map(|s| FilterQuery::parse(&expand_me(current_user, s)));
     let inline_q = FilterQuery::parse(&expand_me(current_user, inline_filter));
 
     items
         .iter()
-        .filter(|i| {
+        .enumerate()
+        .filter(|(_, i)| {
             stream_q.as_ref().is_none_or(|q| q.matches(i))
                 && (inline_q.is_empty() || inline_q.matches(i))
         })
+        .map(|(idx, _)| idx)
         .collect()
 }
 

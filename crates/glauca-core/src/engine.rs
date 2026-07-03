@@ -240,7 +240,7 @@ fn spawn_action(
 
 pub async fn execute_open_browser(item: &ItemEntry) -> anyhow::Result<String> {
     let sub = gh_subcommand(&item.kind);
-    let repo = format!("{}/{}", item.repo_owner, item.repo_name);
+    let repo = item.repo_display();
     let mut cmd = tokio::process::Command::new("gh");
     cmd.args([sub, "view", "--web", &item.number.to_string(), "-R", &repo]);
     run_background_command(cmd, "Failed to open in browser").await?;

@@ -28,28 +28,32 @@ const HIGHLIGHT_SYMBOL: &str = "▶ ";
 const MARKER_CELL_W: usize = 3;
 const ROW_INDENT_W: usize = 10;
 
-/// Build styled spans for `text`, highlighting the earliest filter-token match
-/// (range computed by `FilterQuery::highlight_range`).
+/// Build styled spans for `text`, highlighting every filter-token match
+/// (ranges computed by `FilterQuery::highlight_ranges`). Fuzzy matches are
+/// non-contiguous, so there may be several highlighted runs.
 fn highlight_spans<'a>(
     query: &FilterQuery,
     text: &'a str,
     normal: Style,
     highlight: Style,
 ) -> Vec<Span<'a>> {
-    match query.highlight_range(text) {
-        None => vec![Span::styled(text, normal)],
-        Some((start, end)) => {
-            let mut spans = Vec::new();
-            if start > 0 {
-                spans.push(Span::styled(&text[..start], normal));
-            }
-            spans.push(Span::styled(&text[start..end], highlight));
-            if end < text.len() {
-                spans.push(Span::styled(&text[end..], normal));
-            }
-            spans
-        }
+    let ranges = query.highlight_ranges(text);
+    if ranges.is_empty() {
+        return vec![Span::styled(text, normal)];
     }
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for (start, end) in ranges {
+        if start > cursor {
+            spans.push(Span::styled(&text[cursor..start], normal));
+        }
+        spans.push(Span::styled(&text[start..end], highlight));
+        cursor = end;
+    }
+    if cursor < text.len() {
+        spans.push(Span::styled(&text[cursor..], normal));
+    }
+    spans
 }
 
 /// Wrap styled `spans` (e.g. a title's highlight fragments) to `max_cols`
@@ -242,6 +246,21 @@ fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
 
 // ── Middle pane: item list ────────────────────────────────────────────────────
 
+/// Item-index window whose rows are guaranteed to cover everything ratatui can
+/// display for a list of the given height, used to limit the per-row fuzzy
+/// highlight (a Smith-Waterman scan, too costly to run for every item in a
+/// 1000+ list). ratatui measures the variable row heights and chooses the
+/// scroll offset itself at render time, and we build the rows *before* that, so
+/// we can't know the exact visible range — we over-approximate instead: at most
+/// `list_height` rows fit (each row is at least one line), so `list_height`
+/// items on either side of the cursor always contain the viewport, no matter
+/// how the titles wrap. Off-window rows are never on screen, so skipping their
+/// highlight is invisible.
+fn highlight_window(cursor: usize, list_height: u16) -> std::ops::Range<usize> {
+    let radius = list_height as usize;
+    cursor.saturating_sub(radius)..cursor.saturating_add(radius + 1)
+}
+
 fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::ItemList;
     let filter_mode = app.input_mode == InputMode::Filter;
@@ -332,18 +351,26 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         .sum();
     let inner_w = (list_area.width as usize).saturating_sub(2 + symbol_w);
 
+    // Rows outside this window get plain (unhighlighted) titles; see
+    // `highlight_window` for why the window always covers the viewport.
+    let hl_window = highlight_window(app.item_cursor, list_area.height);
+
     // Sample the clock once for the whole list so each row's relative time is
     // measured against the same instant (and we avoid a per-row `Utc::now()`).
     let now = Utc::now();
     let items: Vec<ListItem> = filtered
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(idx, item)| {
             let item_style = state_style(&item.state);
             let item_icon = app.icons.item_icon(&item.kind, &item.state);
-            let repo = format!("{}/{}", item.repo_owner, item.repo_name);
+            let repo = item.repo_display();
             let updated = glauca_core::time::format_relative_time_since(&item.updated_at, now);
-            let title_spans =
-                highlight_spans(&filter_query, &item.title, match_normal, match_highlight);
+            let title_spans = if hl_window.contains(&idx) {
+                highlight_spans(&filter_query, &item.title, match_normal, match_highlight)
+            } else {
+                vec![Span::styled(item.title.as_str(), match_normal)]
+            };
 
             // Line 1 prefix: "new-marker  item-icon  #number", then the title
             // (appended, wrapped below). The item icon is one glyph encoding the
@@ -426,7 +453,7 @@ fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
     let text = match app.selected_item() {
         None => vec![Line::from(Span::raw("No item selected"))],
         Some(item) => {
-            let repo = format!("{}/{}", item.repo_owner, item.repo_name);
+            let repo = item.repo_display();
             let author = item
                 .author
                 .as_ref()
@@ -1334,6 +1361,19 @@ fn build_comment_lines<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn highlight_window_covers_cursor_and_clamps() {
+        // Window is [cursor - height, cursor + height + 1), always containing the
+        // cursor, and clamped at 0.
+        let w = highlight_window(50, 10);
+        assert_eq!(w, 40..61);
+        assert!(w.contains(&50));
+        // Clamps to 0 near the top rather than underflowing.
+        assert_eq!(highlight_window(3, 10), 0..14);
+        // A zero-height pane still yields the cursor row itself.
+        assert_eq!(highlight_window(7, 0), 7..8);
+    }
 
     /// Concatenate a wrapped line's spans back into plain text.
     fn line_text(spans: &[Span]) -> String {
