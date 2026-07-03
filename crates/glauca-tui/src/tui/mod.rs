@@ -969,6 +969,10 @@ pub(crate) fn item_actions(kind: &str) -> Vec<ItemAction> {
 /// terminal while it runs and restoring it afterwards. Returns a status-line
 /// message. Requires `or` on PATH (`cargo install octorus`) and an authenticated
 /// `gh`.
+///
+/// Resolves the repo's local checkout via ghq's root rules and passes it as
+/// `--working-dir` so octorus operates on the target repo rather than glauca's
+/// own CWD. If no local checkout is found, returns without launching.
 fn run_octorus_review<B: ratatui::backend::Backend + io::Write>(
     terminal: &mut Terminal<B>,
     item: &ItemEntry,
@@ -976,14 +980,25 @@ fn run_octorus_review<B: ratatui::backend::Backend + io::Write>(
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
+    let Some(workdir) = glauca_core::ghq::resolve_local_checkout(&item.repo_owner, &item.repo_name)
+    else {
+        // ローカルに checkout が無ければ、誤ったディレクトリで octorus を動かさないよう
+        // TUI を中断せずにそのまま戻す。
+        return Ok(format!(
+            "Local checkout for {}/{} not found (searched ghq roots)",
+            item.repo_owner, item.repo_name
+        ));
+    };
+
     suspend_tui(terminal)?;
+    // `--working-dir` は OsStr のまま渡す（非 UTF-8 パスを壊さないため）。
     let result = std::process::Command::new("or")
-        .args([
-            "--repo",
-            &format!("{}/{}", item.repo_owner, item.repo_name),
-            "--pr",
-            &item.number.to_string(),
-        ])
+        .arg("--repo")
+        .arg(format!("{}/{}", item.repo_owner, item.repo_name))
+        .arg("--pr")
+        .arg(item.number.to_string())
+        .arg("--working-dir")
+        .arg(&workdir)
         .status();
     restore_tui(terminal)?;
 
