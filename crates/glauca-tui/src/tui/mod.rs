@@ -1027,7 +1027,7 @@ where
     let result = std::process::Command::new("or")
         .args([
             "--repo",
-            &format!("{}/{}", item.repo_owner, item.repo_name),
+            &item.repo_display(),
             "--pr",
             &item.number.to_string(),
         ])

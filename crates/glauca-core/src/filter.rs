@@ -205,7 +205,7 @@ impl FilterQuery {
             }
         }
         // repo filter
-        let repo_lower = format!("{}/{}", item.repo_owner, item.repo_name).to_lowercase();
+        let repo_lower = item.repo_display().to_lowercase();
         for r in &self.repos {
             if !repo_lower.contains(r.as_str()) {
                 return false;
@@ -237,7 +237,7 @@ impl FilterQuery {
         // plain text tokens — fuzzy-match title | author | repo | labels
         if !self.text_tokens.is_empty() {
             let author_login = item.author.as_ref().map(|u| u.login.as_str()).unwrap_or("");
-            let repo = format!("{}/{}", item.repo_owner, item.repo_name);
+            let repo = item.repo_display();
             let mut fields: Vec<&str> = vec![item.title.as_str(), author_login, repo.as_str()];
             fields.extend(item.labels.iter().map(|l| l.as_str()));
             for tok in &self.text_tokens {
@@ -261,8 +261,12 @@ impl FilterQuery {
             return Vec::new();
         }
 
-        // frizbee reports matched *byte* offsets (in reverse order); gather them
-        // across every token.
+        // frizbee 0.9.x reports matched *byte* offsets (in reverse order); gather
+        // them across every token. NOTE: frizbee's upstream `main` switched
+        // `MatchIndices.indices` to *char* indices — the type stays `Vec<usize>`,
+        // so a version bump would compile cleanly but silently corrupt multibyte
+        // highlights. `frizbee_reports_byte_offsets` guards this contract; if it
+        // fails after upgrading frizbee, revisit the byte→char handling here.
         let mut byte_hits: Vec<usize> = Vec::new();
         for tok in &self.text_tokens {
             for mi in with_matcher(tok, |m| m.match_list_indices(&[text])) {
@@ -676,6 +680,27 @@ mod tests {
                 assert!(text.is_char_boundary(s) && text.is_char_boundary(e));
             }
         }
+    }
+
+    #[test]
+    fn frizbee_reports_byte_offsets() {
+        // Pins the load-bearing assumption in `highlight_ranges`: frizbee 0.9.x
+        // returns BYTE offsets, not char indices. "あ" is 3 bytes, so the 'b' in
+        // "あb" is at byte 3 but char index 1. If a future frizbee returns char
+        // indices (as its upstream `main` does), this fails loudly instead of
+        // silently mis-highlighting multibyte titles.
+        let hits: Vec<usize> = frizbee::match_list_indices("b", &["あb"], &fuzzy_config())
+            .into_iter()
+            .flat_map(|m| m.indices)
+            .collect();
+        assert!(
+            hits.contains(&3),
+            "expected byte offset 3 for 'b' in \"あb\", got {hits:?} — frizbee may have switched to char indices"
+        );
+        assert!(
+            !hits.contains(&1),
+            "index 1 would mean char indices, not bytes"
+        );
     }
 
     #[test]

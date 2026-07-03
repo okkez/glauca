@@ -129,6 +129,14 @@ pub struct ItemEntry {
     pub is_new: bool,
 }
 
+impl ItemEntry {
+    /// The canonical `"owner/name"` repository string used across the UI and
+    /// filters. Centralized so the format lives in one place.
+    pub fn repo_display(&self) -> String {
+        format!("{}/{}", self.repo_owner, self.repo_name)
+    }
+}
+
 /// A single comment entry fetched from GitHub and displayed in the comments popup.
 #[derive(Clone, Debug)]
 pub struct CommentEntry {

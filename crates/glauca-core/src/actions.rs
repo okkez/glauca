@@ -106,10 +106,7 @@ pub fn build_action_context(item: &ItemEntry) -> BTreeMap<&'static str, String> 
     let mut ctx = BTreeMap::new();
     ctx.insert("owner", item.repo_owner.clone());
     ctx.insert("repo", item.repo_name.clone());
-    ctx.insert(
-        "repo_full",
-        format!("{}/{}", item.repo_owner, item.repo_name),
-    );
+    ctx.insert("repo_full", item.repo_display());
     ctx.insert("number", item.number.to_string());
     ctx.insert("kind", item.kind.clone());
     ctx.insert("url", item.url.clone());
