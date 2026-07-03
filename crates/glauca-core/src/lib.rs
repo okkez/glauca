@@ -6,6 +6,7 @@ pub mod actions;
 pub mod db;
 pub mod engine;
 pub mod filter;
+pub mod ghq;
 pub mod github;
 pub mod logging;
 pub mod logic;
