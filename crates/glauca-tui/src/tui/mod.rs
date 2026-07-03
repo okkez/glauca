@@ -6,6 +6,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use sqlx::SqlitePool;
 use std::{
+    cell::RefCell,
     collections::HashMap,
     io,
     time::{SystemTime, UNIX_EPOCH},
@@ -123,6 +124,19 @@ pub enum InputMode {
     Help,
 }
 
+/// Memoized result of `filter_items` for the current list. `filtered_items()`
+/// is called several times per render (list, detail, status bar) and each call
+/// otherwise re-parses the query and fuzzy-matches every item; caching the
+/// matching indices collapses those to one pass while the inputs are unchanged.
+/// Stores indices (not `&ItemEntry`) so it doesn't borrow `App::items`.
+#[derive(Default)]
+struct FilteredCache {
+    /// `(items_version, stream_filter, inline_filter, current_user)` the cached
+    /// `indices` were computed from. A mismatch triggers recomputation.
+    key: Option<(u64, Option<String>, String, Option<String>)>,
+    indices: Vec<usize>,
+}
+
 pub struct App {
     pub focus: Focus,
     pub input_mode: InputMode,
@@ -131,6 +145,10 @@ pub struct App {
     pub entry_cursor: usize,
 
     pub items: Vec<ItemEntry>,
+    /// Bumped whenever `items` is replaced, to invalidate `filtered_cache`.
+    items_version: u64,
+    /// Memoized `filter_items` indices; see [`FilteredCache`].
+    filtered_cache: RefCell<FilteredCache>,
     pub item_cursor: usize,
     pub unread_counts: HashMap<(bool, i64), usize>,
     /// Freshly-synced items for the currently-viewed query, held back because
@@ -204,6 +222,8 @@ impl App {
             entries,
             entry_cursor: 0,
             items: Vec::new(),
+            items_version: 0,
+            filtered_cache: RefCell::new(FilteredCache::default()),
             item_cursor: 0,
             unread_counts: HashMap::new(),
             pending_items: None,
@@ -269,12 +289,30 @@ impl App {
     }
 
     pub fn filtered_items(&self) -> Vec<&ItemEntry> {
-        glauca_core::logic::filter_items(
-            &self.items,
-            self.stream_filter.as_deref(),
-            self.filter.value(),
-            self.current_user.as_deref(),
-        )
+        let key = (
+            self.items_version,
+            self.stream_filter.clone(),
+            self.filter.value().to_string(),
+            self.current_user.clone(),
+        );
+        {
+            let mut cache = self.filtered_cache.borrow_mut();
+            if cache.key.as_ref() != Some(&key) {
+                cache.indices = glauca_core::logic::filter_item_indices(
+                    &self.items,
+                    self.stream_filter.as_deref(),
+                    self.filter.value(),
+                    self.current_user.as_deref(),
+                );
+                cache.key = Some(key);
+            }
+        }
+        self.filtered_cache
+            .borrow()
+            .indices
+            .iter()
+            .map(|&i| &self.items[i])
+            .collect()
     }
 
     pub fn selected_item(&self) -> Option<&ItemEntry> {
@@ -303,7 +341,16 @@ impl App {
     /// them, so there is nothing to recompute here.
     fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
         self.items = items;
+        self.items_version = self.items_version.wrapping_add(1);
         self.clamp_item_cursor();
+    }
+
+    /// Empty the visible list, invalidating the memoized filter cache. Use this
+    /// instead of `self.items.clear()` so `filtered_cache` never maps stale
+    /// indices into the now-empty list.
+    fn clear_items(&mut self) {
+        self.items.clear();
+        self.items_version = self.items_version.wrapping_add(1);
     }
 
     /// Drop any held-back background-sync results / banner.
@@ -1401,7 +1448,7 @@ where
                             app.filter = SingleLineInput::new();
                             app.item_cursor = 0;
                             app.detail_scroll = 0;
-                            app.items.clear();
+                            app.clear_items();
                             select_current_entry(&mut app, &engine, true).await;
                         }
                         Action::SaveNewQuery => {
@@ -1742,7 +1789,7 @@ where
                     AppMessage::QueryAdded(q) => {
                         app.entries.push(LeftPaneEntry::Query(q));
                         app.entry_cursor = app.entries.len() - 1;
-                        app.items.clear();
+                        app.clear_items();
                         app.filter = SingleLineInput::new();
                         app.stream_filter = None;
                         select_current_entry(&mut app, &engine, true).await;
@@ -1774,7 +1821,7 @@ where
                         }
                         // Reload + sync with the new query string
                         if app.selected_root_query_id() == Some(id) {
-                            app.items.clear();
+                            app.clear_items();
                             app.item_cursor = 0;
                             app.detail_scroll = 0;
                             app.filter = SingleLineInput::new();
@@ -1876,7 +1923,7 @@ where
                         app.entry_cursor = app
                             .entry_cursor
                             .min(app.entries.len().saturating_sub(1));
-                        app.items.clear();
+                        app.clear_items();
                         app.item_cursor = 0;
                         app.filter = SingleLineInput::new();
                         app.stream_filter = None;
@@ -1887,7 +1934,7 @@ where
                         app.entry_cursor = app
                             .entry_cursor
                             .min(app.entries.len().saturating_sub(1));
-                        app.items.clear();
+                        app.clear_items();
                         app.item_cursor = 0;
                         app.filter = SingleLineInput::new();
                         app.stream_filter = None;
@@ -1985,6 +2032,22 @@ mod tests {
     fn filtered_items_returns_all_when_empty_filter() {
         let app = make_app_with_items(&["Alpha", "Beta", "Gamma"]);
         assert_eq!(app.filtered_items().len(), 3);
+    }
+
+    #[test]
+    fn filtered_cache_invalidates_on_items_change() {
+        // The memoized filter cache keys on items_version; clearing or replacing
+        // items must invalidate it so stale indices are never mapped into a
+        // changed list (which would return wrong results or panic).
+        let mut app = make_app_with_items(&["Fix a", "Fix b", "Add c"]);
+        app.filter = ta("fix");
+        assert_eq!(app.filtered_items().len(), 2); // populates the cache
+
+        app.clear_items();
+        assert_eq!(app.filtered_items().len(), 0); // must reflect the clear, not panic
+
+        app.apply_items_to_view(vec![make_item(1, "Fix again"), make_item(2, "Nope")]);
+        assert_eq!(app.filtered_items().len(), 1); // recomputed against new items
     }
 
     #[test]

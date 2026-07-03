@@ -1,11 +1,62 @@
 use crate::types::ItemEntry;
 #[cfg(test)]
 use crate::types::UserRef;
+use frizbee::{Config, Matcher};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+/// Shared frizbee config for plain-text token matching.
+///
+/// `max_typos: 0` keeps matching to a strict subsequence (fzf-style, no typo
+/// tolerance). frizbee matches case-insensitively by default (case only
+/// influences scoring, which we ignore). `sort: false` — we test single items,
+/// so result order is unused.
+fn fuzzy_config() -> Config {
+    Config {
+        max_typos: Some(0),
+        sort: false,
+        ..Config::default()
+    }
+}
+
+thread_local! {
+    /// Per-thread cache of compiled matchers, keyed by needle. Building a
+    /// `Matcher` allocates a prefilter + Smith-Waterman state; filtering runs
+    /// over every item on each keystroke, so rebuilding one per item (via the
+    /// free `frizbee::match_list`) measured ~8x slower than reusing a single
+    /// matcher per token. Cleared past a cap to bound memory over a session.
+    static MATCHERS: RefCell<HashMap<String, Matcher>> = RefCell::new(HashMap::new());
+}
+
+/// Upper bound on cached matchers before the cache is dropped wholesale.
+const MATCHER_CACHE_CAP: usize = 256;
+
+/// Run `f` with the cached matcher for `needle`, building it once per distinct
+/// needle. `Matcher::match_*` take `&mut self` (they reuse internal buffers),
+/// hence the `&mut` handle.
+fn with_matcher<R>(needle: &str, f: impl FnOnce(&mut Matcher) -> R) -> R {
+    MATCHERS.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if !cache.contains_key(needle) {
+            if cache.len() >= MATCHER_CACHE_CAP {
+                cache.clear();
+            }
+            cache.insert(needle.to_string(), Matcher::new(needle, &fuzzy_config()));
+        }
+        f(cache.get_mut(needle).expect("just inserted"))
+    })
+}
+
+/// `true` when `needle` fuzzy-matches any of `haystacks`.
+fn fuzzy_hit(needle: &str, haystacks: &[&str]) -> bool {
+    with_matcher(needle, |m| !m.match_list(haystacks).is_empty())
+}
 
 /// Parsed representation of a filter query string.
 ///
 /// Syntax:
-///   - Plain token: matches title, author, labels (case-insensitive substring)
+///   - Plain token: fuzzy-matches title, author, repo, labels (case-insensitive
+///     subsequence, fzf-style — `fltr` matches `filter`)
 ///   - `is:pr` / `is:issue` — filter by item kind (matches `item.kind`)
 ///   - `is:draft` — only draft pull requests
 ///   - `is:public` / `is:private` — filter by repository visibility
@@ -183,72 +234,75 @@ impl FilterQuery {
                 return false;
             }
         }
-        // plain text tokens — match title | author | labels
-        let title_lower = item.title.to_lowercase();
-        for tok in &self.text_tokens {
-            let in_title = title_lower.contains(tok.as_str());
-            let in_author = author_lower.contains(tok.as_str());
-            let in_labels = item
-                .labels
-                .iter()
-                .any(|l| l.to_lowercase().contains(tok.as_str()));
-            if !in_title && !in_author && !in_labels {
-                return false;
+        // plain text tokens — fuzzy-match title | author | repo | labels
+        if !self.text_tokens.is_empty() {
+            let author_login = item.author.as_ref().map(|u| u.login.as_str()).unwrap_or("");
+            let repo = format!("{}/{}", item.repo_owner, item.repo_name);
+            let mut fields: Vec<&str> = vec![item.title.as_str(), author_login, repo.as_str()];
+            fields.extend(item.labels.iter().map(|l| l.as_str()));
+            for tok in &self.text_tokens {
+                if !fuzzy_hit(tok, &fields) {
+                    return false;
+                }
             }
         }
         true
     }
 
-    /// Byte range `(start, end)` in `text` of the earliest plain-text-token match
-    /// (case-insensitive), corrected to char boundaries. `None` if there is no
-    /// plain text token or no match. Frontends turn this into styled spans.
-    pub fn highlight_range(&self, text: &str) -> Option<(usize, usize)> {
+    /// Byte ranges `(start, end)` in `text` covering every plain-text-token
+    /// fuzzy match (case-insensitive subsequence), snapped to char boundaries
+    /// and merged into ascending, non-overlapping runs. Empty when there is no
+    /// plain text token or no match. Frontends turn these into styled spans.
+    ///
+    /// Because fuzzy matches are non-contiguous, a single token can produce
+    /// several ranges.
+    pub fn highlight_ranges(&self, text: &str) -> Vec<(usize, usize)> {
         if self.text_tokens.is_empty() {
-            return None;
+            return Vec::new();
         }
 
-        // Find the earliest matching token position (case-insensitive).
-        let lower = text.to_lowercase();
-        let mut best: Option<(usize, usize)> = None; // (start_byte, end_byte)
+        // frizbee reports matched *byte* offsets (in reverse order); gather them
+        // across every token.
+        let mut byte_hits: Vec<usize> = Vec::new();
         for tok in &self.text_tokens {
-            if let Some(pos) = lower.find(tok.as_str()) {
-                let end = pos + tok.len();
-                if best.is_none_or(|(start, _)| pos < start) {
-                    best = Some((pos, end));
-                }
+            for mi in with_matcher(tok, |m| m.match_list_indices(&[text])) {
+                byte_hits.extend(mi.indices);
             }
         }
+        byte_hits.retain(|&b| b < text.len());
+        if byte_hits.is_empty() {
+            return Vec::new();
+        }
+        byte_hits.sort_unstable();
+        byte_hits.dedup();
 
-        best.map(|(start, end)| {
-            // Ensure byte indices are on char boundaries.
-            (
-                floor_char_boundary(text, start),
-                ceil_char_boundary(text, end),
-            )
-        })
+        // Coalesce consecutive byte offsets into `(start, end)` runs (end
+        // exclusive), snap each end to char boundaries, then merge runs that
+        // snapping pushed into (or adjacent to) one another — this keeps whole
+        // multibyte chars intact when a matched byte lands mid-character.
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        let mut run_start = byte_hits[0];
+        let mut prev = byte_hits[0];
+        let flush = |start: usize, last: usize, out: &mut Vec<(usize, usize)>| {
+            let s = text.floor_char_boundary(start);
+            let e = text.ceil_char_boundary(last + 1);
+            match out.last_mut() {
+                Some(prev) if s <= prev.1 => prev.1 = prev.1.max(e),
+                _ => out.push((s, e)),
+            }
+        };
+        for &b in &byte_hits[1..] {
+            if b == prev + 1 {
+                prev = b;
+            } else {
+                flush(run_start, prev, &mut out);
+                run_start = b;
+                prev = b;
+            }
+        }
+        flush(run_start, prev, &mut out);
+        out
     }
-}
-
-fn floor_char_boundary(s: &str, idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
-    }
-    let mut i = idx;
-    while !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-fn ceil_char_boundary(s: &str, idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
-    }
-    let mut i = idx;
-    while !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -484,44 +538,52 @@ mod tests {
         assert!(q.matches(&item("anything", "a", "open", &[], "o/r")));
     }
 
-    // ── highlight_range ─────────────────────────────────────────────────────────
+    // ── highlight_ranges ────────────────────────────────────────────────────────
 
     #[test]
-    fn highlight_range_no_match_returns_none() {
+    fn highlight_ranges_no_match_returns_empty() {
+        // No 'x','y','z' subsequence in the text → no ranges.
         let q = FilterQuery::parse("xyz");
-        assert_eq!(q.highlight_range("Fix the bug"), None);
+        assert_eq!(q.highlight_ranges("Fix the bug"), vec![]);
     }
 
     #[test]
-    fn highlight_range_match_in_middle() {
+    fn highlight_ranges_match_in_middle() {
         let q = FilterQuery::parse("bug");
         // "Fix the " = 8 bytes, "bug" = 3 bytes.
-        assert_eq!(q.highlight_range("Fix the bug here"), Some((8, 11)));
+        assert_eq!(q.highlight_ranges("Fix the bug here"), vec![(8, 11)]);
     }
 
     #[test]
-    fn highlight_range_match_at_start() {
+    fn highlight_ranges_match_at_start() {
         let q = FilterQuery::parse("fix");
-        assert_eq!(q.highlight_range("Fix the bug"), Some((0, 3)));
+        assert_eq!(q.highlight_ranges("Fix the bug"), vec![(0, 3)]);
     }
 
     #[test]
-    fn highlight_range_match_at_end() {
+    fn highlight_ranges_match_at_end() {
         let q = FilterQuery::parse("bug");
-        assert_eq!(q.highlight_range("Fix the bug"), Some((8, 11)));
+        assert_eq!(q.highlight_ranges("Fix the bug"), vec![(8, 11)]);
     }
 
     #[test]
-    fn highlight_range_empty_query_none() {
+    fn highlight_ranges_empty_query_empty() {
         let q = FilterQuery::parse("");
-        assert_eq!(q.highlight_range("Fix the bug"), None);
+        assert_eq!(q.highlight_ranges("Fix the bug"), vec![]);
     }
 
     #[test]
-    fn highlight_range_structured_token_none() {
+    fn highlight_ranges_structured_token_empty() {
         // state:open is a structured token, not a plain text token → no highlight.
         let q = FilterQuery::parse("state:open");
-        assert_eq!(q.highlight_range("open issue title"), None);
+        assert_eq!(q.highlight_ranges("open issue title"), vec![]);
+    }
+
+    #[test]
+    fn highlight_ranges_fuzzy_produces_multiple_runs() {
+        // "fb" is a non-contiguous subsequence of "Foo Bar": 'f' at 0, 'b' at 4.
+        let q = FilterQuery::parse("fb");
+        assert_eq!(q.highlight_ranges("Foo Bar"), vec![(0, 1), (4, 5)]);
     }
 
     // ── parse edge cases ────────────────────────────────────────────────────────
@@ -599,17 +661,49 @@ mod tests {
     }
 
     #[test]
-    fn highlight_range_case_insensitive_match() {
+    fn highlight_ranges_case_insensitive_match() {
         let q = FilterQuery::parse("fix");
         // "Fix" should still match even though the token is lowercase "fix".
-        assert_eq!(q.highlight_range("Fix the bug"), Some((0, 3)));
+        assert_eq!(q.highlight_ranges("Fix the bug"), vec![(0, 3)]);
     }
 
     #[test]
-    fn highlight_range_multibyte_text_no_panic() {
-        // Ensure we don't panic on multibyte (non-ASCII) text.
+    fn highlight_ranges_multibyte_text_no_panic() {
+        // Ensure we don't panic and never split a multibyte char.
         let q = FilterQuery::parse("bug");
-        let _ = q.highlight_range("バグ修正 bug fix");
-        let _ = q.highlight_range("日本語テスト");
+        for text in ["バグ修正 bug fix", "日本語テスト"] {
+            for (s, e) in q.highlight_ranges(text) {
+                assert!(text.is_char_boundary(s) && text.is_char_boundary(e));
+            }
+        }
+    }
+
+    #[test]
+    fn highlight_ranges_multibyte_highlights_correct_chars() {
+        // "バグ" = 6 bytes (2 chars × 3), " " = 1 byte, then "bug" at bytes 7..10.
+        // Verifies frizbee indices are treated as char indices: the highlighted
+        // slice must be exactly "bug", not garbage from byte/char confusion.
+        let q = FilterQuery::parse("bug");
+        let text = "バグ bug";
+        let ranges = q.highlight_ranges(text);
+        assert_eq!(ranges, vec![(7, 10)]);
+        assert_eq!(&text[7..10], "bug");
+    }
+
+    #[test]
+    fn plain_text_fuzzy_subsequence_matches() {
+        // "fltr" is a subsequence of "Filter", not a contiguous substring.
+        let q = FilterQuery::parse("fltr");
+        assert!(q.matches(&item("Filter the list", "a", "open", &[], "o/r")));
+        // A char not present in order must not match.
+        assert!(!FilterQuery::parse("zzz").matches(&item("Filter", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn plain_text_matches_repo() {
+        // Plain tokens now also match the "owner/name" repo string.
+        let q = FilterQuery::parse("myrepo");
+        assert!(q.matches(&item("PR", "a", "open", &[], "owner/myrepo")));
+        assert!(!q.matches(&item("PR", "a", "open", &[], "owner/other")));
     }
 }

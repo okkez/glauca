@@ -2214,7 +2214,7 @@ impl GlaucaApp {
 
         let is_new = item.is_new;
         let selected = ix == self.item_cursor;
-        let title_el = highlight_title(&item.title, fq.highlight_range(&item.title), cx);
+        let title_el = highlight_title(&item.title, fq.highlight_ranges(&item.title), cx);
 
         v_flex()
             .id(ix)
@@ -3080,23 +3080,27 @@ fn reviewer_avatar(user: &UserRef, state: ReviewState, cx: &App) -> impl IntoEle
 /// Uses `StyledText` (not flex spans) so the title wraps across lines and the
 /// row grows to fit — the highlight is an overlaid style range on the wrapping
 /// text rather than a separate box that can't break mid-word.
-fn highlight_title(title: &str, range: Option<(usize, usize)>, cx: &App) -> impl IntoElement {
+fn highlight_title(title: &str, ranges: Vec<(usize, usize)>, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let mut text = StyledText::new(SharedString::from(title.to_string()));
-    if let Some((start, end)) = range
-        && start < end
-        && end <= title.len()
-    {
-        text = text.with_highlights([(
-            start..end,
-            HighlightStyle {
-                // `link` (not `accent`) so the match stays a visible blue —
-                // `accent` is the muted grey used for inline code / badges.
-                background_color: Some(theme.link),
-                color: Some(theme.accent_foreground),
-                ..Default::default()
-            },
-        )]);
+    let highlights: Vec<_> = ranges
+        .into_iter()
+        .filter(|&(start, end)| start < end && end <= title.len())
+        .map(|(start, end)| {
+            (
+                start..end,
+                HighlightStyle {
+                    // `link` (not `accent`) so the match stays a visible blue —
+                    // `accent` is the muted grey used for inline code / badges.
+                    background_color: Some(theme.link),
+                    color: Some(theme.accent_foreground),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    if !highlights.is_empty() {
+        text = text.with_highlights(highlights);
     }
     div()
         .flex_1()

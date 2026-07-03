@@ -28,28 +28,32 @@ const HIGHLIGHT_SYMBOL: &str = "▶ ";
 const MARKER_CELL_W: usize = 3;
 const ROW_INDENT_W: usize = 10;
 
-/// Build styled spans for `text`, highlighting the earliest filter-token match
-/// (range computed by `FilterQuery::highlight_range`).
+/// Build styled spans for `text`, highlighting every filter-token match
+/// (ranges computed by `FilterQuery::highlight_ranges`). Fuzzy matches are
+/// non-contiguous, so there may be several highlighted runs.
 fn highlight_spans<'a>(
     query: &FilterQuery,
     text: &'a str,
     normal: Style,
     highlight: Style,
 ) -> Vec<Span<'a>> {
-    match query.highlight_range(text) {
-        None => vec![Span::styled(text, normal)],
-        Some((start, end)) => {
-            let mut spans = Vec::new();
-            if start > 0 {
-                spans.push(Span::styled(&text[..start], normal));
-            }
-            spans.push(Span::styled(&text[start..end], highlight));
-            if end < text.len() {
-                spans.push(Span::styled(&text[end..], normal));
-            }
-            spans
-        }
+    let ranges = query.highlight_ranges(text);
+    if ranges.is_empty() {
+        return vec![Span::styled(text, normal)];
     }
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for (start, end) in ranges {
+        if start > cursor {
+            spans.push(Span::styled(&text[cursor..start], normal));
+        }
+        spans.push(Span::styled(&text[start..end], highlight));
+        cursor = end;
+    }
+    if cursor < text.len() {
+        spans.push(Span::styled(&text[cursor..], normal));
+    }
+    spans
 }
 
 /// Wrap styled `spans` (e.g. a title's highlight fragments) to `max_cols`
@@ -332,18 +336,35 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         .sum();
     let inner_w = (list_area.width as usize).saturating_sub(2 + symbol_w);
 
+    // Fuzzy highlight (`FilterQuery::highlight_ranges`) runs a Smith-Waterman
+    // pass per row and is far too costly to compute for every item in a large
+    // list. Only rows that can actually be on screen need it, so restrict it to
+    // a window around the cursor; off-window titles get plain (unhighlighted)
+    // spans — identical to a no-match row and never visible anyway. Radius is a
+    // generous upper bound: at most `list height` rows fit (each ≥ 1 line), so a
+    // window of `height` items on each side of the cursor always covers the
+    // viewport regardless of how titles wrap. See `draw_item_list`'s scroll
+    // note: `ListState` is rebuilt each frame, so ratatui centers on the cursor.
+    let vis_radius = list_area.height as usize;
+    let vis_lo = app.item_cursor.saturating_sub(vis_radius);
+    let vis_hi = app.item_cursor.saturating_add(vis_radius + 1);
+
     // Sample the clock once for the whole list so each row's relative time is
     // measured against the same instant (and we avoid a per-row `Utc::now()`).
     let now = Utc::now();
     let items: Vec<ListItem> = filtered
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(idx, item)| {
             let item_style = state_style(&item.state);
             let item_icon = app.icons.item_icon(&item.kind, &item.state);
             let repo = format!("{}/{}", item.repo_owner, item.repo_name);
             let updated = glauca_core::time::format_relative_time_since(&item.updated_at, now);
-            let title_spans =
-                highlight_spans(&filter_query, &item.title, match_normal, match_highlight);
+            let title_spans = if (vis_lo..vis_hi).contains(&idx) {
+                highlight_spans(&filter_query, &item.title, match_normal, match_highlight)
+            } else {
+                vec![Span::styled(item.title.as_str(), match_normal)]
+            };
 
             // Line 1 prefix: "new-marker  item-icon  #number", then the title
             // (appended, wrapped below). The item icon is one glyph encoding the
