@@ -1,3 +1,11 @@
+## 0.1.8 (2026-07-03)
+
+### Features
+
+- pass the target repo's local checkout to octorus via --working-dir ([#30](https://github.com/okkez/glauca/pull/30) by @okkez)
+- add Custom actions submenu to the item context menu ([#31](https://github.com/okkez/glauca/pull/31) by @okkez)
+- fuzzy-match plain-text filter tokens
+
 ## 0.1.7 (2026-07-01)
 
 ### Features
