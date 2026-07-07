@@ -881,6 +881,13 @@ pub enum EngineCommand {
 /// ordering — `Engine::start` uses it for the initial state and front-ends
 /// (glauca-tauri's `list_entries`) reuse it to rebuild the pane after structural
 /// changes, so the interleaving logic is never re-implemented per front-end.
+///
+/// A DB read failure here is propagated, not swallowed — so `Engine::start`
+/// aborts launch rather than starting with an empty left pane. This is
+/// deliberate: the reads run against a freshly-opened, freshly-migrated pool, so
+/// a failure means something is genuinely wrong (corruption, disk error, schema
+/// mismatch), and showing an empty pane would look like the user's saved queries
+/// silently vanished — worse than failing loudly.
 pub async fn load_left_pane_entries(pool: &SqlitePool) -> anyhow::Result<Vec<LeftPaneEntry>> {
     let query_rows = db::list_queries(pool).await?;
     let mut entries: Vec<LeftPaneEntry> = Vec::new();
