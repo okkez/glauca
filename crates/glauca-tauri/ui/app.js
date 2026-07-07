@@ -29,6 +29,8 @@ const state = {
   commentsShowMinimized: false,
   commentsSortNewest: false,
   settings: { theme: "system", notifications_enabled: false, sync_interval_secs: 60 },
+  filterSeq: 0,            // bumped per refreshVisible() call; guards against a stale
+                          // filter_items result overwriting a newer entry's items
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -323,14 +325,20 @@ async function refreshVisible() {
     renderItemList();
     return;
   }
+  // Fast j/k launches overlapping filter_items calls; tag this one so a slow
+  // earlier resolution can't overwrite a newer entry's items (which would show the
+  // wrong list). Bail if a later call has already superseded us.
+  const seq = ++state.filterSeq;
   try {
     const indices = await invoke("filter_items", {
       items: all,
       streamFilter: e.streamFilter,
       inlineFilter: state.filterText,
     });
+    if (seq !== state.filterSeq) return;
     state.visibleItems = indices.map((i) => all[i]);
   } catch (err) {
+    if (seq !== state.filterSeq) return;
     setStatus(`filter: ${err}`, true);
     state.visibleItems = all;
   }
