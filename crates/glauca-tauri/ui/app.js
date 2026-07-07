@@ -969,20 +969,25 @@ function handleNavKey(ev) {
     case "/":
       $("filter").focus();
       return handled();
+    // Entry CRUD keys act on the selected left-pane entry, so — like the TUI/GUI,
+    // which gate these to Focus::QueryList — they only fire when the entries pane
+    // is focused. Otherwise pressing e/d/a while reading an item would edit,
+    // delete, or mark-all-read the selected query out from under the reader.
     case "n":
-      newQuery();
+      if (state.focus === "entries") newQuery();
       return handled();
     case "f":
-      if (e) newFilterStream(e);
+      if (state.focus === "entries" && e) newFilterStream(e);
       return handled();
     case "e":
-      if (e) e.isFilterStream ? editFilterStream(e) : editQuery(e);
+      if (state.focus === "entries" && e)
+        e.isFilterStream ? editFilterStream(e) : editQuery(e);
       return handled();
     case "d":
-      if (e) deleteEntry(e);
+      if (state.focus === "entries" && e) deleteEntry(e);
       return handled();
     case "a":
-      if (e) markAllRead(e);
+      if (state.focus === "entries" && e) markAllRead(e);
       return handled();
     case "J":
       if (state.focus === "entries") moveEntry(state.selectedEntry, true);
