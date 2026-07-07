@@ -1931,7 +1931,7 @@ where
                             app.status = Some(format!("Synced {count} items"));
                         }
                     }
-                    AppMessage::SyncError { query_id, error } => {
+                    AppMessage::SyncError { query_id, error, .. } => {
                         if app.selected_root_query_id() == Some(query_id) {
                             app.syncing = false;
                         }

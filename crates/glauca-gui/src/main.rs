@@ -81,18 +81,21 @@ const COMMENTS_CONTEXT: &str = "GlaucaComments";
 /// Pixels scrolled per j/k keypress in the detail pane and comments overlay.
 const DETAIL_SCROLL_STEP: f32 = 48.0;
 
+/// Clamp a new vertical scroll offset into gpui's valid range. gpui offsets go
+/// negative downward: `0` is the top and `-max_offset_y` is the bottom, so a
+/// positive `delta_px` (scroll down) subtracts. Split out from `scroll_vertically`
+/// so the bounds logic is unit-testable without a laid-out `ScrollHandle` (whose
+/// `max_offset` is only known after a real layout pass).
+fn clamp_scroll_y(current_y: Pixels, delta_px: f32, max_offset_y: Pixels) -> Pixels {
+    // `-max_offset_y <= 0`, so the bounds are always ordered and `clamp` can't panic.
+    (current_y - px(delta_px)).clamp(-max_offset_y, px(0.))
+}
+
 /// Scroll a tracked `overflow_y_scroll` container by `delta_px` pixels (positive
-/// = down). gpui's scroll offset goes negative downward, clamped to the content.
+/// = down), clamped to the content via [`clamp_scroll_y`].
 fn scroll_vertically(handle: &ScrollHandle, delta_px: f32) {
     let mut off = handle.offset();
-    off.y -= px(delta_px);
-    let min_y = -handle.max_offset().y;
-    if off.y < min_y {
-        off.y = min_y;
-    }
-    if off.y > px(0.) {
-        off.y = px(0.);
-    }
+    off.y = clamp_scroll_y(off.y, delta_px, handle.max_offset().y);
     handle.set_offset(off);
 }
 
@@ -435,6 +438,23 @@ impl GlaucaApp {
             });
         });
         app._subscriptions.push(appearance_sub);
+        // Flush pending settings whenever the app quits. Every quit trigger funnels
+        // through `cx.quit()` → `shutdown()`, which runs quit observers synchronously
+        // before dropping the entity, so the write always completes. On non-macOS,
+        // closing the last window quits the app, so an OS-initiated close (title-bar
+        // ×, Alt-F4) reaches this hook too; the `q`/menu Quit action reaches it via
+        // `cx.quit()`. (On macOS the sole window closing leaves the app running with
+        // settings still in memory — the eventual Cmd-Q flushes them.) Without this
+        // hook, a change made inside the debounce window right before an OS-initiated
+        // quit would be lost — a regression from the old eager per-event save.
+        let quit_sub = cx.on_app_quit(|app, _cx| {
+            // Cancel the still-pending debounce first so it can't race this write,
+            // then flush once synchronously.
+            app.settings_save_task = None;
+            app.settings.save();
+            async {}
+        });
+        app._subscriptions.push(quit_sub);
         app.prime();
         // Restore saved column widths into the authoritative ResizableState after
         // the first frame is drawn (panels are synced and the container has a real
@@ -483,12 +503,13 @@ impl GlaucaApp {
     /// Flush the in-memory settings to disk after a short idle delay, off the UI
     /// thread. Replacing the task cancels a still-pending flush (same pattern as
     /// `filter_task`), so a burst of changes — a pane drag most of all — writes
-    /// once. `on_quit` flushes synchronously to cover a quit inside the window.
+    /// once. The `on_app_quit` hook flushes synchronously so a change made inside
+    /// the debounce window right before quitting isn't lost.
     fn schedule_settings_save(&mut self, cx: &mut Context<Self>) {
         self.settings_save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SETTINGS_SAVE_DEBOUNCE).await;
             let Ok(settings) = this.update(cx, |this, _| this.settings.clone()) else {
-                return; // entity gone (window closed); on_quit already flushed
+                return; // entity gone; the on_app_quit hook already flushed on quit
             };
             cx.background_executor()
                 .spawn(async move { settings.save() })
@@ -985,10 +1006,9 @@ impl GlaucaApp {
     }
 
     fn on_quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
-        // Flush settings synchronously so a change made just before quitting
-        // (e.g. a pane drag) isn't lost with the debounced save still pending.
-        // One small TOML write; acceptable on the way out.
-        self.settings.save();
+        // The `on_app_quit` hook (registered in `new`) flushes any pending settings
+        // synchronously during shutdown, so quitting via the `q`/menu action needs
+        // nothing special here beyond triggering the quit.
         cx.quit();
     }
 
@@ -1832,10 +1852,19 @@ impl GlaucaApp {
                 self.syncing = false;
                 self.status = Some(format!("Synced {count} items"));
             }
-            AppMessage::SyncError { error, .. } => {
+            AppMessage::SyncError {
+                error, background, ..
+            } => {
                 self.syncing = false;
                 self.status = Some(format!("Sync error: {error}"));
-                window.push_notification(Notification::error(format!("Sync error: {error}")), cx);
+                // Only foreground (user-driven) failures get a toast. A background
+                // worker fault keeps recurring every sync cycle; toasting each one
+                // would bury the notification layer, so those stay in the status
+                // line only.
+                if !background {
+                    window
+                        .push_notification(Notification::error(format!("Sync error: {error}")), cx);
+                }
             }
             AppMessage::BgSyncQueued(n) => self.bg_sync_pending += n,
             AppMessage::BgSyncJobDone => {
@@ -3672,4 +3701,38 @@ fn main() -> Result<()> {
     // Keep the runtime alive across the whole GUI lifetime.
     drop(rt);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DETAIL_SCROLL_STEP, clamp_scroll_y};
+    use gpui::px;
+
+    #[test]
+    fn scroll_down_within_bounds_moves_offset_negative() {
+        // From the top, one step down: offset goes negative by the step.
+        assert_eq!(
+            clamp_scroll_y(px(0.), DETAIL_SCROLL_STEP, px(200.)),
+            px(-DETAIL_SCROLL_STEP)
+        );
+    }
+
+    #[test]
+    fn scroll_down_past_bottom_clamps_to_max() {
+        // Near the bottom, a further step down is clamped to -max_offset.
+        assert_eq!(clamp_scroll_y(px(-180.), 48., px(200.)), px(-200.));
+    }
+
+    #[test]
+    fn scroll_up_past_top_clamps_to_zero() {
+        // Just below the top, scrolling up (negative delta) can't exceed 0.
+        assert_eq!(clamp_scroll_y(px(-20.), -48., px(200.)), px(0.));
+    }
+
+    #[test]
+    fn content_shorter_than_viewport_stays_pinned_at_top() {
+        // max_offset == 0 (content fits): every scroll stays at the top.
+        assert_eq!(clamp_scroll_y(px(0.), 48., px(0.)), px(0.));
+        assert_eq!(clamp_scroll_y(px(0.), -48., px(0.)), px(0.));
+    }
 }
