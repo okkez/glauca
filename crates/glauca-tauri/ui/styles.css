@@ -226,6 +226,10 @@ ul { list-style: none; margin: 0; padding: 0; }
   color: var(--fg-dim);
 }
 #statusbar.error #status { color: var(--red); }
+#statusbar #status { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Signed-in user (avatar + name) on the right of the status bar. */
+#whoami { display: inline-flex; align-items: center; gap: 6px; }
 
 /* In-page prompt modal (replaces window.prompt, unreliable in some webviews). */
 .modal-overlay {

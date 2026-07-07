@@ -1301,6 +1301,16 @@ async function main() {
   state.entries = init.entries.map(normalize);
   renderSidebar();
 
+  // Signed-in user chip (avatar + display name), like the GUI's sidebar header.
+  if (init.current_user) {
+    $("whoami").replaceChildren(
+      avatarEl({ login: init.current_user, avatar_url: init.current_user_avatar_url }, "avatar sm"),
+      el("span", {
+        text: init.current_user_name ? `${init.current_user_name} (@${init.current_user})` : `@${init.current_user}`,
+      })
+    );
+  }
+
   // Prime cached items (and thus unread badges) for every root query, mirroring
   // the TUI's startup load. Skip the first entry's root query: previewEntry(0)
   // below loads it, so priming it here would be a redundant double load.
