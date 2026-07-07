@@ -35,6 +35,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::radio::RadioGroup;
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::{TextView, TextViewState, markdown};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
@@ -232,11 +233,17 @@ struct GlaucaApp {
     /// Saved pane widths (px), left-to-right, used to seed the initial pane
     /// sizes on startup. Empty on first run (falls back to defaults).
     pane_sizes: Vec<f32>,
-    /// Parsed/virtualized state for the detail pane's Markdown body. Held as an
-    /// entity so the body renders via a virtualized `gpui::list` (only the
-    /// visible part is laid out), keeping pane-resize repaints cheap. Content is
-    /// synced from the selected item in `render_detail` (a no-op when unchanged).
+    /// Parsed state for the detail pane's Markdown body. Held as an entity so the
+    /// parse is retained across frames. Content is synced from the selected item
+    /// in `render_detail` (a no-op when unchanged).
     detail_text: Entity<TextViewState>,
+    /// Scroll position of the detail body. The body is a tracked
+    /// `overflow_y_scroll` container (same pattern as the comments overlay)
+    /// rather than `TextView::scrollable`: the TextView's internal ListState is
+    /// private to gpui-component, so keyboard scrolling (j/k in `ItemDetail`)
+    /// needs a handle we own. Reset to the top whenever the shown item changes,
+    /// mirroring the TUI's `detail_scroll = 0`.
+    detail_scroll: ScrollHandle,
     /// Root focus handle — grabbed on startup so single-letter keys work; the
     /// filter Input takes focus on `/` and returns it on Esc.
     focus_handle: FocusHandle,
@@ -337,6 +344,7 @@ impl GlaucaApp {
                         Timer::after(FILTER_DEBOUNCE).await;
                         let _ = this.update(cx, |this, cx| {
                             this.item_cursor = 0;
+                            this.reset_detail_scroll();
                             this.recompute_filtered();
                             cx.notify();
                         });
@@ -384,6 +392,7 @@ impl GlaucaApp {
             pane_state,
             pane_sizes,
             detail_text,
+            detail_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             focus: Focus::QueryList,
             comments_open: false,
@@ -575,6 +584,7 @@ impl GlaucaApp {
         self.entry_cursor = index;
         self.items.clear();
         self.item_cursor = 0;
+        self.reset_detail_scroll();
         self.clear_pending();
         self.recompute_filtered();
         self.select_current_entry(true);
@@ -592,10 +602,18 @@ impl GlaucaApp {
         self.entry_cursor = index;
         self.items.clear();
         self.item_cursor = 0;
+        self.reset_detail_scroll();
         self.stream_filter = stream_filter;
         self.clear_pending();
         self.recompute_filtered();
         self.send(EngineCommand::LoadCached { query_id: root_id });
+    }
+
+    /// Scroll the detail body back to the top. Called whenever the shown item
+    /// changes (cursor move / entry switch / re-filter), mirroring the TUI's
+    /// `detail_scroll = 0` reset.
+    fn reset_detail_scroll(&self) {
+        self.detail_scroll.set_offset(point(px(0.), px(0.)));
     }
 
     // ── Keyboard action handlers ──────────────────────────────────────────────
@@ -613,12 +631,14 @@ impl GlaucaApp {
                 if self.item_cursor < max {
                     self.item_cursor += 1;
                     self.items_list.scroll_to_reveal_item(self.item_cursor);
+                    self.reset_detail_scroll();
                     self.mark_current_item_read(cx);
                 }
             }
-            // The detail body owns its own (virtualized) scroll — use the mouse
-            // wheel / scrollbar. j/k here is a no-op.
-            Focus::ItemDetail => {}
+            Focus::ItemDetail => {
+                scroll_vertically(&self.detail_scroll, DETAIL_SCROLL_STEP);
+                cx.notify();
+            }
         }
     }
 
@@ -634,11 +654,14 @@ impl GlaucaApp {
                 if self.item_cursor > 0 {
                     self.item_cursor -= 1;
                     self.items_list.scroll_to_reveal_item(self.item_cursor);
+                    self.reset_detail_scroll();
                     self.mark_current_item_read(cx);
                 }
             }
-            // See `on_move_down`: the detail body scrolls via mouse/scrollbar.
-            Focus::ItemDetail => {}
+            Focus::ItemDetail => {
+                scroll_vertically(&self.detail_scroll, -DETAIL_SCROLL_STEP);
+                cx.notify();
+            }
         }
     }
 
@@ -2556,12 +2579,14 @@ impl GlaucaApp {
                 cx,
             ));
 
-        // Body rendered as Markdown via gpui-component's `TextView`, in its
-        // virtualized `scrollable(true)` mode: only the visible part is laid out
-        // each frame, so resizing the pane (which changes the wrap width) stays
-        // cheap. The body owns its own scroll (mouse wheel / scrollbar). Content
-        // is synced into the retained `detail_text` state; `set_text` is a no-op
-        // unless the selected item's body actually changed.
+        // Body rendered as Markdown via gpui-component's `TextView`, inside a
+        // tracked `overflow_y_scroll` container (the comments-overlay pattern)
+        // instead of the TextView's own virtualized `scrollable(true)` mode: that
+        // mode's ListState is private to gpui-component, which would leave the
+        // j/k keyboard scroll (Focus::ItemDetail) with nothing to drive. The
+        // Markdown parse is still retained in `detail_text` (`set_text` is a
+        // no-op unless the selected item's body actually changed); only layout
+        // re-runs on pane resize.
         let body = match item
             .body
             .as_deref()
@@ -2574,16 +2599,21 @@ impl GlaucaApp {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px_4()
-                    .pb_4()
-                    .pt_2()
                     .border_t_1()
                     .border_color(cx.theme().border)
+                    .relative()
                     .child(
-                        TextView::new(&self.detail_text)
-                            .scrollable(true)
-                            .selectable(true),
+                        div()
+                            .id("detail-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.detail_scroll)
+                            .px_4()
+                            .pb_4()
+                            .pt_2()
+                            .child(TextView::new(&self.detail_text).selectable(true)),
                     )
+                    .vertical_scrollbar(&self.detail_scroll)
                     .into_any_element()
             }
             None => div()
@@ -3156,7 +3186,10 @@ fn highlight_title(title: &str, ranges: Vec<(usize, usize)>, cx: &App) -> impl I
 /// empty description marks a section-header row. Kept in sync by hand with the
 /// `KeyBinding::new(...)` table registered in `main()`.
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("j / k  ·  ↓ / ↑", "Move cursor down / up"),
+    (
+        "j / k  ·  ↓ / ↑",
+        "Move cursor down / up (detail pane: scroll the body)",
+    ),
     ("h / l  ·  ← / →", "Focus previous / next pane"),
     ("Enter", "Activate (commit selection / item action menu)"),
     ("/", "Focus the filter input"),
