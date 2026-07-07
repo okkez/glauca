@@ -81,8 +81,10 @@ cargo run -p glauca-tauri
 > The `glauca-tauri` front-end uses a build-step-free, framework-free static
 > front-end (`crates/glauca-tauri/ui/`) and the system WebView (WebKitGTK on
 > Linux, WKWebView on macOS, WebView2 on Windows). No Node toolchain is involved.
-> It currently ports a browse/sync/read/act subset of the TUI/GUI; query and
-> filter-stream editing dialogs are not yet implemented there.
+> It mirrors the TUI/GUI feature set — browse/filter/sync/read, item actions
+> (comment/review/merge), query & filter-stream editing, custom actions, and
+> the TUI keymap (press `?` for the reference). Markdown bodies render as plain
+> text for now; the octorus review integration stays TUI-only.
 
 Glauca authenticates to GitHub using a personal access token from your environment. The
 easiest way is to install the [`gh` CLI](https://cli.github.com/) and run `gh auth login`,
