@@ -1223,6 +1223,56 @@ impl GlaucaApp {
         }
     }
 
+    /// Open a two-`Input` dialog (the shared shell of the query / filter-stream
+    /// forms) and hand the trimmed values to `on_submit` on OK. Field
+    /// requirements stay with the caller: `on_submit` ignores invalid input,
+    /// matching the previous behavior where OK always closes the dialog.
+    fn open_two_field_form(
+        &mut self,
+        title: &'static str,
+        first: (&'static str, String),
+        second: (&'static str, String),
+        on_submit: impl Fn(&mut Self, String, String) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let first_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(first.0)
+                .default_value(first.1)
+        });
+        let second_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(second.0)
+                .default_value(second.1)
+        });
+        let this = cx.weak_entity();
+        let on_submit = std::rc::Rc::new(on_submit);
+        window.open_dialog(cx, move |dlg, _w, _cx| {
+            let (first_c, second_c) = (first_input.clone(), second_input.clone());
+            let (first_ok, second_ok) = (first_input.clone(), second_input.clone());
+            let this = this.clone();
+            let on_submit = on_submit.clone();
+            dlg.title(title)
+                .w(px(520.))
+                .content(move |content, _w, _cx| {
+                    content
+                        .gap_3()
+                        .child(Input::new(&first_c))
+                        .child(Input::new(&second_c))
+                })
+                .on_ok(move |_, _w, cx| {
+                    let a = first_ok.read(cx).value().trim().to_string();
+                    let b = second_ok.read(cx).value().trim().to_string();
+                    if let Some(app) = this.upgrade() {
+                        let on_submit = on_submit.clone();
+                        app.update(cx, move |app, _| on_submit(app, a, b));
+                    }
+                    true
+                })
+        });
+    }
+
     /// Add (`edit=None`) or edit (`edit=Some(id)`) a root query via a 2-field dialog.
     fn open_query_form(
         &mut self,
@@ -1232,52 +1282,31 @@ impl GlaucaApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("display name (optional)")
-                .default_value(init_name)
-        });
-        let query = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("GitHub search query (e.g. repo:owner/name is:pr is:open)")
-                .default_value(init_query)
-        });
-        let this = cx.weak_entity();
         let title = if edit.is_some() {
             "Edit query"
         } else {
             "Add query"
         };
-        window.open_dialog(cx, move |dlg, _w, _cx| {
-            let (name_c, query_c) = (name.clone(), query.clone());
-            let (name_ok, query_ok) = (name.clone(), query.clone());
-            let this = this.clone();
-            dlg.title(title)
-                .w(px(520.))
-                .content(move |content, _w, _cx| {
-                    content
-                        .gap_3()
-                        .child(Input::new(&name_c))
-                        .child(Input::new(&query_c))
-                })
-                .on_ok(move |_, _w, cx| {
-                    let n = name_ok.read(cx).value().to_string();
-                    let q = query_ok.read(cx).value().to_string();
-                    let (n, q) = (n.trim().to_string(), q.trim().to_string());
-                    if !q.is_empty() {
-                        let name = if n.is_empty() { None } else { Some(n) };
-                        if let Some(app) = this.upgrade() {
-                            app.update(cx, |app, _| match edit {
-                                Some(id) => {
-                                    app.send(EngineCommand::EditQuery { id, name, query: q })
-                                }
-                                None => app.send(EngineCommand::AddQuery { name, query: q }),
-                            });
-                        }
-                    }
-                    true
-                })
-        });
+        self.open_two_field_form(
+            title,
+            ("display name (optional)", init_name),
+            (
+                "GitHub search query (e.g. repo:owner/name is:pr is:open)",
+                init_query,
+            ),
+            move |app, n, q| {
+                if q.is_empty() {
+                    return; // the query string is required
+                }
+                let name = if n.is_empty() { None } else { Some(n) };
+                match edit {
+                    Some(id) => app.send(EngineCommand::EditQuery { id, name, query: q }),
+                    None => app.send(EngineCommand::AddQuery { name, query: q }),
+                }
+            },
+            window,
+            cx,
+        );
     }
 
     /// Add (`edit=None`) or edit (`edit=Some(id)`) a filter stream via a 2-field dialog.
@@ -1294,60 +1323,36 @@ impl GlaucaApp {
             init_name,
             init_filter,
         } = params;
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("display name")
-                .default_value(init_name)
-        });
-        let filter = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("filter (e.g. is:pr is:draft assignee:name)")
-                .default_value(init_filter)
-        });
-        let this = cx.weak_entity();
         let title = if edit.is_some() {
             "Edit filter stream"
         } else {
             "Add filter stream"
         };
-        window.open_dialog(cx, move |dlg, _w, _cx| {
-            let (name_c, filter_c) = (name.clone(), filter.clone());
-            let (name_ok, filter_ok) = (name.clone(), filter.clone());
-            let this = this.clone();
-            let kind = kind.clone();
-            dlg.title(title)
-                .w(px(520.))
-                .content(move |content, _w, _cx| {
-                    content
-                        .gap_3()
-                        .child(Input::new(&name_c))
-                        .child(Input::new(&filter_c))
-                })
-                .on_ok(move |_, _w, cx| {
-                    let n = name_ok.read(cx).value().to_string();
-                    let f = filter_ok.read(cx).value().to_string();
-                    let (n, f) = (n.trim().to_string(), f.trim().to_string());
-                    if !n.is_empty() && !f.is_empty() {
-                        let kind = kind.clone();
-                        if let Some(app) = this.upgrade() {
-                            app.update(cx, |app, _| match edit {
-                                Some(id) => app.send(EngineCommand::EditFilterStream {
-                                    id,
-                                    name: n,
-                                    filter: f,
-                                }),
-                                None => app.send(EngineCommand::AddFilterStream {
-                                    parent_id,
-                                    kind,
-                                    name: n,
-                                    filter: f,
-                                }),
-                            });
-                        }
-                    }
-                    true
-                })
-        });
+        self.open_two_field_form(
+            title,
+            ("display name", init_name),
+            ("filter (e.g. is:pr is:draft assignee:name)", init_filter),
+            move |app, n, f| {
+                if n.is_empty() || f.is_empty() {
+                    return; // both fields are required
+                }
+                match edit {
+                    Some(id) => app.send(EngineCommand::EditFilterStream {
+                        id,
+                        name: n,
+                        filter: f,
+                    }),
+                    None => app.send(EngineCommand::AddFilterStream {
+                        parent_id,
+                        kind: kind.clone(),
+                        name: n,
+                        filter: f,
+                    }),
+                }
+            },
+            window,
+            cx,
+        );
     }
 
     /// Issue the engine commands to (re)load the currently selected entry: load
@@ -1692,6 +1697,44 @@ impl GlaucaApp {
         }
     }
 
+    /// Recompute unread badges for `query_id` from the live `self.items`. The
+    /// compute-then-insert split keeps the borrow checker satisfied inside one
+    /// `&mut self` method (the compute reads `entries`/`items`, the insert
+    /// mutates the map), so callers no longer clone `self.items` just to call
+    /// `recompute_unread`. That variant stays for items not yet applied to the
+    /// view (ItemsLoaded / apply_pending).
+    fn recompute_unread_live(&mut self, query_id: i64) {
+        let updates = compute_unread_counts(
+            &self.entries,
+            query_id,
+            &self.items,
+            self.current_user.as_deref(),
+        );
+        for (key, unread) in updates {
+            self.unread_counts.insert(key, unread);
+        }
+    }
+
+    /// Shared tail of the QueryDeleted / FilterStreamDeleted arms: drop the
+    /// entries rejected by `retain`, clamp the cursor, clear the inline filter,
+    /// and either reselect or empty the view. Returns true when the caller must
+    /// refilter (every entry is gone and the item list was cleared).
+    fn remove_entries_and_reselect(&mut self, retain: impl Fn(&LeftPaneEntry) -> bool) -> bool {
+        self.entries.retain(retain);
+        if self.entry_cursor >= self.entries.len() {
+            self.entry_cursor = self.entries.len().saturating_sub(1);
+        }
+        self.filter.clear();
+        if self.entries.is_empty() {
+            self.items.clear();
+            self.stream_filter = None;
+            true
+        } else {
+            self.select_index(self.entry_cursor);
+            false
+        }
+    }
+
     /// Mark the currently-selected item read (it is shown in the detail pane):
     /// record the `updated_at` it was read at, clear its in-memory `is_new`,
     /// recompute the current query's unread badges, and persist via the engine
@@ -1712,17 +1755,7 @@ impl GlaucaApp {
         let (repo_owner, repo_name, number) =
             (row.repo_owner.clone(), row.repo_name.clone(), row.number);
         if let Some(query_id) = self.selected_root_query_id() {
-            // Recompute from the live items (compute → then insert, to avoid
-            // borrowing self mutably while reading self.items/entries).
-            let updates = compute_unread_counts(
-                &self.entries,
-                query_id,
-                &self.items,
-                self.current_user.as_deref(),
-            );
-            for (key, unread) in updates {
-                self.unread_counts.insert(key, unread);
-            }
+            self.recompute_unread_live(query_id);
             self.send(EngineCommand::MarkItemRead {
                 query_id,
                 repo_owner,
@@ -1879,38 +1912,16 @@ impl GlaucaApp {
                     needs_refilter = true;
                 }
                 if let Some(root_id) = root_id {
-                    let items = self.items.clone();
-                    self.recompute_unread(root_id, &items);
+                    self.recompute_unread_live(root_id);
                 }
                 self.status = Some("Filter stream updated".into());
             }
             AppMessage::QueryDeleted { query_id } => {
-                self.entries.retain(|e| e.root_query_id() != query_id);
-                if self.entry_cursor >= self.entries.len() {
-                    self.entry_cursor = self.entries.len().saturating_sub(1);
-                }
-                self.filter.clear();
-                if self.entries.is_empty() {
-                    self.items.clear();
-                    self.stream_filter = None;
-                    needs_refilter = true;
-                } else {
-                    self.select_index(self.entry_cursor);
-                }
+                needs_refilter |=
+                    self.remove_entries_and_reselect(|e| e.root_query_id() != query_id);
             }
             AppMessage::FilterStreamDeleted { id } => {
-                self.entries.retain(|e| e.id() != id);
-                if self.entry_cursor >= self.entries.len() {
-                    self.entry_cursor = self.entries.len().saturating_sub(1);
-                }
-                self.filter.clear();
-                if self.entries.is_empty() {
-                    self.items.clear();
-                    self.stream_filter = None;
-                    needs_refilter = true;
-                } else {
-                    self.select_index(self.entry_cursor);
-                }
+                needs_refilter |= self.remove_entries_and_reselect(|e| e.id() != id);
             }
             AppMessage::QueriesSwapped {
                 upper_id,
@@ -3294,24 +3305,20 @@ impl GlaucaApp {
             .ghost()
             .label("View")
             .dropdown_menu(move |menu, _w, _cx| {
-                let menu = app_menu_item(
-                    menu,
-                    &view_app,
-                    theme_label(ThemePreference::System, "Theme: System"),
-                    |this, w, cx| this.set_theme(ThemePreference::System, w, cx),
-                );
-                let menu = app_menu_item(
-                    menu,
-                    &view_app,
-                    theme_label(ThemePreference::Light, "Theme: Light"),
-                    |this, w, cx| this.set_theme(ThemePreference::Light, w, cx),
-                );
-                let menu = app_menu_item(
-                    menu,
-                    &view_app,
-                    theme_label(ThemePreference::Dark, "Theme: Dark"),
-                    |this, w, cx| this.set_theme(ThemePreference::Dark, w, cx),
-                );
+                let menu = [
+                    (ThemePreference::System, "Theme: System"),
+                    (ThemePreference::Light, "Theme: Light"),
+                    (ThemePreference::Dark, "Theme: Dark"),
+                ]
+                .into_iter()
+                .fold(menu, |menu, (pref, text)| {
+                    app_menu_item(
+                        menu,
+                        &view_app,
+                        theme_label(pref, text),
+                        move |this, w, cx| this.set_theme(pref, w, cx),
+                    )
+                });
                 let menu = menu.separator();
                 let notif_mark = if notifications_enabled { "✓ " } else { "   " };
                 app_menu_item(
