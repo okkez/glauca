@@ -132,21 +132,27 @@ pub fn save_settings(
 /// (`updated_at > last_read_updated_at`, per item) stay consistent across
 /// front-ends. `items` is the front-end's in-memory list for the query (with
 /// up-to-date `last_read_updated_at`), matching how the TUI recomputes.
+// These three commands are `async` on purpose: Tauri runs async commands on the
+// runtime thread pool, while synchronous commands run on the main/UI thread. Their
+// bodies are CPU-bound (serialize the whole item list from JS, then filter/count),
+// and `filter_items` fires per filter keystroke — running them on the UI thread
+// would jank input on large queries. They don't await anything; `async` alone is
+// what moves them off the UI thread.
 #[tauri::command]
-pub fn unread_counts(
+pub async fn unread_counts(
     state: State<'_, AppState>,
     entries: Vec<LeftPaneEntry>,
     query_id: i64,
     items: Vec<ItemEntry>,
-) -> Vec<UnreadCount> {
-    compute_unread_counts(&entries, query_id, &items, state.current_user.as_deref())
+) -> Result<Vec<UnreadCount>, String> {
+    Ok(compute_unread_counts(&entries, query_id, &items, state.current_user.as_deref())
         .into_iter()
         .map(|((is_filter_stream, entry_id), count)| UnreadCount {
             is_filter_stream,
             entry_id,
             count,
         })
-        .collect()
+        .collect())
 }
 
 /// Return the indices of `items` that match the selected entry's filter: the
@@ -157,18 +163,18 @@ pub fn unread_counts(
 /// are returned so the front-end keeps its own item objects, preserving the
 /// `last_read_updated_at` values it advances locally on read.
 #[tauri::command]
-pub fn filter_items(
+pub async fn filter_items(
     state: State<'_, AppState>,
     items: Vec<ItemEntry>,
     stream_filter: Option<String>,
     inline_filter: String,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, String> {
     let su = state.current_user.as_deref();
     let stream_q = stream_filter
         .as_deref()
         .map(|s| FilterQuery::parse(&expand_me(su, s)));
     let inline_q = FilterQuery::parse(&expand_me(su, &inline_filter));
-    items
+    Ok(items
         .iter()
         .enumerate()
         .filter(|(_, it)| {
@@ -176,14 +182,14 @@ pub fn filter_items(
                 && (inline_q.is_empty() || inline_q.matches(it))
         })
         .map(|(i, _)| i)
-        .collect()
+        .collect())
 }
 
 /// Count how many items in `fresh` are new or changed vs `current`, delegating to
 /// `glauca_core::logic::count_changed` so the "N updated" banner uses the exact
 /// definition the TUI/GUI use instead of a JS re-implementation.
 #[tauri::command]
-pub fn count_changed_items(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> usize {
+pub async fn count_changed_items(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> usize {
     count_changed(&current, &fresh)
 }
 
