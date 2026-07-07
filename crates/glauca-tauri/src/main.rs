@@ -99,10 +99,12 @@ fn main() -> anyhow::Result<()> {
                     } = &msg
                     {
                         let enabled = notif_loop.load(Ordering::Relaxed);
-                        let to_notify = tracker_loop
-                            .lock()
-                            .unwrap()
-                            .changed_count_to_notify(*query_id, items, *background, enabled);
+                        let to_notify = tracker_loop.lock().unwrap().changed_count_to_notify(
+                            *query_id,
+                            items,
+                            *background,
+                            enabled,
+                        );
                         if let Some(n) = to_notify {
                             let name = names_loop
                                 .lock()
@@ -141,7 +143,6 @@ fn main() -> anyhow::Result<()> {
             commands::full_resync,
             commands::sync_if_stale,
             commands::refresh_item,
-            commands::mark_entry_viewed,
             commands::enqueue_stale,
             commands::add_query,
             commands::add_filter_stream,

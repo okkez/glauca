@@ -12,11 +12,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use glauca_core::db;
-use glauca_core::engine::{EngineCommand, ReviewEvent};
+use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{compute_unread_counts, expand_me};
-use glauca_core::types::{FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry};
+use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::State;
@@ -66,35 +65,14 @@ pub fn init(state: State<'_, AppState>) -> serde_json::Value {
 
 /// Rebuild the left-pane entries (root queries interleaved with their filter
 /// streams) from the DB. The front-end calls this after any structural change
-/// (add/edit/delete/reorder) so it never re-implements the ordering logic — this
-/// mirrors how `Engine::start` assembles the initial entries.
+/// (add/edit/delete/reorder); the ordering logic lives in
+/// `glauca_core::engine::load_left_pane_entries`, shared with `Engine::start`,
+/// so it is never re-implemented per front-end.
 #[tauri::command]
 pub async fn list_entries(state: State<'_, AppState>) -> Result<Vec<LeftPaneEntry>, String> {
-    let pool = &state.pool;
-    let query_rows = db::list_queries(pool).await.map_err(|e| e.to_string())?;
-    let mut entries: Vec<LeftPaneEntry> = Vec::new();
-    for r in query_rows {
-        let streams = db::list_filter_streams(pool, r.id).await.unwrap_or_default();
-        let kind = r.kind.clone();
-        let label = r.name.clone().unwrap_or_else(|| r.query.clone());
-        entries.push(LeftPaneEntry::Query(QueryEntry {
-            id: r.id,
-            label,
-            query_str: r.query.clone(),
-            kind: kind.clone(),
-            last_viewed_at: r.last_viewed_at,
-        }));
-        for s in streams {
-            entries.push(LeftPaneEntry::FilterStream(FilterStreamEntry {
-                id: s.id,
-                parent_id: s.parent_id,
-                name: s.name,
-                filter: s.filter,
-                kind: kind.clone(),
-                last_viewed_at: s.last_viewed_at,
-            }));
-        }
-    }
+    let entries = load_left_pane_entries(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
     // Keep the notification query-name map in sync with the latest labels.
     *state.query_names.lock().unwrap() = query_name_map(&entries);
     Ok(entries)
@@ -141,9 +119,10 @@ pub fn save_settings(
 
 /// Compute per-entry unread counts for the entries under `query_id`, reusing
 /// `glauca_core::logic::compute_unread_counts` (the same logic the TUI/GUI use)
-/// so filter-stream scoping and the "new-since-last-viewed AND unread" definition
-/// stay consistent across front-ends. `items` is the front-end's in-memory list
-/// for the query (with up-to-date `read` flags), matching how the TUI recomputes.
+/// so filter-stream scoping and the Jasper-style unread definition
+/// (`updated_at > last_read_updated_at`, per item) stay consistent across
+/// front-ends. `items` is the front-end's in-memory list for the query (with
+/// up-to-date `last_read_updated_at`), matching how the TUI recomputes.
 #[tauri::command]
 pub fn unread_counts(
     state: State<'_, AppState>,
@@ -167,7 +146,7 @@ pub fn unread_counts(
 /// `expand_me` so the matching semantics (`state:`/`author:`/`label:`/… plus
 /// plain text, `@me` expansion) match the TUI/GUI exactly. Indices (not items)
 /// are returned so the front-end keeps its own item objects, preserving the
-/// `read` flags it mutates locally.
+/// `last_read_updated_at` values it advances locally on read.
 #[tauri::command]
 pub fn filter_items(
     state: State<'_, AppState>,
@@ -192,19 +171,8 @@ pub fn filter_items(
 }
 
 #[tauri::command]
-pub async fn load_cached(
-    state: State<'_, AppState>,
-    query_id: i64,
-    highlight_since: Option<String>,
-) -> Result<(), String> {
-    dispatch(
-        &state.tx,
-        EngineCommand::LoadCached {
-            query_id,
-            highlight_since,
-        },
-    )
-    .await
+pub async fn load_cached(state: State<'_, AppState>, query_id: i64) -> Result<(), String> {
+    dispatch(&state.tx, EngineCommand::LoadCached { query_id }).await
 }
 
 #[tauri::command]
@@ -212,14 +180,12 @@ pub async fn sync(
     state: State<'_, AppState>,
     query_id: i64,
     query_str: String,
-    highlight_since: Option<String>,
 ) -> Result<(), String> {
     dispatch(
         &state.tx,
         EngineCommand::Sync {
             query_id,
             query_str,
-            highlight_since,
         },
     )
     .await
@@ -230,14 +196,12 @@ pub async fn full_resync(
     state: State<'_, AppState>,
     query_id: i64,
     query_str: String,
-    highlight_since: Option<String>,
 ) -> Result<(), String> {
     dispatch(
         &state.tx,
         EngineCommand::FullResync {
             query_id,
             query_str,
-            highlight_since,
         },
     )
     .await
@@ -248,14 +212,12 @@ pub async fn sync_if_stale(
     state: State<'_, AppState>,
     query_id: i64,
     query_str: String,
-    highlight_since: Option<String>,
 ) -> Result<(), String> {
     dispatch(
         &state.tx,
         EngineCommand::SyncIfStale {
             query_id,
             query_str,
-            highlight_since,
         },
     )
     .await
@@ -268,7 +230,6 @@ pub async fn refresh_item(
     repo_owner: String,
     repo_name: String,
     number: i64,
-    highlight_since: Option<String>,
 ) -> Result<(), String> {
     dispatch(
         &state.tx,
@@ -277,25 +238,6 @@ pub async fn refresh_item(
             repo_owner,
             repo_name,
             number,
-            highlight_since,
-        },
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn mark_entry_viewed(
-    state: State<'_, AppState>,
-    entry_id: i64,
-    is_filter_stream: bool,
-    viewed_at: String,
-) -> Result<(), String> {
-    dispatch(
-        &state.tx,
-        EngineCommand::MarkEntryViewed {
-            entry_id,
-            is_filter_stream,
-            viewed_at,
         },
     )
     .await
