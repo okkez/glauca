@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
 use glauca_core::filter::FilterQuery;
-use glauca_core::logic::{compute_unread_counts, expand_me};
+use glauca_core::logic::{compute_unread_counts, count_changed, expand_me};
 use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -168,6 +168,14 @@ pub fn filter_items(
         })
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Count how many items in `fresh` are new or changed vs `current`, delegating to
+/// `glauca_core::logic::count_changed` so the "N updated" banner uses the exact
+/// definition the TUI/GUI use instead of a JS re-implementation.
+#[tauri::command]
+pub fn count_changed_items(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> usize {
+    count_changed(&current, &fresh)
 }
 
 #[tauri::command]

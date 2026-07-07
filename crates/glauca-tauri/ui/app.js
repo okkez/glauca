@@ -53,19 +53,18 @@ function itemKey(it) {
   return `${it.repo_owner}/${it.repo_name}#${it.number}`;
 }
 
-// How many items in `fresh` are new or changed vs `prev` (keyed by repo/number).
-// Mirrors glauca_core::logic::count_changed — kept in JS as it is display-only.
-function countChanged(prev, fresh) {
-  const seen = new Map(prev.map((it) => [itemKey(it), it.updated_at]));
-  return fresh.reduce((n, it) => {
-    const k = itemKey(it);
-    return !seen.has(k) || seen.get(k) !== it.updated_at ? n + 1 : n;
-  }, 0);
+// Jasper-style unread: the item changed since it was last read. Mirrors
+// glauca_core::logic::is_item_unread; both timestamps are RFC3339 UTC, so plain
+// string comparison orders correctly (same assumption core makes).
+function isUnread(it) {
+  return it.last_read_updated_at == null || it.updated_at > it.last_read_updated_at;
 }
 
 // Show/hide the "N updated" banner based on held-back background items for the
-// currently-selected query. Clicking it applies the pending items.
-function updateBanner() {
+// currently-selected query. Clicking it applies the pending items. The count
+// delegates to core's count_changed (via count_changed_items) so the definition
+// matches the TUI/GUI.
+async function updateBanner() {
   const banner = $("banner");
   const e = state.entries[state.selectedEntry];
   const fresh = e ? state.pending.get(e.rootQueryId) : null;
@@ -73,7 +72,12 @@ function updateBanner() {
     banner.hidden = true;
     return;
   }
-  const n = countChanged(state.itemsByQuery.get(e.rootQueryId) || [], fresh);
+  let n;
+  try {
+    n = await invoke("count_changed_items", { current: state.itemsByQuery.get(e.rootQueryId) || [], fresh });
+  } catch {
+    n = fresh.length; // banner is display-only; fall back to a coarse count
+  }
   banner.textContent = `${n} updated in background — click to refresh`;
   banner.hidden = false;
   banner.onclick = () => applyPending(e.rootQueryId);
@@ -128,7 +132,6 @@ function normalize(e) {
       queryStr: d.query_str,
       rootQueryId: d.id,
       streamFilter: null,
-      lastViewedAt: d.last_viewed_at || null,
     };
   }
   return {
@@ -139,7 +142,6 @@ function normalize(e) {
     queryStr: null,
     rootQueryId: d.parent_id,
     streamFilter: d.filter,
-    lastViewedAt: d.last_viewed_at || null,
   };
 }
 
@@ -150,9 +152,9 @@ function unreadKey(isFilterStream, entryId) {
 // Recompute unread badges for every entry under `rootQueryId` by delegating to
 // the engine's unread_counts command, which reuses glauca-core's
 // compute_unread_counts — correct filter-stream scoping and the same
-// "new-since-last-viewed AND unread" definition the TUI/GUI use. Driven by the
-// front-end's in-memory items so it reflects reads immediately (no DB round-trip
-// race after mark_item_read).
+// Jasper-style unread definition (updated_at > last_read_updated_at) the TUI/GUI
+// use. Driven by the front-end's in-memory items so it reflects reads
+// immediately (no DB round-trip race after mark_item_read).
 async function refreshUnread(rootQueryId) {
   const items = state.itemsByQuery.get(rootQueryId) || [];
   try {
@@ -305,7 +307,7 @@ function renderSidebar() {
 // the engine's filter_items command, which reuses glauca-core's FilterQuery — the
 // filter-stream filter ANDed with the inline search box, matching the TUI/GUI. The
 // command returns matching indices, so visibleItems keeps the same object refs as
-// itemsByQuery (read flags mutated locally stay consistent).
+// itemsByQuery (last_read_updated_at advanced locally on read stays consistent).
 async function refreshVisible() {
   const e = state.entries[state.selectedEntry];
   const all = e ? state.itemsByQuery.get(e.rootQueryId) || [] : [];
@@ -407,7 +409,7 @@ function renderItemList() {
     const li = el(
       "li",
       {
-        class: [it.read ? "read" : "", key === state.selectedItemKey ? "selected" : ""].filter(Boolean).join(" "),
+        class: [!isUnread(it) ? "read" : "", key === state.selectedItemKey ? "selected" : ""].filter(Boolean).join(" "),
         onclick: () => selectItem(it),
       },
       [el("span", { class: "it-title", text: it.title }), meta]
@@ -476,7 +478,6 @@ function renderDetail(it) {
           repoOwner: it.repo_owner,
           repoName: it.repo_name,
           number: it.number,
-          highlightSince: entry.lastViewedAt,
         }),
     })
   );
@@ -594,14 +595,11 @@ function selectEntry(idx) {
   state.selectedEntry = idx;
   state.selectedItemKey = null;
   const e = state.entries[idx];
-  // highlight_since is the entry's PERSISTED last-viewed baseline. Selecting does
-  // NOT advance it (mirrors the TUI/GUI): items new since the last visit stay
-  // highlighted, and the unread badge clears per-item as items are read.
-  const since = e.lastViewedAt;
-
-  invoke("load_cached", { queryId: e.rootQueryId, highlightSince: since });
+  // Selecting an entry does NOT mark anything read (mirrors the TUI/GUI):
+  // unread is per-item and clears as items are read (selectItem).
+  invoke("load_cached", { queryId: e.rootQueryId });
   if (!e.isFilterStream) {
-    invoke("sync", { queryId: e.rootQueryId, queryStr: e.queryStr, highlightSince: since });
+    invoke("sync", { queryId: e.rootQueryId, queryStr: e.queryStr });
   }
 
   renderSidebar();
@@ -613,10 +611,14 @@ function selectEntry(idx) {
 
 function selectItem(it) {
   state.selectedItemKey = itemKey(it);
-  if (!it.read) {
+  // Mirrors the GUI's mark_current_item_read: persist via the engine, then
+  // advance the local copy so unread badges/row styling react immediately
+  // without waiting for a reload (the DB write does the same server-side).
+  if (isUnread(it)) {
     const e = state.entries[state.selectedEntry];
     invoke("mark_item_read", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
-    it.read = true;
+    it.last_read_updated_at = it.updated_at;
+    it.is_new = false;
     refreshUnread(e.rootQueryId); // recompute badges (also re-renders the sidebar)
   }
   renderItemList(); // selection/read changed; the filtered set is unchanged
@@ -748,7 +750,7 @@ function entryMenu(ev, idx) {
   if (!e.isFilterStream) {
     items.push({
       label: "Full resync",
-      onClick: () => invoke("full_resync", { queryId: e.rootQueryId, queryStr: e.queryStr, highlightSince: e.lastViewedAt }),
+      onClick: () => invoke("full_resync", { queryId: e.rootQueryId, queryStr: e.queryStr }),
     });
   }
   showContextMenu(ev.clientX, ev.clientY, items);
@@ -816,7 +818,7 @@ function handleMessage(msg) {
     case "FilterStreamsSwapped":
       refreshEntries();
       break;
-    // Remaining variants (EntryViewed, BgSync*) aren't surfaced here; ignore.
+    // Remaining variants (BgSync*) aren't surfaced here; ignore.
     default:
       break;
   }
@@ -954,7 +956,7 @@ async function main() {
     if (e.rootQueryId === firstRoot) continue;
     if (seen.has(e.rootQueryId)) continue;
     seen.add(e.rootQueryId);
-    invoke("load_cached", { queryId: e.rootQueryId, highlightSince: e.lastViewedAt });
+    invoke("load_cached", { queryId: e.rootQueryId });
   }
 
   setStatus(state.currentUser ? `Signed in as @${state.currentUser}` : "Not authenticated (set GH_TOKEN)");

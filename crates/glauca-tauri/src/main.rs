@@ -138,6 +138,7 @@ fn main() -> anyhow::Result<()> {
             commands::list_entries,
             commands::unread_counts,
             commands::filter_items,
+            commands::count_changed_items,
             commands::load_cached,
             commands::sync,
             commands::full_resync,
