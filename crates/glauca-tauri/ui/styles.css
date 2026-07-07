@@ -284,7 +284,8 @@ select.modal-input { appearance: auto; }
 
 /* Focused-pane indicator for keyboard navigation (h/l switches). */
 #sidebar.focused .pane-title,
-#items.focused .pane-title {
+#items.focused .pane-title,
+#detail.focused .pane-title {
   color: var(--accent);
   box-shadow: inset 0 2px 0 var(--accent);
 }

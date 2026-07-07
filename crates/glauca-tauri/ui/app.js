@@ -23,7 +23,7 @@ const state = {
   unread: new Map(),       // unreadKey(isFilterStream, entryId) -> count
   selectedEntry: -1,
   selectedItemKey: null,
-  focus: "entries",        // keyboard focus: "entries" | "items" (h/l to switch)
+  focus: "entries",        // keyboard focus: "entries" | "items" | "detail" (h/l to switch)
   filterText: "",
   comments: [],            // last-loaded comments (shown in the comments modal)
   commentsShowMinimized: false,
@@ -434,6 +434,7 @@ function renderDetail(it) {
   const body = $("detail-body");
   body.classList.remove("empty");
   body.replaceChildren();
+  body.scrollTop = 0; // new item shown → back to the top, mirroring the TUI/GUI
 
   body.appendChild(el("h2", { text: it.title }));
   const metaBits = [
@@ -846,6 +847,16 @@ function setFocus(f) {
   state.focus = f;
   $("sidebar").classList.toggle("focused", f === "entries");
   $("items").classList.toggle("focused", f === "items");
+  $("detail").classList.toggle("focused", f === "detail");
+}
+
+// Pixels scrolled per j/k in the detail pane (matches the comments overlay step).
+const DETAIL_SCROLL_STEP = 60;
+
+// Scroll the detail body when the detail pane is focused. The browser clamps
+// scrollTop to [0, scrollHeight - clientHeight], so no bounds math is needed.
+function scrollDetail(dy) {
+  $("detail-body").scrollTop += dy;
 }
 
 // Which key context the event belongs to. Modals and menus own their keys;
@@ -942,19 +953,25 @@ function handleNavKey(ev) {
   switch (ev.key) {
     case "j":
     case "ArrowDown":
-      state.focus === "entries" ? moveEntryCursor(1) : moveItemCursor(1);
+      if (state.focus === "entries") moveEntryCursor(1);
+      else if (state.focus === "detail") scrollDetail(DETAIL_SCROLL_STEP);
+      else moveItemCursor(1);
       return handled();
     case "k":
     case "ArrowUp":
-      state.focus === "entries" ? moveEntryCursor(-1) : moveItemCursor(-1);
+      if (state.focus === "entries") moveEntryCursor(-1);
+      else if (state.focus === "detail") scrollDetail(-DETAIL_SCROLL_STEP);
+      else moveItemCursor(-1);
       return handled();
+    // h/l cycle the three panes (entries → items → detail → entries), matching the
+    // TUI/GUI. In the detail pane j/k scroll the body (see above).
     case "h":
     case "ArrowLeft":
-      setFocus("entries");
+      setFocus(state.focus === "entries" ? "detail" : state.focus === "items" ? "entries" : "items");
       return handled();
     case "l":
     case "ArrowRight":
-      setFocus("items");
+      setFocus(state.focus === "entries" ? "items" : state.focus === "items" ? "detail" : "entries");
       return handled();
     case "Enter":
       // A focused button (e.g. a detail-pane action) keeps its native Enter.
