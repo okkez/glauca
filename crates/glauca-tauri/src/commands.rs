@@ -79,7 +79,11 @@ pub async fn list_entries(state: State<'_, AppState>) -> Result<Vec<LeftPaneEntr
         .await
         .map_err(|e| e.to_string())?;
     // Keep the notification query-name map in sync with the latest labels.
-    *state.query_names.lock().unwrap() = query_name_map(&entries);
+    // Recover from poisoning: the map is plain data, consistent regardless.
+    *state
+        .query_names
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = query_name_map(&entries);
     Ok(entries)
 }
 

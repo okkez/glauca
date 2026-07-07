@@ -49,6 +49,13 @@ function setStatus(msg, isError = false) {
   $("statusbar").classList.toggle("error", isError);
 }
 
+// invoke() for fire-and-forget commands: report failures on the status bar
+// instead of losing them as unhandled rejections. Use plain invoke() (with
+// await / .catch) when the result matters.
+function call(cmd, args) {
+  return invoke(cmd, args).catch((e) => setStatus(`${cmd}: ${e}`, true));
+}
+
 function itemKey(it) {
   return `${it.repo_owner}/${it.repo_name}#${it.number}`;
 }
@@ -337,8 +344,8 @@ function stateClass(s) {
 }
 
 // CSS modifier for a GitHub review state (mirrors logic::ReviewState::from_state).
-function reviewStateClass(state) {
-  switch (state) {
+function reviewStateClass(reviewState) {
+  switch (reviewState) {
     case "APPROVED":
       return "rv-approved";
     case "CHANGES_REQUESTED":
@@ -500,43 +507,43 @@ function renderDetail(it) {
 function itemActions(it) {
   const entry = state.entries[state.selectedEntry];
   const acts = [
-    { label: "Open in browser", run: () => invoke("open_browser", { item: it }) },
+    { label: "Open in browser", run: () => call("open_browser", { item: it }) },
     { label: "Copy URL", run: () => copyText(it.url) },
     {
       label: "Refresh",
       run: () =>
-        invoke("refresh_item", { queryId: entry.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number }),
+        call("refresh_item", { queryId: entry.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number }),
     },
-    { label: "View comments", run: () => invoke("load_comments", { owner: it.repo_owner, repo: it.repo_name, number: it.number }) },
+    { label: "View comments", run: () => call("load_comments", { owner: it.repo_owner, repo: it.repo_name, number: it.number }) },
     {
       label: "Comment",
       run: async () => {
         const text = await promptModal("Comment body:");
-        if (text) invoke("comment", { url: it.url, kind: it.kind, body: text });
+        if (text) call("comment", { url: it.url, kind: it.kind, body: text });
       },
     },
   ];
   if (it.kind === "pull_request") {
-    acts.push({ label: "Approve", run: () => invoke("submit_review", { url: it.url, event: "approve", body: null }) });
+    acts.push({ label: "Approve", run: () => call("submit_review", { url: it.url, event: "approve", body: null }) });
     acts.push({
       label: "Request changes",
       run: async () => {
         const text = await promptModal("Request changes — comment:");
-        if (text) invoke("submit_review", { url: it.url, event: "request_changes", body: text });
+        if (text) call("submit_review", { url: it.url, event: "request_changes", body: text });
       },
     });
     acts.push({
       label: "Review comment",
       run: async () => {
         const text = await promptModal("Review comment:");
-        if (text) invoke("submit_review", { url: it.url, event: "comment", body: text });
+        if (text) call("submit_review", { url: it.url, event: "comment", body: text });
       },
     });
     acts.push({
       label: "Merge",
       run: async () => {
         const s = ((await promptModal("Merge strategy (squash / merge / rebase):", "squash")) || "").trim();
-        if (["squash", "merge", "rebase"].includes(s)) invoke("merge", { url: it.url, strategy: s });
+        if (["squash", "merge", "rebase"].includes(s)) call("merge", { url: it.url, strategy: s });
       },
     });
   }
@@ -551,7 +558,7 @@ function showCustomActionsMenu(it, acts, x, y) {
     y,
     acts.map((a) => ({
       label: a.label,
-      onClick: () => invoke("run_custom_action", { name: a.name, item: it }),
+      onClick: () => call("run_custom_action", { name: a.name, item: it }),
     }))
   );
 }
@@ -569,7 +576,7 @@ async function showItemActionMenu(it, x, y) {
   if (acts.length) {
     menu.push(null);
     for (const a of acts) {
-      menu.push({ label: a.label, onClick: () => invoke("run_custom_action", { name: a.name, item: it }) });
+      menu.push({ label: a.label, onClick: () => call("run_custom_action", { name: a.name, item: it }) });
     }
   }
   showContextMenu(x, y, menu);
@@ -662,7 +669,7 @@ function previewEntry(idx) {
   state.selectedEntry = idx;
   state.selectedItemKey = null;
   const e = state.entries[idx];
-  invoke("load_cached", { queryId: e.rootQueryId });
+  call("load_cached", { queryId: e.rootQueryId });
   renderSidebar();
   refreshVisible();
   updateBanner();
@@ -677,7 +684,7 @@ function selectEntry(idx) {
   setFocus("entries");
   const e = state.entries[idx];
   if (!e.isFilterStream) {
-    invoke("sync", { queryId: e.rootQueryId, queryStr: e.queryStr });
+    call("sync", { queryId: e.rootQueryId, queryStr: e.queryStr });
   }
 }
 
@@ -689,7 +696,7 @@ function selectItem(it) {
   // without waiting for a reload (the DB write does the same server-side).
   if (isUnread(it)) {
     const e = state.entries[state.selectedEntry];
-    invoke("mark_item_read", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
+    call("mark_item_read", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
     it.last_read_updated_at = it.updated_at;
     it.is_new = false;
     refreshUnread(e.rootQueryId); // recompute badges (also re-renders the sidebar)
@@ -764,7 +771,7 @@ async function newQuery() {
     { key: "name", label: "Name (optional)" },
     { key: "query", label: "GitHub search query", required: true },
   ]);
-  if (out) invoke("add_query", { name: out.name || null, query: out.query });
+  if (out) call("add_query", { name: out.name || null, query: out.query });
 }
 
 async function editQuery(e) {
@@ -772,7 +779,7 @@ async function editQuery(e) {
     { key: "name", label: "Name (optional)", value: e.label },
     { key: "query", label: "GitHub search query", value: e.queryStr, required: true },
   ]);
-  if (out) invoke("edit_query", { id: e.id, name: out.name || null, query: out.query });
+  if (out) call("edit_query", { id: e.id, name: out.name || null, query: out.query });
 }
 
 async function newFilterStream(parent) {
@@ -780,7 +787,7 @@ async function newFilterStream(parent) {
     { key: "name", label: "Name", required: true },
     { key: "filter", label: "Filter (e.g. state:open label:bug)", required: true },
   ]);
-  if (out) invoke("add_filter_stream", { parentId: parent.rootQueryId, kind: parent.kind, name: out.name, filter: out.filter });
+  if (out) call("add_filter_stream", { parentId: parent.rootQueryId, kind: parent.kind, name: out.name, filter: out.filter });
 }
 
 async function editFilterStream(e) {
@@ -788,23 +795,23 @@ async function editFilterStream(e) {
     { key: "name", label: "Name", value: e.label, required: true },
     { key: "filter", label: "Filter", value: e.streamFilter, required: true },
   ]);
-  if (out) invoke("edit_filter_stream", { id: e.id, name: out.name, filter: out.filter });
+  if (out) call("edit_filter_stream", { id: e.id, name: out.name, filter: out.filter });
 }
 
 async function deleteEntry(e) {
   const what = e.isFilterStream ? "filter stream" : "query (and its filter streams)";
   if (!(await confirmModal(`Delete this ${what}: "${e.label}"?`))) return;
-  if (e.isFilterStream) invoke("delete_filter_stream", { id: e.id });
-  else invoke("delete_query", { queryId: e.id });
+  if (e.isFilterStream) call("delete_filter_stream", { id: e.id });
+  else call("delete_query", { queryId: e.id });
 }
 
 function moveEntry(idx, down) {
   const r = reorderArgs(idx, down);
-  if (r) invoke(r.cmd, r.args);
+  if (r) call(r.cmd, r.args);
 }
 
 function markAllRead(e) {
-  invoke("mark_all_read", { queryId: e.rootQueryId, filter: e.isFilterStream ? e.streamFilter : null });
+  call("mark_all_read", { queryId: e.rootQueryId, filter: e.isFilterStream ? e.streamFilter : null });
 }
 
 // Context menu for a left-pane entry.
@@ -823,7 +830,7 @@ function entryMenu(ev, idx) {
   if (!e.isFilterStream) {
     items.push({
       label: "Full resync",
-      onClick: () => invoke("full_resync", { queryId: e.rootQueryId, queryStr: e.queryStr }),
+      onClick: () => call("full_resync", { queryId: e.rootQueryId, queryStr: e.queryStr }),
     });
   }
   showContextMenu(ev.clientX, ev.clientY, items);
@@ -984,13 +991,13 @@ function handleNavKey(ev) {
       if (state.focus === "entries") moveEntry(state.selectedEntry, false);
       return handled();
     case "o":
-      if (it) invoke("open_browser", { item: it });
+      if (it) call("open_browser", { item: it });
       return handled();
     case "y":
       if (it) copyText(it.url);
       return handled();
     case "c":
-      if (it) invoke("load_comments", { owner: it.repo_owner, repo: it.repo_name, number: it.number });
+      if (it) call("load_comments", { owner: it.repo_owner, repo: it.repo_name, number: it.number });
       return handled();
     case "x":
       if (it) {
@@ -1011,14 +1018,14 @@ function handleNavKey(ev) {
       // root query, items → re-fetch the selected item.
       if (state.focus === "entries") {
         const q = e && rootQueryStr(e);
-        if (e && q) invoke("sync", { queryId: e.rootQueryId, queryStr: q });
+        if (e && q) call("sync", { queryId: e.rootQueryId, queryStr: q });
       } else if (it && e) {
-        invoke("refresh_item", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
+        call("refresh_item", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
       }
       return handled();
     case "S": {
       const q = e && rootQueryStr(e);
-      if (e && q) invoke("full_resync", { queryId: e.rootQueryId, queryStr: q });
+      if (e && q) call("full_resync", { queryId: e.rootQueryId, queryStr: q });
       return handled();
     }
     case "u":
@@ -1277,6 +1284,10 @@ async function main() {
   document.addEventListener("keydown", onKeyDown);
   setFocus("entries");
 
+  // Safety net: anything that still slips through as an unhandled rejection
+  // (e.g. a future missed await) lands on the status bar, not the void.
+  window.addEventListener("unhandledrejection", (ev) => setStatus(String(ev.reason), true));
+
   $("new-query").addEventListener("click", newQuery);
   $("settings-btn").addEventListener("click", openSettingsModal);
 
@@ -1320,7 +1331,7 @@ async function main() {
     if (e.rootQueryId === firstRoot) continue;
     if (seen.has(e.rootQueryId)) continue;
     seen.add(e.rootQueryId);
-    invoke("load_cached", { queryId: e.rootQueryId });
+    call("load_cached", { queryId: e.rootQueryId });
   }
 
   setStatus(state.currentUser ? `Signed in as @${state.currentUser}` : "Not authenticated (set GH_TOKEN)");
@@ -1330,9 +1341,9 @@ async function main() {
     previewEntry(0);
     const e0 = state.entries[0];
     if (!e0.isFilterStream) {
-      invoke("sync_if_stale", { queryId: e0.rootQueryId, queryStr: e0.queryStr });
+      call("sync_if_stale", { queryId: e0.rootQueryId, queryStr: e0.queryStr });
     }
-    invoke("enqueue_stale", { skipQueryId: firstRoot });
+    call("enqueue_stale", { skipQueryId: firstRoot });
   } else {
     setStatus("No saved queries. Add one with the TUI/GUI, then reopen.");
   }

@@ -102,20 +102,22 @@ fn main() -> anyhow::Result<()> {
                     } = &msg
                     {
                         let enabled = notif_loop.load(Ordering::Relaxed);
-                        let to_notify = tracker_loop.lock().unwrap().changed_count_to_notify(
-                            *query_id,
-                            items,
-                            *background,
-                            enabled,
-                        );
+                        // Recover from poisoning: these locks only guard plain
+                        // map/tracker state, which stays consistent even if a
+                        // panicking thread abandoned it mid-update.
+                        let to_notify = tracker_loop
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .changed_count_to_notify(*query_id, items, *background, enabled);
                         if let Some(n) = to_notify {
                             let name = names_loop
                                 .lock()
-                                .unwrap()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .get(query_id)
                                 .cloned()
                                 .unwrap_or_else(|| format!("Query #{query_id}"));
-                            // notify_updated_items is a blocking D-Bus call on Linux.
+                            // notify_updated_items is a blocking D-Bus call on
+                            // Linux (it logs its own failures).
                             tauri::async_runtime::spawn_blocking(move || {
                                 notify_updated_items(&name, n)
                             });

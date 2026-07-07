@@ -93,14 +93,18 @@ impl ItemTracker {
 /// `count` follows the same new+updated semantics as the click-to-refresh
 /// banner, so the wording ("N updated") matches. Synchronous — on Linux it's a
 /// blocking D-Bus round-trip — so callers should run it off their UI/event
-/// loop. Any error (no notification daemon, etc.) is intentionally ignored: a
-/// missing notification must never crash or stall the front-end.
+/// loop. Any error (no notification daemon, etc.) is intentionally non-fatal —
+/// a missing notification must never crash or stall the front-end — but it is
+/// logged so a silent notification outage is diagnosable.
 pub fn notify_updated_items(query_name: &str, count: usize) {
-    let _ = notify_rust::Notification::new()
+    if let Err(e) = notify_rust::Notification::new()
         .summary("Glauca")
         .body(&format!("{query_name}: {count} updated"))
         .appname("Glauca")
-        .show();
+        .show()
+    {
+        tracing::warn!(error = %e, "desktop notification failed");
+    }
 }
 
 #[cfg(test)]
