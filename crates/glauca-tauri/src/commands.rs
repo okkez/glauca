@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use glauca_core::actions::CustomActions;
 use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{compute_unread_counts, count_changed, expand_me};
@@ -38,6 +39,10 @@ pub struct AppState {
     /// Root-query id -> display label, for notification text. Refreshed on
     /// startup and by list_entries.
     pub query_names: Arc<Mutex<HashMap<i64, String>>>,
+    /// User-defined actions from actions.toml, loaded once at startup (same
+    /// timing as the TUI/GUI). JS refers to them by name (see
+    /// [`list_custom_actions`]); the definitions never cross the IPC boundary.
+    pub custom_actions: CustomActions,
 }
 
 /// One left-pane entry's unread count, as returned by [`unread_counts`]. Mirrors
@@ -434,6 +439,57 @@ pub async fn mark_item_read(
             repo_owner,
             repo_name,
             number,
+        },
+    )
+    .await
+}
+
+/// A custom action as exposed to the front-end: just enough to render a picker.
+/// The command template and env stay on the Rust side — JS runs an action by
+/// `name` via [`run_custom_action`], so user-defined command lines never enter
+/// the webview.
+#[derive(Serialize)]
+pub struct CustomActionInfo {
+    pub name: String,
+    pub label: String,
+}
+
+/// Custom actions applicable to an item kind (`pull_request` / `issue`), in
+/// definition order. Empty when actions.toml is missing or defines none.
+#[tauri::command]
+pub fn list_custom_actions(state: State<'_, AppState>, kind: String) -> Vec<CustomActionInfo> {
+    state
+        .custom_actions
+        .for_kind(&kind)
+        .into_iter()
+        .map(|a| CustomActionInfo {
+            name: a.name.clone(),
+            label: a.display_label().to_string(),
+        })
+        .collect()
+}
+
+/// Run the custom action `name` on `item`. The action is resolved from the
+/// startup-loaded actions.toml (kind-checked again here); the engine executes it
+/// and reports the result via ActionDone / ActionError.
+#[tauri::command]
+pub async fn run_custom_action(
+    state: State<'_, AppState>,
+    name: String,
+    item: ItemEntry,
+) -> Result<(), String> {
+    let action = state
+        .custom_actions
+        .for_kind(&item.kind)
+        .into_iter()
+        .find(|a| a.name == name)
+        .cloned()
+        .ok_or_else(|| format!("unknown custom action: {name}"))?;
+    dispatch(
+        &state.tx,
+        EngineCommand::RunCustomAction {
+            action: Box::new(action),
+            item: Box::new(item),
         },
     )
     .await

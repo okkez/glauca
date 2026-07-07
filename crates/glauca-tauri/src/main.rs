@@ -80,6 +80,9 @@ fn main() -> anyhow::Result<()> {
             pool,
             notifications_enabled,
             query_names,
+            // Loaded once at startup, like the TUI/GUI (edits to actions.toml
+            // take effect on the next launch).
+            custom_actions: glauca_core::actions::CustomActions::load(),
         })
         .setup(move |app| {
             // Stream engine messages to the front-end. `emit` requires the payload
@@ -160,6 +163,8 @@ fn main() -> anyhow::Result<()> {
             commands::merge,
             commands::mark_item_read,
             commands::mark_all_read,
+            commands::list_custom_actions,
+            commands::run_custom_action,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("tauri run error: {e}"))?;

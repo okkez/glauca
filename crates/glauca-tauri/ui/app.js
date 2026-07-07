@@ -528,7 +528,36 @@ function renderDetail(it) {
   }
   body.appendChild(actions);
 
+  // Custom actions (actions.toml): appended asynchronously and only when at
+  // least one action applies to this kind, mirroring the GUI's conditional
+  // "Custom actions" submenu. Definitions stay Rust-side; JS only sees
+  // {name, label} and runs by name.
+  invoke("list_custom_actions", { kind: it.kind })
+    .then((acts) => {
+      if (!acts.length) return;
+      actions.appendChild(
+        el("button", {
+          text: "Custom actions…",
+          onclick: (ev) => showCustomActionsMenu(it, acts, ev.clientX, ev.clientY),
+        })
+      );
+    })
+    .catch((e) => setStatus(`custom actions: ${e}`, true));
+
   body.appendChild(el("div", { class: "body", text: it.body && it.body.length ? it.body : "(no description)" }));
+}
+
+// Picker over the given custom actions for `it` (from list_custom_actions).
+// The result surfaces through the usual ActionDone / ActionError messages.
+function showCustomActionsMenu(it, acts, x, y) {
+  showContextMenu(
+    x,
+    y,
+    acts.map((a) => ({
+      label: a.label,
+      onClick: () => invoke("run_custom_action", { name: a.name, item: it }),
+    }))
+  );
 }
 
 // Open the comments overlay for the loaded comments (set by CommentsLoaded).
