@@ -33,6 +33,7 @@ use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_component::notification::Notification;
 use gpui_component::radio::RadioGroup;
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
@@ -318,13 +319,15 @@ impl GlaucaApp {
         // With `smol::Timer` the tick doesn't poke gpui's loop, so background-sync
         // messages sat undrained until the next user interaction (no "N updated"
         // banner appeared on its own).
-        cx.spawn(async move |this, cx| {
+        // `spawn_in` (not `spawn`) so `apply` gets a `&mut Window`: error
+        // messages surface as `push_notification` toasts, which need the window.
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(DRAIN_INTERVAL).await;
-                let result = this.update(cx, |this, cx| {
+                let result = this.update_in(cx, |this, window, cx| {
                     let mut changed = false;
                     while let Some(msg) = this.engine.try_recv() {
-                        this.apply(msg, cx);
+                        this.apply(msg, window, cx);
                         changed = true;
                     }
                     if changed {
@@ -1364,7 +1367,15 @@ impl GlaucaApp {
             return None;
         }
 
-        let query_str = entry.root_query_str().unwrap_or_default().to_string();
+        // A root query must carry its query string; an empty one would fire a
+        // pointless (and confusing) blank GitHub search, so skip the sync.
+        let query_str = match entry.root_query_str() {
+            Some(q) if !q.is_empty() => q.to_string(),
+            _ => {
+                tracing::warn!(query_id = root_id, "root query has no query string");
+                return None;
+            }
+        };
         if always_sync {
             self.send(EngineCommand::Sync {
                 query_id: root_id,
@@ -1723,8 +1734,11 @@ impl GlaucaApp {
     }
 
     /// Apply a single engine message to GUI state. Mirrors the TUI's `run_app`
-    /// message handling (crates/glauca-tui/src/tui/mod.rs).
-    fn apply(&mut self, msg: AppMessage, cx: &mut Context<Self>) {
+    /// message handling (crates/glauca-tui/src/tui/mod.rs). `window` is used to
+    /// surface error messages as notification toasts (the status footer is
+    /// transient — the next status overwrites it, so errors alone would be easy
+    /// to miss).
+    fn apply(&mut self, msg: AppMessage, window: &mut Window, cx: &mut Context<Self>) {
         // Only rebuild the filtered-index cache when items/filter/stream_filter
         // actually change. Background sync floods `apply` with messages that don't
         // touch the visible list (other queries' ItemsLoaded, Status, BgSync*,
@@ -1788,6 +1802,7 @@ impl GlaucaApp {
             AppMessage::SyncError { error, .. } => {
                 self.syncing = false;
                 self.status = Some(format!("Sync error: {error}"));
+                window.push_notification(Notification::error(format!("Sync error: {error}")), cx);
             }
             AppMessage::BgSyncQueued(n) => self.bg_sync_pending += n,
             AppMessage::BgSyncJobDone => {
@@ -1930,7 +1945,10 @@ impl GlaucaApp {
 
             // ── Action results ──────────────────────────────────────────────────
             AppMessage::ActionDone(s) => self.status = Some(s),
-            AppMessage::ActionError(e) => self.status = Some(format!("Error: {e}")),
+            AppMessage::ActionError(e) => {
+                self.status = Some(format!("Error: {e}"));
+                window.push_notification(Notification::error(e), cx);
+            }
 
             // ── Comments overlay ────────────────────────────────────────────────
             AppMessage::CommentsLoaded(comments) => {
@@ -1942,6 +1960,10 @@ impl GlaucaApp {
             AppMessage::CommentsFailed(e) => {
                 self.comments_loading = false;
                 self.status = Some(format!("Failed to load comments: {e}"));
+                window.push_notification(
+                    Notification::error(format!("Failed to load comments: {e}")),
+                    cx,
+                );
             }
         }
         if needs_refilter {
