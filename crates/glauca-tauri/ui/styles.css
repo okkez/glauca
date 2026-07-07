@@ -278,6 +278,23 @@ ul { list-style: none; margin: 0; padding: 0; }
 .modal-check { display: flex; align-items: center; gap: 4px; margin-top: 10px; cursor: pointer; }
 select.modal-input { appearance: auto; }
 
+/* Focused-pane indicator for keyboard navigation (h/l switches). */
+#sidebar.focused .pane-title,
+#items.focused .pane-title {
+  color: var(--accent);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* Keyboard-shortcuts help modal (`?`). */
+.help-box { width: min(560px, 92vw); max-height: 80vh; overflow-y: auto; }
+.help-row { display: flex; gap: 12px; padding: 2px 0; }
+.help-keys {
+  flex: 0 0 170px;
+  color: var(--fg-dim);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
 /* Right-click context menu. */
 .ctx-menu {
   position: fixed;

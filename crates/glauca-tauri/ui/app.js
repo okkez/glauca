@@ -7,9 +7,8 @@
 //   * listen('app-message', ...)  ← engine; payload is the adjacently-tagged
 //     AppMessage: { type: "ItemsLoaded", data: {...} }.
 //
-// This is a deliberately scoped baseline (browse / sync / read / act on items).
-// Query & filter-stream editing dialogs and full filter-stream matching are not
-// yet ported from the TUI/GUI — see README.
+// Feature-wise this mirrors the TUI/GUI: browse / filter / sync / read / act,
+// entry CRUD + reorder, custom actions, and keyboard navigation.
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -24,6 +23,7 @@ const state = {
   unread: new Map(),       // unreadKey(isFilterStream, entryId) -> count
   selectedEntry: -1,
   selectedItemKey: null,
+  focus: "entries",        // keyboard focus: "entries" | "items" (h/l to switch)
   filterText: "",
   comments: [],            // last-loaded comments (shown in the comments modal)
   commentsShowMinimized: false,
@@ -414,6 +414,11 @@ function renderItemList() {
       },
       [el("span", { class: "it-title", text: it.title }), meta]
     );
+    li.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      selectItem(it);
+      showItemActionMenu(it, ev.clientX, ev.clientY);
+    });
     list.appendChild(li);
   }
 }
@@ -465,66 +470,9 @@ function renderDetail(it) {
 
   // Actions. The engine performs the external work (gh CLI / browser); the
   // front-end only sends the command.
-  const entry = state.entries[state.selectedEntry];
   const actions = el("div", { class: "actions" });
-  actions.appendChild(el("button", { text: "Open in browser", onclick: () => invoke("open_browser", { item: it }) }));
-  actions.appendChild(el("button", { text: "Copy URL", onclick: () => copyText(it.url) }));
-  actions.appendChild(
-    el("button", {
-      text: "Refresh",
-      onclick: () =>
-        invoke("refresh_item", {
-          queryId: entry.rootQueryId,
-          repoOwner: it.repo_owner,
-          repoName: it.repo_name,
-          number: it.number,
-        }),
-    })
-  );
-  actions.appendChild(
-    el("button", {
-      text: "View comments",
-      onclick: () => invoke("load_comments", { owner: it.repo_owner, repo: it.repo_name, number: it.number }),
-    })
-  );
-  actions.appendChild(
-    el("button", {
-      text: "Comment",
-      onclick: async () => {
-        const text = await promptModal("Comment body:");
-        if (text) invoke("comment", { url: it.url, kind: it.kind, body: text });
-      },
-    })
-  );
-  if (it.kind === "pull_request") {
-    actions.appendChild(el("button", { text: "Approve", onclick: () => invoke("submit_review", { url: it.url, event: "approve", body: null }) }));
-    actions.appendChild(
-      el("button", {
-        text: "Request changes",
-        onclick: async () => {
-          const text = await promptModal("Request changes — comment:");
-          if (text) invoke("submit_review", { url: it.url, event: "request_changes", body: text });
-        },
-      })
-    );
-    actions.appendChild(
-      el("button", {
-        text: "Review comment",
-        onclick: async () => {
-          const text = await promptModal("Review comment:");
-          if (text) invoke("submit_review", { url: it.url, event: "comment", body: text });
-        },
-      })
-    );
-    actions.appendChild(
-      el("button", {
-        text: "Merge",
-        onclick: async () => {
-          const s = ((await promptModal("Merge strategy (squash / merge / rebase):", "squash")) || "").trim();
-          if (["squash", "merge", "rebase"].includes(s)) invoke("merge", { url: it.url, strategy: s });
-        },
-      })
-    );
+  for (const a of itemActions(it)) {
+    actions.appendChild(el("button", { text: a.label, onclick: a.run }));
   }
   body.appendChild(actions);
 
@@ -547,6 +495,54 @@ function renderDetail(it) {
   body.appendChild(el("div", { class: "body", text: it.body && it.body.length ? it.body : "(no description)" }));
 }
 
+// The actions applicable to `it`, shared by the detail-pane buttons and the
+// item action menu (Enter / right-click). Mirrors ItemAction::available_for.
+function itemActions(it) {
+  const entry = state.entries[state.selectedEntry];
+  const acts = [
+    { label: "Open in browser", run: () => invoke("open_browser", { item: it }) },
+    { label: "Copy URL", run: () => copyText(it.url) },
+    {
+      label: "Refresh",
+      run: () =>
+        invoke("refresh_item", { queryId: entry.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number }),
+    },
+    { label: "View comments", run: () => invoke("load_comments", { owner: it.repo_owner, repo: it.repo_name, number: it.number }) },
+    {
+      label: "Comment",
+      run: async () => {
+        const text = await promptModal("Comment body:");
+        if (text) invoke("comment", { url: it.url, kind: it.kind, body: text });
+      },
+    },
+  ];
+  if (it.kind === "pull_request") {
+    acts.push({ label: "Approve", run: () => invoke("submit_review", { url: it.url, event: "approve", body: null }) });
+    acts.push({
+      label: "Request changes",
+      run: async () => {
+        const text = await promptModal("Request changes — comment:");
+        if (text) invoke("submit_review", { url: it.url, event: "request_changes", body: text });
+      },
+    });
+    acts.push({
+      label: "Review comment",
+      run: async () => {
+        const text = await promptModal("Review comment:");
+        if (text) invoke("submit_review", { url: it.url, event: "comment", body: text });
+      },
+    });
+    acts.push({
+      label: "Merge",
+      run: async () => {
+        const s = ((await promptModal("Merge strategy (squash / merge / rebase):", "squash")) || "").trim();
+        if (["squash", "merge", "rebase"].includes(s)) invoke("merge", { url: it.url, strategy: s });
+      },
+    });
+  }
+  return acts;
+}
+
 // Picker over the given custom actions for `it` (from list_custom_actions).
 // The result surfaces through the usual ActionDone / ActionError messages.
 function showCustomActionsMenu(it, acts, x, y) {
@@ -560,10 +556,30 @@ function showCustomActionsMenu(it, acts, x, y) {
   );
 }
 
+// Full action menu for an item (Enter key / right-click on a row): the shared
+// item actions plus any custom actions after a separator.
+async function showItemActionMenu(it, x, y) {
+  const menu = itemActions(it).map((a) => ({ label: a.label, onClick: a.run }));
+  let acts = [];
+  try {
+    acts = await invoke("list_custom_actions", { kind: it.kind });
+  } catch {
+    /* menu is still useful without custom actions */
+  }
+  if (acts.length) {
+    menu.push(null);
+    for (const a of acts) {
+      menu.push({ label: a.label, onClick: () => invoke("run_custom_action", { name: a.name, item: it }) });
+    }
+  }
+  showContextMenu(x, y, menu);
+}
+
 // Open the comments overlay for the loaded comments (set by CommentsLoaded).
 // Supports toggling minimized comments and oldest/newest sort.
 function openCommentsModal() {
   document.querySelectorAll(".modal-overlay").forEach((m) => m.remove());
+  commentsCtl = null; // any previous modal is gone
   const overlay = el("div", { class: "modal-overlay" });
   const listBox = el("div", { class: "comments-list" });
 
@@ -602,7 +618,11 @@ function openCommentsModal() {
       render();
     },
   });
-  const close = el("button", { text: "Close", onclick: () => overlay.remove() });
+  const closeOverlay = () => {
+    commentsCtl = null;
+    overlay.remove();
+  };
+  const close = el("button", { text: "Close", onclick: closeOverlay });
   const header = el("div", { class: "comments-header" }, [
     el("span", { class: "modal-title", text: `Comments (${state.comments.length})` }),
     minToggle,
@@ -612,25 +632,37 @@ function openCommentsModal() {
 
   render();
   overlay.appendChild(el("div", { class: "modal-box comments-box" }, [header, listBox]));
-  overlay.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") overlay.remove();
-  });
   document.body.appendChild(overlay);
+
+  // Hand the global keydown handler a controller for j/k/g/G/s/h/q (see
+  // handleCommentsKey), matching the TUI's comments-popup keys.
+  commentsCtl = {
+    scroll: (dy) => {
+      listBox.scrollTop += dy;
+    },
+    top: () => {
+      listBox.scrollTop = 0;
+    },
+    bottom: () => {
+      listBox.scrollTop = listBox.scrollHeight;
+    },
+    toggleSort: () => sortToggle.click(),
+    toggleMin: () => minToggle.click(),
+    close: closeOverlay,
+  };
 }
 
 // ── actions ──────────────────────────────────────────────────────────────────
 
-function selectEntry(idx) {
+// Preview an entry (j/k cursor move): cached items only — no sync, so scrolling
+// through the list never hits the network (mirrors the GUI's preview_entry).
+// Selecting also does NOT mark anything read: unread is per-item and clears as
+// items are read (selectItem).
+function previewEntry(idx) {
   state.selectedEntry = idx;
   state.selectedItemKey = null;
   const e = state.entries[idx];
-  // Selecting an entry does NOT mark anything read (mirrors the TUI/GUI):
-  // unread is per-item and clears as items are read (selectItem).
   invoke("load_cached", { queryId: e.rootQueryId });
-  if (!e.isFilterStream) {
-    invoke("sync", { queryId: e.rootQueryId, queryStr: e.queryStr });
-  }
-
   renderSidebar();
   refreshVisible();
   updateBanner();
@@ -638,8 +670,20 @@ function selectEntry(idx) {
   $("detail-body").textContent = "Select an item.";
 }
 
+// Commit to an entry (click / Enter): preview plus a sync of the backing root
+// query (mirrors the GUI's select_index with always_sync).
+function selectEntry(idx) {
+  previewEntry(idx);
+  setFocus("entries");
+  const e = state.entries[idx];
+  if (!e.isFilterStream) {
+    invoke("sync", { queryId: e.rootQueryId, queryStr: e.queryStr });
+  }
+}
+
 function selectItem(it) {
   state.selectedItemKey = itemKey(it);
+  setFocus("items");
   // Mirrors the GUI's mark_current_item_read: persist via the engine, then
   // advance the local copy so unread badges/row styling react immediately
   // without waiting for a reload (the DB write does the same server-side).
@@ -783,6 +827,276 @@ function entryMenu(ev, idx) {
     });
   }
   showContextMenu(ev.clientX, ev.clientY, items);
+}
+
+// ── keyboard navigation ──────────────────────────────────────────────────────
+//
+// One document-level keydown handler, dispatched by context (mirrors the GUI's
+// keybinding contexts: GLAUCA_CONTEXT excludes Input / comments / menus). All
+// bindings follow the TUI/GUI keymap; `?` shows the reference.
+
+function setFocus(f) {
+  state.focus = f;
+  $("sidebar").classList.toggle("focused", f === "entries");
+  $("items").classList.toggle("focused", f === "items");
+}
+
+// Which key context the event belongs to. Modals and menus own their keys;
+// text inputs get everything except Escape-to-blur; the rest is navigation.
+function keyContext(ev) {
+  if (document.querySelector(".ctx-menu")) return "menu";
+  const overlay = document.querySelector(".modal-overlay");
+  if (overlay) return overlay.querySelector(".comments-box") ? "comments" : "modal";
+  const t = ev.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return "input";
+  return "nav";
+}
+
+// Scroll the selected row of a list pane into view after a key-driven move.
+function revealSelected(selector) {
+  const li = document.querySelector(selector);
+  if (li) li.scrollIntoView({ block: "nearest" });
+}
+
+function moveEntryCursor(delta) {
+  if (!state.entries.length) return;
+  const next = Math.max(0, Math.min(state.entries.length - 1, state.selectedEntry + delta));
+  if (next === state.selectedEntry) return;
+  previewEntry(next);
+  revealSelected("#entries li.selected");
+}
+
+function moveItemCursor(delta) {
+  const list = state.visibleItems;
+  if (!list.length) return;
+  const idx = list.findIndex((x) => itemKey(x) === state.selectedItemKey);
+  const next = idx < 0 ? 0 : Math.max(0, Math.min(list.length - 1, idx + delta));
+  selectItem(list[next]);
+  revealSelected("#item-list li.selected");
+}
+
+// Anchor point for keyboard-opened menus: next to the selected item row.
+function selectedItemAnchor() {
+  const li = document.querySelector("#item-list li.selected");
+  if (!li) return { x: Math.round(window.innerWidth / 3), y: Math.round(window.innerHeight / 3) };
+  const r = li.getBoundingClientRect();
+  return { x: Math.round(r.left + 24), y: Math.round(r.bottom - 2) };
+}
+
+// The query string backing `e`'s root query (a stream carries no query of its own).
+function rootQueryStr(e) {
+  if (!e.isFilterStream) return e.queryStr;
+  const root = state.entries.find((x) => !x.isFilterStream && x.id === e.rootQueryId);
+  return root ? root.queryStr : null;
+}
+
+// Comments-modal keyboard controller, installed by openCommentsModal while the
+// modal is open (null otherwise). Keeps the global handler decoupled from the
+// modal's DOM internals.
+let commentsCtl = null;
+
+function handleCommentsKey(ev) {
+  if (!commentsCtl) return;
+  const handled = () => ev.preventDefault();
+  switch (ev.key) {
+    case "j":
+    case "ArrowDown":
+      commentsCtl.scroll(60);
+      return handled();
+    case "k":
+    case "ArrowUp":
+      commentsCtl.scroll(-60);
+      return handled();
+    case "g":
+      commentsCtl.top();
+      return handled();
+    case "G":
+      commentsCtl.bottom();
+      return handled();
+    case "s":
+      commentsCtl.toggleSort();
+      return handled();
+    case "h":
+      commentsCtl.toggleMin();
+      return handled();
+    case "q":
+    case "Escape":
+      commentsCtl.close();
+      return handled();
+    default:
+      return undefined;
+  }
+}
+
+function handleNavKey(ev) {
+  const e = state.entries[state.selectedEntry];
+  const it = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey) || null;
+  const handled = () => ev.preventDefault();
+  switch (ev.key) {
+    case "j":
+    case "ArrowDown":
+      state.focus === "entries" ? moveEntryCursor(1) : moveItemCursor(1);
+      return handled();
+    case "k":
+    case "ArrowUp":
+      state.focus === "entries" ? moveEntryCursor(-1) : moveItemCursor(-1);
+      return handled();
+    case "h":
+    case "ArrowLeft":
+      setFocus("entries");
+      return handled();
+    case "l":
+    case "ArrowRight":
+      setFocus("items");
+      return handled();
+    case "Enter":
+      // A focused button (e.g. a detail-pane action) keeps its native Enter.
+      if (ev.target && ev.target.tagName === "BUTTON") return undefined;
+      if (state.focus === "entries") {
+        if (e) selectEntry(state.selectedEntry);
+      } else if (it) {
+        const a = selectedItemAnchor();
+        showItemActionMenu(it, a.x, a.y);
+      }
+      return handled();
+    case "/":
+      $("filter").focus();
+      return handled();
+    case "n":
+      newQuery();
+      return handled();
+    case "f":
+      if (e) newFilterStream(e);
+      return handled();
+    case "e":
+      if (e) e.isFilterStream ? editFilterStream(e) : editQuery(e);
+      return handled();
+    case "d":
+      if (e) deleteEntry(e);
+      return handled();
+    case "a":
+      if (e) markAllRead(e);
+      return handled();
+    case "J":
+      if (state.focus === "entries") moveEntry(state.selectedEntry, true);
+      return handled();
+    case "K":
+      if (state.focus === "entries") moveEntry(state.selectedEntry, false);
+      return handled();
+    case "o":
+      if (it) invoke("open_browser", { item: it });
+      return handled();
+    case "y":
+      if (it) copyText(it.url);
+      return handled();
+    case "c":
+      if (it) invoke("load_comments", { owner: it.repo_owner, repo: it.repo_name, number: it.number });
+      return handled();
+    case "x":
+      if (it) {
+        invoke("list_custom_actions", { kind: it.kind })
+          .then((acts) => {
+            if (!acts.length) {
+              setStatus("No custom actions for this item");
+              return;
+            }
+            const a = selectedItemAnchor();
+            showCustomActionsMenu(it, acts, a.x, a.y);
+          })
+          .catch((err) => setStatus(`custom actions: ${err}`, true));
+      }
+      return handled();
+    case "r":
+      // Context-dependent like the TUI: entries → re-sync the selected entry's
+      // root query, items → re-fetch the selected item.
+      if (state.focus === "entries") {
+        const q = e && rootQueryStr(e);
+        if (e && q) invoke("sync", { queryId: e.rootQueryId, queryStr: q });
+      } else if (it && e) {
+        invoke("refresh_item", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
+      }
+      return handled();
+    case "S": {
+      const q = e && rootQueryStr(e);
+      if (e && q) invoke("full_resync", { queryId: e.rootQueryId, queryStr: q });
+      return handled();
+    }
+    case "u":
+      if (e) applyPending(e.rootQueryId);
+      return handled();
+    case "?":
+      openHelpModal();
+      return handled();
+    default:
+      return undefined;
+  }
+}
+
+function onKeyDown(ev) {
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  switch (keyContext(ev)) {
+    case "menu": // the context menu's own capture handler owns Escape/clicks
+    case "modal": // form/settings modals handle Enter/Escape on their inputs
+      return;
+    case "input":
+      if (ev.key === "Escape") ev.target.blur();
+      return;
+    case "comments":
+      handleCommentsKey(ev);
+      return;
+    default:
+      handleNavKey(ev);
+  }
+}
+
+const KEY_HELP = [
+  ["j / k / ↓ / ↑", "Move selection (entries preview without syncing)"],
+  ["h / l / ← / →", "Focus the entries / items pane"],
+  ["Enter", "Entries: select & sync · Items: action menu"],
+  ["/", "Focus the filter box (Enter/Esc to leave)"],
+  ["n", "New query"],
+  ["f", "New filter stream under the selected query"],
+  ["e", "Edit the selected entry"],
+  ["d", "Delete the selected entry"],
+  ["a", "Mark all read in the selected entry"],
+  ["Shift+J / Shift+K", "Reorder the selected entry"],
+  ["o", "Open the selected item in the browser"],
+  ["y", "Copy the selected item's URL"],
+  ["c", "View comments"],
+  ["x", "Custom actions"],
+  ["r", "Entries: re-sync · Items: refresh the item"],
+  ["S", "Full resync of the selected root query"],
+  ["u", "Apply pending background updates"],
+  ["?", "This help"],
+  ["Comments: j/k g/G", "Scroll · jump to top/bottom"],
+  ["Comments: s / h / q", "Toggle sort · toggle minimized · close"],
+];
+
+function openHelpModal() {
+  document.querySelectorAll(".modal-overlay").forEach((m) => m.remove());
+  const overlay = el("div", { class: "modal-overlay" });
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey, true);
+  };
+  const onKey = (ev) => {
+    if (ev.key === "Escape" || ev.key === "q" || ev.key === "?") {
+      ev.preventDefault();
+      close();
+    }
+  };
+  document.addEventListener("keydown", onKey, true);
+  const rows = KEY_HELP.map(([keys, desc]) =>
+    el("div", { class: "help-row" }, [el("span", { class: "help-keys", text: keys }), el("span", { text: desc })])
+  );
+  overlay.appendChild(
+    el("div", { class: "modal-box help-box" }, [
+      el("div", { class: "modal-title", text: "Keyboard shortcuts" }),
+      ...rows,
+      el("div", { class: "modal-actions" }, [el("button", { text: "Close", onclick: close })]),
+    ])
+  );
+  document.body.appendChild(overlay);
 }
 
 // ── engine messages ────────────────────────────────────────────────────────--
@@ -951,6 +1265,17 @@ async function main() {
       refreshVisible();
     }, 150);
   });
+  // Leave the filter box with Enter/Escape and land on the item list, so `/` →
+  // type → Enter → j/k flows without the mouse.
+  $("filter").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === "Escape") {
+      ev.target.blur();
+      setFocus("items");
+    }
+  });
+
+  document.addEventListener("keydown", onKeyDown);
+  setFocus("entries");
 
   $("new-query").addEventListener("click", newQuery);
   $("settings-btn").addEventListener("click", openSettingsModal);
@@ -977,7 +1302,7 @@ async function main() {
   renderSidebar();
 
   // Prime cached items (and thus unread badges) for every root query, mirroring
-  // the TUI's startup load. Skip the first entry's root query: selectEntry(0)
+  // the TUI's startup load. Skip the first entry's root query: previewEntry(0)
   // below loads it, so priming it here would be a redundant double load.
   const firstRoot = state.entries.length ? state.entries[0].rootQueryId : null;
   const seen = new Set();
@@ -989,8 +1314,18 @@ async function main() {
   }
 
   setStatus(state.currentUser ? `Signed in as @${state.currentUser}` : "Not authenticated (set GH_TOKEN)");
-  if (state.entries.length) selectEntry(0);
-  else setStatus("No saved queries. Add one with the TUI/GUI, then reopen.");
+  if (state.entries.length) {
+    // Startup selection mirrors the GUI: sync only if the cache is stale, then
+    // let the engine background-sync the remaining stale queries.
+    previewEntry(0);
+    const e0 = state.entries[0];
+    if (!e0.isFilterStream) {
+      invoke("sync_if_stale", { queryId: e0.rootQueryId, queryStr: e0.queryStr });
+    }
+    invoke("enqueue_stale", { skipQueryId: firstRoot });
+  } else {
+    setStatus("No saved queries. Add one with the TUI/GUI, then reopen.");
+  }
 }
 
 main().catch((e) => setStatus(`init failed: ${e}`, true));
