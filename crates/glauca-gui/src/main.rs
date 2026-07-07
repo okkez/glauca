@@ -55,6 +55,12 @@ const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
 /// large list doesn't recompute on every character.
 const FILTER_DEBOUNCE: Duration = Duration::from_millis(150);
 
+/// Idle delay before in-memory settings are flushed to `gui.toml`, so a pane
+/// drag (which fires `on_resize` per mouse move) writes once at the end instead
+/// of doing disk I/O on the UI thread for every event. `on_quit` flushes
+/// synchronously, so a quit right after a change still persists it.
+const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+
 /// Key-binding context for the root view. The gpui-component `Input` uses its own
 /// `"Input"` context, so single-letter bindings scoped here never fire while the
 /// user is typing in the filter box or a dialog text field.
@@ -227,12 +233,17 @@ struct GlaucaApp {
     /// can't be used; `list` measures per-item with overdraw. Kept in sync with
     /// `filtered.len()` by `recompute_filtered`.
     items_list: ListState,
-    /// Drag-resizable left/center/right pane widths. Persisted to `GuiSettings`
-    /// on every resize and restored on startup via `pane_sizes`.
+    /// Drag-resizable left/center/right pane widths. Mirrored into
+    /// `settings.pane_sizes` on every resize and restored on startup.
     pane_state: Entity<ResizableState>,
-    /// Saved pane widths (px), left-to-right, used to seed the initial pane
-    /// sizes on startup. Empty on first run (falls back to defaults).
-    pane_sizes: Vec<f32>,
+    /// In-memory settings — the single source of truth while the app runs.
+    /// Loaded once in `main` and only ever written back from here (via
+    /// `schedule_settings_save` / the `on_quit` flush), so persisting one field
+    /// can never clobber another with stale on-disk state.
+    settings: GuiSettings,
+    /// Pending debounced settings flush; replacing it cancels the previous one
+    /// (same pattern as `filter_task`).
+    settings_save_task: Option<Task<()>>,
     /// Parsed state for the detail pane's Markdown body. Held as an entity so the
     /// parse is retained across frames. Content is synced from the selected item
     /// in `render_detail` (a no-op when unchanged).
@@ -281,12 +292,6 @@ struct GlaucaApp {
     filter_input: Entity<InputState>,
     /// Pending debounced re-filter task; replacing it cancels the previous one.
     filter_task: Option<Task<()>>,
-    /// Selected color theme. Drives the View menu's active marker and decides
-    /// whether window-appearance changes re-sync the theme (only in `System`).
-    theme_pref: ThemePreference,
-    /// Whether background-sync arrivals fire OS desktop notifications. Persisted
-    /// to `GuiSettings`; toggled from the View menu.
-    notifications_enabled: bool,
     /// Per-query session baseline for the notification "N updated" count, so the
     /// first load of each query establishes a baseline without notifying (no
     /// startup storm). See `glauca_core::notify::ItemTracker`.
@@ -300,7 +305,13 @@ struct GlaucaApp {
 }
 
 impl GlaucaApp {
-    fn new(engine: Engine, init: EngineInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        engine: Engine,
+        init: EngineInit,
+        settings: GuiSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Periodically drain engine messages and repaint while the window lives.
         // Use gpui's executor timer (not `smol::Timer`): its completion wakes the
         // platform event loop, so the loop keeps draining while the window is idle.
@@ -360,14 +371,6 @@ impl GlaucaApp {
         } = init;
         let pane_state = cx.new(|_| ResizableState::default());
         let detail_text = cx.new(|cx| TextViewState::markdown("", cx));
-        // `sync_interval_secs` is read separately in `main` (passed to the engine);
-        // this view only needs the presentation fields.
-        let GuiSettings {
-            pane_sizes,
-            theme,
-            notifications_enabled,
-            ..
-        } = GuiSettings::load();
         let mut app = Self {
             engine,
             cmd_tx,
@@ -390,7 +393,8 @@ impl GlaucaApp {
             left_scroll: ScrollHandle::new(),
             items_list: ListState::new(0, ListAlignment::Top, px(120.)),
             pane_state,
-            pane_sizes,
+            settings,
+            settings_save_task: None,
             detail_text,
             detail_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -409,8 +413,6 @@ impl GlaucaApp {
             review_action: ReviewEvent::Approve,
             filter_input,
             filter_task: None,
-            theme_pref: theme,
-            notifications_enabled,
             notif_tracker: ItemTracker::new(),
             custom_actions: CustomActions::load(),
             _subscriptions: vec![subscription],
@@ -418,11 +420,11 @@ impl GlaucaApp {
         // Apply the saved theme up front (System follows the OS appearance).
         app.apply_theme(Some(window), cx);
         // While following the OS, re-sync whenever its appearance flips. The
-        // closure re-reads `theme_pref` so pinning Light/Dark stops the follow.
+        // closure re-reads the theme setting so pinning Light/Dark stops the follow.
         let this = cx.entity();
         let appearance_sub = window.observe_window_appearance(move |window, cx| {
             this.update(cx, |app, cx| {
-                if app.theme_pref == ThemePreference::System {
+                if app.settings.theme == ThemePreference::System {
                     // Re-apply via `apply_theme` so the GitHub dark overlay is
                     // re-applied when the OS flips to dark.
                     app.apply_theme(Some(window), cx);
@@ -438,8 +440,8 @@ impl GlaucaApp {
         // prepaint — so seed the widths explicitly here. `on_next_frame` is a
         // one-shot, so no guard flag is needed.
         let pane_state = app.pane_state.clone();
-        let left = app.pane_sizes.first().copied();
-        let right = app.pane_sizes.get(2).copied();
+        let left = app.settings.pane_sizes.first().copied();
+        let right = app.settings.pane_sizes.get(2).copied();
         if left.is_some() || right.is_some() {
             window.on_next_frame(move |window, cx| {
                 pane_state.update(cx, |state, cx| {
@@ -460,12 +462,12 @@ impl GlaucaApp {
         app
     }
 
-    /// Apply `self.theme_pref` to the global gpui-component theme. `System`
+    /// Apply `self.settings.theme` to the global gpui-component theme. `System`
     /// follows the OS appearance; `Light`/`Dark` pin an explicit mode. When the
     /// resolved mode is dark, overlay the GitHub-flavored palette (the stock
     /// dark theme is near-black) — see `apply_github_dark_overlay`.
     fn apply_theme(&self, window: Option<&mut Window>, cx: &mut App) {
-        match self.theme_pref {
+        match self.settings.theme {
             ThemePreference::System => Theme::sync_system_appearance(window, cx),
             ThemePreference::Light => Theme::change(ThemeMode::Light, window, cx),
             ThemePreference::Dark => Theme::change(ThemeMode::Dark, window, cx),
@@ -475,14 +477,27 @@ impl GlaucaApp {
         }
     }
 
-    /// Switch the theme from the View menu: apply it, persist the choice
-    /// (preserving the other settings), and repaint.
+    /// Flush the in-memory settings to disk after a short idle delay, off the UI
+    /// thread. Replacing the task cancels a still-pending flush (same pattern as
+    /// `filter_task`), so a burst of changes — a pane drag most of all — writes
+    /// once. `on_quit` flushes synchronously to cover a quit inside the window.
+    fn schedule_settings_save(&mut self, cx: &mut Context<Self>) {
+        self.settings_save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SETTINGS_SAVE_DEBOUNCE).await;
+            let Ok(settings) = this.update(cx, |this, _| this.settings.clone()) else {
+                return; // entity gone (window closed); on_quit already flushed
+            };
+            cx.background_executor()
+                .spawn(async move { settings.save() })
+                .await;
+        }));
+    }
+
+    /// Switch the theme from the View menu: apply it, schedule a save, repaint.
     fn set_theme(&mut self, pref: ThemePreference, window: &mut Window, cx: &mut Context<Self>) {
-        self.theme_pref = pref;
+        self.settings.theme = pref;
         self.apply_theme(Some(window), cx);
-        let mut settings = GuiSettings::load();
-        settings.theme = pref;
-        settings.save();
+        self.schedule_settings_save(cx);
         cx.notify();
     }
 
@@ -508,13 +523,11 @@ impl GlaucaApp {
         self.set_theme(ThemePreference::Dark, window, cx);
     }
 
-    /// Toggle desktop notifications from the View menu: flip the flag, persist it
-    /// (preserving the other settings), and repaint the menu marker.
+    /// Toggle desktop notifications from the View menu: flip the flag, schedule
+    /// a save, and repaint the menu marker.
     fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
-        self.notifications_enabled = !self.notifications_enabled;
-        let mut settings = GuiSettings::load();
-        settings.notifications_enabled = self.notifications_enabled;
-        settings.save();
+        self.settings.notifications_enabled = !self.settings.notifications_enabled;
+        self.schedule_settings_save(cx);
         cx.notify();
     }
 
@@ -969,6 +982,10 @@ impl GlaucaApp {
     }
 
     fn on_quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
+        // Flush settings synchronously so a change made just before quitting
+        // (e.g. a pane drag) isn't lost with the debounced save still pending.
+        // One small TOML write; acceptable on the way out.
+        self.settings.save();
         cx.quit();
     }
 
@@ -1732,7 +1749,7 @@ impl GlaucaApp {
                         query_id,
                         &items,
                         background,
-                        self.notifications_enabled,
+                        self.settings.notifications_enabled,
                     )
                     .and_then(|n| query_label(&self.entries, query_id).map(|name| (name, n)));
                 if let Some((name, n)) = to_notify {
@@ -3244,8 +3261,8 @@ impl GlaucaApp {
         // View menu: theme selection (System / Light / Dark). The active choice
         // is marked with a leading check; the rest are blank-padded to align.
         let view_app = app.clone();
-        let current_theme = self.theme_pref;
-        let notifications_enabled = self.notifications_enabled;
+        let current_theme = self.settings.theme;
+        let notifications_enabled = self.settings.notifications_enabled;
         let theme_label = move |pref: ThemePreference, text: &str| {
             let mark = if pref == current_theme { "✓ " } else { "   " };
             format!("{mark}{text}")
@@ -3427,21 +3444,32 @@ impl Render for GlaucaApp {
                 div().w_full().flex_1().min_h_0().child(
                     h_resizable("panes")
                         .with_state(&self.pane_state)
-                        .on_resize(|state, _window, cx| {
-                            // Read-modify-write so persisting pane sizes doesn't
-                            // clobber the saved theme (and vice-versa).
-                            let mut settings = GuiSettings::load();
-                            settings.pane_sizes = state
-                                .read(cx)
-                                .sizes()
-                                .iter()
-                                .map(|p| f32::from(*p))
-                                .collect();
-                            settings.save();
+                        .on_resize({
+                            // Mirror the drag into the in-memory settings (the
+                            // single source of truth) and let the debounced task
+                            // flush once the drag pauses — no disk I/O per event.
+                            let this = cx.entity().downgrade();
+                            move |state, _window, cx| {
+                                let sizes: Vec<f32> = state
+                                    .read(cx)
+                                    .sizes()
+                                    .iter()
+                                    .map(|p| f32::from(*p))
+                                    .collect();
+                                let _ = this.update(cx, |app, cx| {
+                                    app.settings.pane_sizes = sizes;
+                                    app.schedule_settings_save(cx);
+                                });
+                            }
                         })
                         .child(
                             resizable_panel()
-                                .size(px(self.pane_sizes.first().copied().unwrap_or(280.)))
+                                .size(px(self
+                                    .settings
+                                    .pane_sizes
+                                    .first()
+                                    .copied()
+                                    .unwrap_or(280.)))
                                 .size_range(px(250.)..px(560.))
                                 .flex_none()
                                 .child(pane_frame(
@@ -3464,7 +3492,7 @@ impl Render for GlaucaApp {
                         )
                         .child(
                             resizable_panel()
-                                .size(px(self.pane_sizes.get(2).copied().unwrap_or(440.)))
+                                .size(px(self.settings.pane_sizes.get(2).copied().unwrap_or(440.)))
                                 .size_range(px(300.)..px(2400.))
                                 .flex_none()
                                 .child(pane_frame(
@@ -3529,6 +3557,10 @@ fn main() -> Result<()> {
     // any TLS use (the avatar HTTP client). Ignore the error if already set.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Load settings once; the GlaucaApp copy is the single source of truth from
+    // here on (only ever written back from there).
+    let settings = GuiSettings::load();
+
     // The engine runs on its own multi-thread tokio runtime; `rt` must outlive
     // the gpui event loop so its background tasks keep being driven.
     let rt = tokio::runtime::Runtime::new()?;
@@ -3539,7 +3571,7 @@ fn main() -> Result<()> {
         }
         let pool = db::open_pool(&db_path).await?;
         let gh = github::build_client()?;
-        Engine::start(pool, gh, GuiSettings::load().sync_interval_secs).await
+        Engine::start(pool, gh, settings.sync_interval_secs).await
     })?;
 
     gpui_platform::application()
@@ -3600,7 +3632,7 @@ fn main() -> Result<()> {
             cx.spawn(async move |cx| {
                 cx.open_window(WindowOptions::default(), move |window, cx| {
                     window.set_window_title("glauca");
-                    let view = cx.new(|cx| GlaucaApp::new(engine, init, window, cx));
+                    let view = cx.new(|cx| GlaucaApp::new(engine, init, settings, window, cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 })
                 .expect("Failed to open window");
