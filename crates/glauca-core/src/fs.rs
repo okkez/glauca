@@ -22,15 +22,18 @@ use std::path::Path;
 /// nor the parent directory is `fsync`ed. That is fine for best-effort
 /// presentation settings; add `fsync` here if durability ever matters.
 pub fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    // Validate the path up front, before creating any directory: without a file
+    // name we can't derive a temp name, so fail fast rather than leaving a new
+    // empty directory behind on invalid input.
     let file_name = path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "atomic_write: path has no file name",
         )
     })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let tmp_name = format!("{}.{}.tmp", file_name.to_string_lossy(), std::process::id());
     let tmp_path = path.with_file_name(tmp_name);
     std::fs::write(&tmp_path, contents)?;
