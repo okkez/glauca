@@ -33,8 +33,10 @@ use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_component::notification::Notification;
 use gpui_component::radio::RadioGroup;
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::{TextView, TextViewState, markdown};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
@@ -53,6 +55,12 @@ const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
 /// Idle delay before a filter keystroke triggers a re-filter, so typing fast in a
 /// large list doesn't recompute on every character.
 const FILTER_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Idle delay before in-memory settings are flushed to `gui.toml`, so a pane
+/// drag (which fires `on_resize` per mouse move) writes once at the end instead
+/// of doing disk I/O on the UI thread for every event. `on_quit` flushes
+/// synchronously, so a quit right after a change still persists it.
+const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Key-binding context for the root view. The gpui-component `Input` uses its own
 /// `"Input"` context, so single-letter bindings scoped here never fire while the
@@ -73,18 +81,21 @@ const COMMENTS_CONTEXT: &str = "GlaucaComments";
 /// Pixels scrolled per j/k keypress in the detail pane and comments overlay.
 const DETAIL_SCROLL_STEP: f32 = 48.0;
 
+/// Clamp a new vertical scroll offset into gpui's valid range. gpui offsets go
+/// negative downward: `0` is the top and `-max_offset_y` is the bottom, so a
+/// positive `delta_px` (scroll down) subtracts. Split out from `scroll_vertically`
+/// so the bounds logic is unit-testable without a laid-out `ScrollHandle` (whose
+/// `max_offset` is only known after a real layout pass).
+fn clamp_scroll_y(current_y: Pixels, delta_px: f32, max_offset_y: Pixels) -> Pixels {
+    // `-max_offset_y <= 0`, so the bounds are always ordered and `clamp` can't panic.
+    (current_y - px(delta_px)).clamp(-max_offset_y, px(0.))
+}
+
 /// Scroll a tracked `overflow_y_scroll` container by `delta_px` pixels (positive
-/// = down). gpui's scroll offset goes negative downward, clamped to the content.
+/// = down), clamped to the content via [`clamp_scroll_y`].
 fn scroll_vertically(handle: &ScrollHandle, delta_px: f32) {
     let mut off = handle.offset();
-    off.y -= px(delta_px);
-    let min_y = -handle.max_offset().y;
-    if off.y < min_y {
-        off.y = min_y;
-    }
-    if off.y > px(0.) {
-        off.y = px(0.);
-    }
+    off.y = clamp_scroll_y(off.y, delta_px, handle.max_offset().y);
     handle.set_offset(off);
 }
 
@@ -226,17 +237,28 @@ struct GlaucaApp {
     /// can't be used; `list` measures per-item with overdraw. Kept in sync with
     /// `filtered.len()` by `recompute_filtered`.
     items_list: ListState,
-    /// Drag-resizable left/center/right pane widths. Persisted to `GuiSettings`
-    /// on every resize and restored on startup via `pane_sizes`.
+    /// Drag-resizable left/center/right pane widths. Mirrored into
+    /// `settings.pane_sizes` on every resize and restored on startup.
     pane_state: Entity<ResizableState>,
-    /// Saved pane widths (px), left-to-right, used to seed the initial pane
-    /// sizes on startup. Empty on first run (falls back to defaults).
-    pane_sizes: Vec<f32>,
-    /// Parsed/virtualized state for the detail pane's Markdown body. Held as an
-    /// entity so the body renders via a virtualized `gpui::list` (only the
-    /// visible part is laid out), keeping pane-resize repaints cheap. Content is
-    /// synced from the selected item in `render_detail` (a no-op when unchanged).
+    /// In-memory settings — the single source of truth while the app runs.
+    /// Loaded once in `main` and only ever written back from here (via
+    /// `schedule_settings_save` / the `on_quit` flush), so persisting one field
+    /// can never clobber another with stale on-disk state.
+    settings: GuiSettings,
+    /// Pending debounced settings flush; replacing it cancels the previous one
+    /// (same pattern as `filter_task`).
+    settings_save_task: Option<Task<()>>,
+    /// Parsed state for the detail pane's Markdown body. Held as an entity so the
+    /// parse is retained across frames. Content is synced from the selected item
+    /// in `render_detail` (a no-op when unchanged).
     detail_text: Entity<TextViewState>,
+    /// Scroll position of the detail body. The body is a tracked
+    /// `overflow_y_scroll` container (same pattern as the comments overlay)
+    /// rather than `TextView::scrollable`: the TextView's internal ListState is
+    /// private to gpui-component, so keyboard scrolling (j/k in `ItemDetail`)
+    /// needs a handle we own. Reset to the top whenever the shown item changes,
+    /// mirroring the TUI's `detail_scroll = 0`.
+    detail_scroll: ScrollHandle,
     /// Root focus handle — grabbed on startup so single-letter keys work; the
     /// filter Input takes focus on `/` and returns it on Esc.
     focus_handle: FocusHandle,
@@ -274,12 +296,6 @@ struct GlaucaApp {
     filter_input: Entity<InputState>,
     /// Pending debounced re-filter task; replacing it cancels the previous one.
     filter_task: Option<Task<()>>,
-    /// Selected color theme. Drives the View menu's active marker and decides
-    /// whether window-appearance changes re-sync the theme (only in `System`).
-    theme_pref: ThemePreference,
-    /// Whether background-sync arrivals fire OS desktop notifications. Persisted
-    /// to `GuiSettings`; toggled from the View menu.
-    notifications_enabled: bool,
     /// Per-query session baseline for the notification "N updated" count, so the
     /// first load of each query establishes a baseline without notifying (no
     /// startup storm). See `glauca_core::notify::ItemTracker`.
@@ -293,20 +309,28 @@ struct GlaucaApp {
 }
 
 impl GlaucaApp {
-    fn new(engine: Engine, init: EngineInit, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        engine: Engine,
+        init: EngineInit,
+        settings: GuiSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Periodically drain engine messages and repaint while the window lives.
         // Use gpui's executor timer (not `smol::Timer`): its completion wakes the
         // platform event loop, so the loop keeps draining while the window is idle.
         // With `smol::Timer` the tick doesn't poke gpui's loop, so background-sync
         // messages sat undrained until the next user interaction (no "N updated"
         // banner appeared on its own).
-        cx.spawn(async move |this, cx| {
+        // `spawn_in` (not `spawn`) so `apply` gets a `&mut Window`: error
+        // messages surface as `push_notification` toasts, which need the window.
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(DRAIN_INTERVAL).await;
-                let result = this.update(cx, |this, cx| {
+                let result = this.update_in(cx, |this, window, cx| {
                     let mut changed = false;
                     while let Some(msg) = this.engine.try_recv() {
-                        this.apply(msg, cx);
+                        this.apply(msg, window, cx);
                         changed = true;
                     }
                     if changed {
@@ -337,6 +361,7 @@ impl GlaucaApp {
                         Timer::after(FILTER_DEBOUNCE).await;
                         let _ = this.update(cx, |this, cx| {
                             this.item_cursor = 0;
+                            this.reset_detail_scroll();
                             this.recompute_filtered();
                             cx.notify();
                         });
@@ -352,14 +377,6 @@ impl GlaucaApp {
         } = init;
         let pane_state = cx.new(|_| ResizableState::default());
         let detail_text = cx.new(|cx| TextViewState::markdown("", cx));
-        // `sync_interval_secs` is read separately in `main` (passed to the engine);
-        // this view only needs the presentation fields.
-        let GuiSettings {
-            pane_sizes,
-            theme,
-            notifications_enabled,
-            ..
-        } = GuiSettings::load();
         let mut app = Self {
             engine,
             cmd_tx,
@@ -382,8 +399,10 @@ impl GlaucaApp {
             left_scroll: ScrollHandle::new(),
             items_list: ListState::new(0, ListAlignment::Top, px(120.)),
             pane_state,
-            pane_sizes,
+            settings,
+            settings_save_task: None,
             detail_text,
+            detail_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             focus: Focus::QueryList,
             comments_open: false,
@@ -400,8 +419,6 @@ impl GlaucaApp {
             review_action: ReviewEvent::Approve,
             filter_input,
             filter_task: None,
-            theme_pref: theme,
-            notifications_enabled,
             notif_tracker: ItemTracker::new(),
             custom_actions: CustomActions::load(),
             _subscriptions: vec![subscription],
@@ -409,11 +426,11 @@ impl GlaucaApp {
         // Apply the saved theme up front (System follows the OS appearance).
         app.apply_theme(Some(window), cx);
         // While following the OS, re-sync whenever its appearance flips. The
-        // closure re-reads `theme_pref` so pinning Light/Dark stops the follow.
+        // closure re-reads the theme setting so pinning Light/Dark stops the follow.
         let this = cx.entity();
         let appearance_sub = window.observe_window_appearance(move |window, cx| {
             this.update(cx, |app, cx| {
-                if app.theme_pref == ThemePreference::System {
+                if app.settings.theme == ThemePreference::System {
                     // Re-apply via `apply_theme` so the GitHub dark overlay is
                     // re-applied when the OS flips to dark.
                     app.apply_theme(Some(window), cx);
@@ -421,6 +438,23 @@ impl GlaucaApp {
             });
         });
         app._subscriptions.push(appearance_sub);
+        // Flush pending settings whenever the app quits. Every quit trigger funnels
+        // through `cx.quit()` → `shutdown()`, which runs quit observers synchronously
+        // before dropping the entity, so the write always completes. On non-macOS,
+        // closing the last window quits the app, so an OS-initiated close (title-bar
+        // ×, Alt-F4) reaches this hook too; the `q`/menu Quit action reaches it via
+        // `cx.quit()`. (On macOS the sole window closing leaves the app running with
+        // settings still in memory — the eventual Cmd-Q flushes them.) Without this
+        // hook, a change made inside the debounce window right before an OS-initiated
+        // quit would be lost — a regression from the old eager per-event save.
+        let quit_sub = cx.on_app_quit(|app, _cx| {
+            // Cancel the still-pending debounce first so it can't race this write,
+            // then flush once synchronously.
+            app.settings_save_task = None;
+            app.settings.save();
+            async {}
+        });
+        app._subscriptions.push(quit_sub);
         app.prime();
         // Restore saved column widths into the authoritative ResizableState after
         // the first frame is drawn (panels are synced and the container has a real
@@ -429,8 +463,8 @@ impl GlaucaApp {
         // prepaint — so seed the widths explicitly here. `on_next_frame` is a
         // one-shot, so no guard flag is needed.
         let pane_state = app.pane_state.clone();
-        let left = app.pane_sizes.first().copied();
-        let right = app.pane_sizes.get(2).copied();
+        let left = app.settings.pane_sizes.first().copied();
+        let right = app.settings.pane_sizes.get(2).copied();
         if left.is_some() || right.is_some() {
             window.on_next_frame(move |window, cx| {
                 pane_state.update(cx, |state, cx| {
@@ -451,12 +485,12 @@ impl GlaucaApp {
         app
     }
 
-    /// Apply `self.theme_pref` to the global gpui-component theme. `System`
+    /// Apply `self.settings.theme` to the global gpui-component theme. `System`
     /// follows the OS appearance; `Light`/`Dark` pin an explicit mode. When the
     /// resolved mode is dark, overlay the GitHub-flavored palette (the stock
     /// dark theme is near-black) — see `apply_github_dark_overlay`.
     fn apply_theme(&self, window: Option<&mut Window>, cx: &mut App) {
-        match self.theme_pref {
+        match self.settings.theme {
             ThemePreference::System => Theme::sync_system_appearance(window, cx),
             ThemePreference::Light => Theme::change(ThemeMode::Light, window, cx),
             ThemePreference::Dark => Theme::change(ThemeMode::Dark, window, cx),
@@ -466,14 +500,28 @@ impl GlaucaApp {
         }
     }
 
-    /// Switch the theme from the View menu: apply it, persist the choice
-    /// (preserving the other settings), and repaint.
+    /// Flush the in-memory settings to disk after a short idle delay, off the UI
+    /// thread. Replacing the task cancels a still-pending flush (same pattern as
+    /// `filter_task`), so a burst of changes — a pane drag most of all — writes
+    /// once. The `on_app_quit` hook flushes synchronously so a change made inside
+    /// the debounce window right before quitting isn't lost.
+    fn schedule_settings_save(&mut self, cx: &mut Context<Self>) {
+        self.settings_save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SETTINGS_SAVE_DEBOUNCE).await;
+            let Ok(settings) = this.update(cx, |this, _| this.settings.clone()) else {
+                return; // entity gone; the on_app_quit hook already flushed on quit
+            };
+            cx.background_executor()
+                .spawn(async move { settings.save() })
+                .await;
+        }));
+    }
+
+    /// Switch the theme from the View menu: apply it, schedule a save, repaint.
     fn set_theme(&mut self, pref: ThemePreference, window: &mut Window, cx: &mut Context<Self>) {
-        self.theme_pref = pref;
+        self.settings.theme = pref;
         self.apply_theme(Some(window), cx);
-        let mut settings = GuiSettings::load();
-        settings.theme = pref;
-        settings.save();
+        self.schedule_settings_save(cx);
         cx.notify();
     }
 
@@ -499,13 +547,11 @@ impl GlaucaApp {
         self.set_theme(ThemePreference::Dark, window, cx);
     }
 
-    /// Toggle desktop notifications from the View menu: flip the flag, persist it
-    /// (preserving the other settings), and repaint the menu marker.
+    /// Toggle desktop notifications from the View menu: flip the flag, schedule
+    /// a save, and repaint the menu marker.
     fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
-        self.notifications_enabled = !self.notifications_enabled;
-        let mut settings = GuiSettings::load();
-        settings.notifications_enabled = self.notifications_enabled;
-        settings.save();
+        self.settings.notifications_enabled = !self.settings.notifications_enabled;
+        self.schedule_settings_save(cx);
         cx.notify();
     }
 
@@ -575,6 +621,7 @@ impl GlaucaApp {
         self.entry_cursor = index;
         self.items.clear();
         self.item_cursor = 0;
+        self.reset_detail_scroll();
         self.clear_pending();
         self.recompute_filtered();
         self.select_current_entry(true);
@@ -592,10 +639,18 @@ impl GlaucaApp {
         self.entry_cursor = index;
         self.items.clear();
         self.item_cursor = 0;
+        self.reset_detail_scroll();
         self.stream_filter = stream_filter;
         self.clear_pending();
         self.recompute_filtered();
         self.send(EngineCommand::LoadCached { query_id: root_id });
+    }
+
+    /// Scroll the detail body back to the top. Called whenever the shown item
+    /// changes (cursor move / entry switch / re-filter), mirroring the TUI's
+    /// `detail_scroll = 0` reset.
+    fn reset_detail_scroll(&self) {
+        self.detail_scroll.set_offset(point(px(0.), px(0.)));
     }
 
     // ── Keyboard action handlers ──────────────────────────────────────────────
@@ -613,12 +668,14 @@ impl GlaucaApp {
                 if self.item_cursor < max {
                     self.item_cursor += 1;
                     self.items_list.scroll_to_reveal_item(self.item_cursor);
+                    self.reset_detail_scroll();
                     self.mark_current_item_read(cx);
                 }
             }
-            // The detail body owns its own (virtualized) scroll — use the mouse
-            // wheel / scrollbar. j/k here is a no-op.
-            Focus::ItemDetail => {}
+            Focus::ItemDetail => {
+                scroll_vertically(&self.detail_scroll, DETAIL_SCROLL_STEP);
+                cx.notify();
+            }
         }
     }
 
@@ -634,11 +691,14 @@ impl GlaucaApp {
                 if self.item_cursor > 0 {
                     self.item_cursor -= 1;
                     self.items_list.scroll_to_reveal_item(self.item_cursor);
+                    self.reset_detail_scroll();
                     self.mark_current_item_read(cx);
                 }
             }
-            // See `on_move_down`: the detail body scrolls via mouse/scrollbar.
-            Focus::ItemDetail => {}
+            Focus::ItemDetail => {
+                scroll_vertically(&self.detail_scroll, -DETAIL_SCROLL_STEP);
+                cx.notify();
+            }
         }
     }
 
@@ -946,6 +1006,9 @@ impl GlaucaApp {
     }
 
     fn on_quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
+        // The `on_app_quit` hook (registered in `new`) flushes any pending settings
+        // synchronously during shutdown, so quitting via the `q`/menu action needs
+        // nothing special here beyond triggering the quit.
         cx.quit();
     }
 
@@ -1180,6 +1243,56 @@ impl GlaucaApp {
         }
     }
 
+    /// Open a two-`Input` dialog (the shared shell of the query / filter-stream
+    /// forms) and hand the trimmed values to `on_submit` on OK. Field
+    /// requirements stay with the caller: `on_submit` ignores invalid input,
+    /// matching the previous behavior where OK always closes the dialog.
+    fn open_two_field_form(
+        &mut self,
+        title: &'static str,
+        first: (&'static str, String),
+        second: (&'static str, String),
+        on_submit: impl Fn(&mut Self, String, String) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let first_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(first.0)
+                .default_value(first.1)
+        });
+        let second_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(second.0)
+                .default_value(second.1)
+        });
+        let this = cx.weak_entity();
+        let on_submit = std::rc::Rc::new(on_submit);
+        window.open_dialog(cx, move |dlg, _w, _cx| {
+            let (first_c, second_c) = (first_input.clone(), second_input.clone());
+            let (first_ok, second_ok) = (first_input.clone(), second_input.clone());
+            let this = this.clone();
+            let on_submit = on_submit.clone();
+            dlg.title(title)
+                .w(px(520.))
+                .content(move |content, _w, _cx| {
+                    content
+                        .gap_3()
+                        .child(Input::new(&first_c))
+                        .child(Input::new(&second_c))
+                })
+                .on_ok(move |_, _w, cx| {
+                    let a = first_ok.read(cx).value().trim().to_string();
+                    let b = second_ok.read(cx).value().trim().to_string();
+                    if let Some(app) = this.upgrade() {
+                        let on_submit = on_submit.clone();
+                        app.update(cx, move |app, _| on_submit(app, a, b));
+                    }
+                    true
+                })
+        });
+    }
+
     /// Add (`edit=None`) or edit (`edit=Some(id)`) a root query via a 2-field dialog.
     fn open_query_form(
         &mut self,
@@ -1189,52 +1302,31 @@ impl GlaucaApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("display name (optional)")
-                .default_value(init_name)
-        });
-        let query = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("GitHub search query (e.g. repo:owner/name is:pr is:open)")
-                .default_value(init_query)
-        });
-        let this = cx.weak_entity();
         let title = if edit.is_some() {
             "Edit query"
         } else {
             "Add query"
         };
-        window.open_dialog(cx, move |dlg, _w, _cx| {
-            let (name_c, query_c) = (name.clone(), query.clone());
-            let (name_ok, query_ok) = (name.clone(), query.clone());
-            let this = this.clone();
-            dlg.title(title)
-                .w(px(520.))
-                .content(move |content, _w, _cx| {
-                    content
-                        .gap_3()
-                        .child(Input::new(&name_c))
-                        .child(Input::new(&query_c))
-                })
-                .on_ok(move |_, _w, cx| {
-                    let n = name_ok.read(cx).value().to_string();
-                    let q = query_ok.read(cx).value().to_string();
-                    let (n, q) = (n.trim().to_string(), q.trim().to_string());
-                    if !q.is_empty() {
-                        let name = if n.is_empty() { None } else { Some(n) };
-                        if let Some(app) = this.upgrade() {
-                            app.update(cx, |app, _| match edit {
-                                Some(id) => {
-                                    app.send(EngineCommand::EditQuery { id, name, query: q })
-                                }
-                                None => app.send(EngineCommand::AddQuery { name, query: q }),
-                            });
-                        }
-                    }
-                    true
-                })
-        });
+        self.open_two_field_form(
+            title,
+            ("display name (optional)", init_name),
+            (
+                "GitHub search query (e.g. repo:owner/name is:pr is:open)",
+                init_query,
+            ),
+            move |app, n, q| {
+                if q.is_empty() {
+                    return; // the query string is required
+                }
+                let name = if n.is_empty() { None } else { Some(n) };
+                match edit {
+                    Some(id) => app.send(EngineCommand::EditQuery { id, name, query: q }),
+                    None => app.send(EngineCommand::AddQuery { name, query: q }),
+                }
+            },
+            window,
+            cx,
+        );
     }
 
     /// Add (`edit=None`) or edit (`edit=Some(id)`) a filter stream via a 2-field dialog.
@@ -1251,60 +1343,36 @@ impl GlaucaApp {
             init_name,
             init_filter,
         } = params;
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("display name")
-                .default_value(init_name)
-        });
-        let filter = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("filter (e.g. is:pr is:draft assignee:name)")
-                .default_value(init_filter)
-        });
-        let this = cx.weak_entity();
         let title = if edit.is_some() {
             "Edit filter stream"
         } else {
             "Add filter stream"
         };
-        window.open_dialog(cx, move |dlg, _w, _cx| {
-            let (name_c, filter_c) = (name.clone(), filter.clone());
-            let (name_ok, filter_ok) = (name.clone(), filter.clone());
-            let this = this.clone();
-            let kind = kind.clone();
-            dlg.title(title)
-                .w(px(520.))
-                .content(move |content, _w, _cx| {
-                    content
-                        .gap_3()
-                        .child(Input::new(&name_c))
-                        .child(Input::new(&filter_c))
-                })
-                .on_ok(move |_, _w, cx| {
-                    let n = name_ok.read(cx).value().to_string();
-                    let f = filter_ok.read(cx).value().to_string();
-                    let (n, f) = (n.trim().to_string(), f.trim().to_string());
-                    if !n.is_empty() && !f.is_empty() {
-                        let kind = kind.clone();
-                        if let Some(app) = this.upgrade() {
-                            app.update(cx, |app, _| match edit {
-                                Some(id) => app.send(EngineCommand::EditFilterStream {
-                                    id,
-                                    name: n,
-                                    filter: f,
-                                }),
-                                None => app.send(EngineCommand::AddFilterStream {
-                                    parent_id,
-                                    kind,
-                                    name: n,
-                                    filter: f,
-                                }),
-                            });
-                        }
-                    }
-                    true
-                })
-        });
+        self.open_two_field_form(
+            title,
+            ("display name", init_name),
+            ("filter (e.g. is:pr is:draft assignee:name)", init_filter),
+            move |app, n, f| {
+                if n.is_empty() || f.is_empty() {
+                    return; // both fields are required
+                }
+                match edit {
+                    Some(id) => app.send(EngineCommand::EditFilterStream {
+                        id,
+                        name: n,
+                        filter: f,
+                    }),
+                    None => app.send(EngineCommand::AddFilterStream {
+                        parent_id,
+                        kind: kind.clone(),
+                        name: n,
+                        filter: f,
+                    }),
+                }
+            },
+            window,
+            cx,
+        );
     }
 
     /// Issue the engine commands to (re)load the currently selected entry: load
@@ -1324,7 +1392,15 @@ impl GlaucaApp {
             return None;
         }
 
-        let query_str = entry.root_query_str().unwrap_or_default().to_string();
+        // A root query must carry its query string; an empty one would fire a
+        // pointless (and confusing) blank GitHub search, so skip the sync.
+        let query_str = match entry.root_query_str() {
+            Some(q) if !q.is_empty() => q.to_string(),
+            _ => {
+                tracing::warn!(query_id = root_id, "root query has no query string");
+                return None;
+            }
+        };
         if always_sync {
             self.send(EngineCommand::Sync {
                 query_id: root_id,
@@ -1641,6 +1717,44 @@ impl GlaucaApp {
         }
     }
 
+    /// Recompute unread badges for `query_id` from the live `self.items`. The
+    /// compute-then-insert split keeps the borrow checker satisfied inside one
+    /// `&mut self` method (the compute reads `entries`/`items`, the insert
+    /// mutates the map), so callers no longer clone `self.items` just to call
+    /// `recompute_unread`. That variant stays for items not yet applied to the
+    /// view (ItemsLoaded / apply_pending).
+    fn recompute_unread_live(&mut self, query_id: i64) {
+        let updates = compute_unread_counts(
+            &self.entries,
+            query_id,
+            &self.items,
+            self.current_user.as_deref(),
+        );
+        for (key, unread) in updates {
+            self.unread_counts.insert(key, unread);
+        }
+    }
+
+    /// Shared tail of the QueryDeleted / FilterStreamDeleted arms: drop the
+    /// entries rejected by `retain`, clamp the cursor, clear the inline filter,
+    /// and either reselect or empty the view. Returns true when the caller must
+    /// refilter (every entry is gone and the item list was cleared).
+    fn remove_entries_and_reselect(&mut self, retain: impl Fn(&LeftPaneEntry) -> bool) -> bool {
+        self.entries.retain(retain);
+        if self.entry_cursor >= self.entries.len() {
+            self.entry_cursor = self.entries.len().saturating_sub(1);
+        }
+        self.filter.clear();
+        if self.entries.is_empty() {
+            self.items.clear();
+            self.stream_filter = None;
+            true
+        } else {
+            self.select_index(self.entry_cursor);
+            false
+        }
+    }
+
     /// Mark the currently-selected item read (it is shown in the detail pane):
     /// record the `updated_at` it was read at, clear its in-memory `is_new`,
     /// recompute the current query's unread badges, and persist via the engine
@@ -1661,17 +1775,7 @@ impl GlaucaApp {
         let (repo_owner, repo_name, number) =
             (row.repo_owner.clone(), row.repo_name.clone(), row.number);
         if let Some(query_id) = self.selected_root_query_id() {
-            // Recompute from the live items (compute → then insert, to avoid
-            // borrowing self mutably while reading self.items/entries).
-            let updates = compute_unread_counts(
-                &self.entries,
-                query_id,
-                &self.items,
-                self.current_user.as_deref(),
-            );
-            for (key, unread) in updates {
-                self.unread_counts.insert(key, unread);
-            }
+            self.recompute_unread_live(query_id);
             self.send(EngineCommand::MarkItemRead {
                 query_id,
                 repo_owner,
@@ -1683,8 +1787,11 @@ impl GlaucaApp {
     }
 
     /// Apply a single engine message to GUI state. Mirrors the TUI's `run_app`
-    /// message handling (crates/glauca-tui/src/tui/mod.rs).
-    fn apply(&mut self, msg: AppMessage, cx: &mut Context<Self>) {
+    /// message handling (crates/glauca-tui/src/tui/mod.rs). `window` is used to
+    /// surface error messages as notification toasts (the status footer is
+    /// transient — the next status overwrites it, so errors alone would be easy
+    /// to miss).
+    fn apply(&mut self, msg: AppMessage, window: &mut Window, cx: &mut Context<Self>) {
         // Only rebuild the filtered-index cache when items/filter/stream_filter
         // actually change. Background sync floods `apply` with messages that don't
         // touch the visible list (other queries' ItemsLoaded, Status, BgSync*,
@@ -1709,7 +1816,7 @@ impl GlaucaApp {
                         query_id,
                         &items,
                         background,
-                        self.notifications_enabled,
+                        self.settings.notifications_enabled,
                     )
                     .and_then(|n| query_label(&self.entries, query_id).map(|name| (name, n)));
                 if let Some((name, n)) = to_notify {
@@ -1745,9 +1852,19 @@ impl GlaucaApp {
                 self.syncing = false;
                 self.status = Some(format!("Synced {count} items"));
             }
-            AppMessage::SyncError { error, .. } => {
+            AppMessage::SyncError {
+                error, background, ..
+            } => {
                 self.syncing = false;
                 self.status = Some(format!("Sync error: {error}"));
+                // Only foreground (user-driven) failures get a toast. A background
+                // worker fault keeps recurring every sync cycle; toasting each one
+                // would bury the notification layer, so those stay in the status
+                // line only.
+                if !background {
+                    window
+                        .push_notification(Notification::error(format!("Sync error: {error}")), cx);
+                }
             }
             AppMessage::BgSyncQueued(n) => self.bg_sync_pending += n,
             AppMessage::BgSyncJobDone => {
@@ -1824,38 +1941,16 @@ impl GlaucaApp {
                     needs_refilter = true;
                 }
                 if let Some(root_id) = root_id {
-                    let items = self.items.clone();
-                    self.recompute_unread(root_id, &items);
+                    self.recompute_unread_live(root_id);
                 }
                 self.status = Some("Filter stream updated".into());
             }
             AppMessage::QueryDeleted { query_id } => {
-                self.entries.retain(|e| e.root_query_id() != query_id);
-                if self.entry_cursor >= self.entries.len() {
-                    self.entry_cursor = self.entries.len().saturating_sub(1);
-                }
-                self.filter.clear();
-                if self.entries.is_empty() {
-                    self.items.clear();
-                    self.stream_filter = None;
-                    needs_refilter = true;
-                } else {
-                    self.select_index(self.entry_cursor);
-                }
+                needs_refilter |=
+                    self.remove_entries_and_reselect(|e| e.root_query_id() != query_id);
             }
             AppMessage::FilterStreamDeleted { id } => {
-                self.entries.retain(|e| e.id() != id);
-                if self.entry_cursor >= self.entries.len() {
-                    self.entry_cursor = self.entries.len().saturating_sub(1);
-                }
-                self.filter.clear();
-                if self.entries.is_empty() {
-                    self.items.clear();
-                    self.stream_filter = None;
-                    needs_refilter = true;
-                } else {
-                    self.select_index(self.entry_cursor);
-                }
+                needs_refilter |= self.remove_entries_and_reselect(|e| e.id() != id);
             }
             AppMessage::QueriesSwapped {
                 upper_id,
@@ -1890,7 +1985,10 @@ impl GlaucaApp {
 
             // ── Action results ──────────────────────────────────────────────────
             AppMessage::ActionDone(s) => self.status = Some(s),
-            AppMessage::ActionError(e) => self.status = Some(format!("Error: {e}")),
+            AppMessage::ActionError(e) => {
+                self.status = Some(format!("Error: {e}"));
+                window.push_notification(Notification::error(e), cx);
+            }
 
             // ── Comments overlay ────────────────────────────────────────────────
             AppMessage::CommentsLoaded(comments) => {
@@ -1902,6 +2000,10 @@ impl GlaucaApp {
             AppMessage::CommentsFailed(e) => {
                 self.comments_loading = false;
                 self.status = Some(format!("Failed to load comments: {e}"));
+                window.push_notification(
+                    Notification::error(format!("Failed to load comments: {e}")),
+                    cx,
+                );
             }
         }
         if needs_refilter {
@@ -2556,12 +2658,14 @@ impl GlaucaApp {
                 cx,
             ));
 
-        // Body rendered as Markdown via gpui-component's `TextView`, in its
-        // virtualized `scrollable(true)` mode: only the visible part is laid out
-        // each frame, so resizing the pane (which changes the wrap width) stays
-        // cheap. The body owns its own scroll (mouse wheel / scrollbar). Content
-        // is synced into the retained `detail_text` state; `set_text` is a no-op
-        // unless the selected item's body actually changed.
+        // Body rendered as Markdown via gpui-component's `TextView`, inside a
+        // tracked `overflow_y_scroll` container (the comments-overlay pattern)
+        // instead of the TextView's own virtualized `scrollable(true)` mode: that
+        // mode's ListState is private to gpui-component, which would leave the
+        // j/k keyboard scroll (Focus::ItemDetail) with nothing to drive. The
+        // Markdown parse is still retained in `detail_text` (`set_text` is a
+        // no-op unless the selected item's body actually changed); only layout
+        // re-runs on pane resize.
         let body = match item
             .body
             .as_deref()
@@ -2574,16 +2678,21 @@ impl GlaucaApp {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px_4()
-                    .pb_4()
-                    .pt_2()
                     .border_t_1()
                     .border_color(cx.theme().border)
+                    .relative()
                     .child(
-                        TextView::new(&self.detail_text)
-                            .scrollable(true)
-                            .selectable(true),
+                        div()
+                            .id("detail-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.detail_scroll)
+                            .px_4()
+                            .pb_4()
+                            .pt_2()
+                            .child(TextView::new(&self.detail_text).selectable(true)),
                     )
+                    .vertical_scrollbar(&self.detail_scroll)
                     .into_any_element()
             }
             None => div()
@@ -3156,7 +3265,10 @@ fn highlight_title(title: &str, ranges: Vec<(usize, usize)>, cx: &App) -> impl I
 /// empty description marks a section-header row. Kept in sync by hand with the
 /// `KeyBinding::new(...)` table registered in `main()`.
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("j / k  ·  ↓ / ↑", "Move cursor down / up"),
+    (
+        "j / k  ·  ↓ / ↑",
+        "Move cursor down / up (detail pane: scroll the body)",
+    ),
     ("h / l  ·  ← / →", "Focus previous / next pane"),
     ("Enter", "Activate (commit selection / item action menu)"),
     ("/", "Focus the filter input"),
@@ -3211,8 +3323,8 @@ impl GlaucaApp {
         // View menu: theme selection (System / Light / Dark). The active choice
         // is marked with a leading check; the rest are blank-padded to align.
         let view_app = app.clone();
-        let current_theme = self.theme_pref;
-        let notifications_enabled = self.notifications_enabled;
+        let current_theme = self.settings.theme;
+        let notifications_enabled = self.settings.notifications_enabled;
         let theme_label = move |pref: ThemePreference, text: &str| {
             let mark = if pref == current_theme { "✓ " } else { "   " };
             format!("{mark}{text}")
@@ -3222,24 +3334,20 @@ impl GlaucaApp {
             .ghost()
             .label("View")
             .dropdown_menu(move |menu, _w, _cx| {
-                let menu = app_menu_item(
-                    menu,
-                    &view_app,
-                    theme_label(ThemePreference::System, "Theme: System"),
-                    |this, w, cx| this.set_theme(ThemePreference::System, w, cx),
-                );
-                let menu = app_menu_item(
-                    menu,
-                    &view_app,
-                    theme_label(ThemePreference::Light, "Theme: Light"),
-                    |this, w, cx| this.set_theme(ThemePreference::Light, w, cx),
-                );
-                let menu = app_menu_item(
-                    menu,
-                    &view_app,
-                    theme_label(ThemePreference::Dark, "Theme: Dark"),
-                    |this, w, cx| this.set_theme(ThemePreference::Dark, w, cx),
-                );
+                let menu = [
+                    (ThemePreference::System, "Theme: System"),
+                    (ThemePreference::Light, "Theme: Light"),
+                    (ThemePreference::Dark, "Theme: Dark"),
+                ]
+                .into_iter()
+                .fold(menu, |menu, (pref, text)| {
+                    app_menu_item(
+                        menu,
+                        &view_app,
+                        theme_label(pref, text),
+                        move |this, w, cx| this.set_theme(pref, w, cx),
+                    )
+                });
                 let menu = menu.separator();
                 let notif_mark = if notifications_enabled { "✓ " } else { "   " };
                 app_menu_item(
@@ -3394,21 +3502,32 @@ impl Render for GlaucaApp {
                 div().w_full().flex_1().min_h_0().child(
                     h_resizable("panes")
                         .with_state(&self.pane_state)
-                        .on_resize(|state, _window, cx| {
-                            // Read-modify-write so persisting pane sizes doesn't
-                            // clobber the saved theme (and vice-versa).
-                            let mut settings = GuiSettings::load();
-                            settings.pane_sizes = state
-                                .read(cx)
-                                .sizes()
-                                .iter()
-                                .map(|p| f32::from(*p))
-                                .collect();
-                            settings.save();
+                        .on_resize({
+                            // Mirror the drag into the in-memory settings (the
+                            // single source of truth) and let the debounced task
+                            // flush once the drag pauses — no disk I/O per event.
+                            let this = cx.entity().downgrade();
+                            move |state, _window, cx| {
+                                let sizes: Vec<f32> = state
+                                    .read(cx)
+                                    .sizes()
+                                    .iter()
+                                    .map(|p| f32::from(*p))
+                                    .collect();
+                                let _ = this.update(cx, |app, cx| {
+                                    app.settings.pane_sizes = sizes;
+                                    app.schedule_settings_save(cx);
+                                });
+                            }
                         })
                         .child(
                             resizable_panel()
-                                .size(px(self.pane_sizes.first().copied().unwrap_or(280.)))
+                                .size(px(self
+                                    .settings
+                                    .pane_sizes
+                                    .first()
+                                    .copied()
+                                    .unwrap_or(280.)))
                                 .size_range(px(250.)..px(560.))
                                 .flex_none()
                                 .child(pane_frame(
@@ -3431,7 +3550,7 @@ impl Render for GlaucaApp {
                         )
                         .child(
                             resizable_panel()
-                                .size(px(self.pane_sizes.get(2).copied().unwrap_or(440.)))
+                                .size(px(self.settings.pane_sizes.get(2).copied().unwrap_or(440.)))
                                 .size_range(px(300.)..px(2400.))
                                 .flex_none()
                                 .child(pane_frame(
@@ -3496,6 +3615,10 @@ fn main() -> Result<()> {
     // any TLS use (the avatar HTTP client). Ignore the error if already set.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Load settings once; the GlaucaApp copy is the single source of truth from
+    // here on (only ever written back from there).
+    let settings = GuiSettings::load();
+
     // The engine runs on its own multi-thread tokio runtime; `rt` must outlive
     // the gpui event loop so its background tasks keep being driven.
     let rt = tokio::runtime::Runtime::new()?;
@@ -3506,7 +3629,7 @@ fn main() -> Result<()> {
         }
         let pool = db::open_pool(&db_path).await?;
         let gh = github::build_client()?;
-        Engine::start(pool, gh, GuiSettings::load().sync_interval_secs).await
+        Engine::start(pool, gh, settings.sync_interval_secs).await
     })?;
 
     gpui_platform::application()
@@ -3567,7 +3690,7 @@ fn main() -> Result<()> {
             cx.spawn(async move |cx| {
                 cx.open_window(WindowOptions::default(), move |window, cx| {
                     window.set_window_title("glauca");
-                    let view = cx.new(|cx| GlaucaApp::new(engine, init, window, cx));
+                    let view = cx.new(|cx| GlaucaApp::new(engine, init, settings, window, cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 })
                 .expect("Failed to open window");
@@ -3578,4 +3701,38 @@ fn main() -> Result<()> {
     // Keep the runtime alive across the whole GUI lifetime.
     drop(rt);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DETAIL_SCROLL_STEP, clamp_scroll_y};
+    use gpui::px;
+
+    #[test]
+    fn scroll_down_within_bounds_moves_offset_negative() {
+        // From the top, one step down: offset goes negative by the step.
+        assert_eq!(
+            clamp_scroll_y(px(0.), DETAIL_SCROLL_STEP, px(200.)),
+            px(-DETAIL_SCROLL_STEP)
+        );
+    }
+
+    #[test]
+    fn scroll_down_past_bottom_clamps_to_max() {
+        // Near the bottom, a further step down is clamped to -max_offset.
+        assert_eq!(clamp_scroll_y(px(-180.), 48., px(200.)), px(-200.));
+    }
+
+    #[test]
+    fn scroll_up_past_top_clamps_to_zero() {
+        // Just below the top, scrolling up (negative delta) can't exceed 0.
+        assert_eq!(clamp_scroll_y(px(-20.), -48., px(200.)), px(0.));
+    }
+
+    #[test]
+    fn content_shorter_than_viewport_stays_pinned_at_top() {
+        // max_offset == 0 (content fits): every scroll stays at the top.
+        assert_eq!(clamp_scroll_y(px(0.), 48., px(0.)), px(0.));
+        assert_eq!(clamp_scroll_y(px(0.), -48., px(0.)), px(0.));
+    }
 }

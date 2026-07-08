@@ -53,6 +53,11 @@ pub enum AppMessage {
     SyncError {
         query_id: i64,
         error: String,
+        /// True when the failure came from the background sync worker rather than
+        /// a user-driven sync. Front-ends surface foreground errors prominently
+        /// (e.g. a toast) but keep background failures quiet (status line only) so
+        /// a persistent fault doesn't spam a notification every sync cycle.
+        background: bool,
     },
     /// N background sync jobs were added to the worker queue.
     BgSyncQueued(usize),
@@ -474,6 +479,7 @@ pub async fn sync_task(
                     .send(AppMessage::SyncError {
                         query_id,
                         error: format!("GitHub API error: {e}"),
+                        background: opts.background,
                     })
                     .await;
                 return;
@@ -496,6 +502,7 @@ pub async fn sync_task(
                             .send(AppMessage::SyncError {
                                 query_id,
                                 error: format!("db write error: {e}"),
+                                background: opts.background,
                             })
                             .await;
                         return;
@@ -546,6 +553,7 @@ pub async fn sync_task(
             .send(AppMessage::SyncError {
                 query_id,
                 error: format!("mark fetched error: {e}"),
+                background: opts.background,
             })
             .await;
         return;
