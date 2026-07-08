@@ -9,7 +9,12 @@ use glauca_core::types::*;
 use super::*;
 
 impl GlaucaApp {
-    pub(crate) fn on_new_query(&mut self, _: &NewQuery, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_new_query(
+        &mut self,
+        _: &NewQuery,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.new_query(window, cx);
     }
 
@@ -52,12 +57,22 @@ impl GlaucaApp {
         );
     }
 
-    pub(crate) fn on_edit_entry(&mut self, _: &EditEntry, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_edit_entry(
+        &mut self,
+        _: &EditEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.edit_entry_at(self.entry_cursor, window, cx);
     }
 
     /// Open the edit form for the entry at `index` (query or filter stream).
-    pub(crate) fn edit_entry_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn edit_entry_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(LeftPaneEntry::Query(q)) = self.entries.get(index) {
             let (id, name, query) = (q.id, q.label.clone(), q.query_str.clone());
             self.open_query_form(Some(id), name, query, window, cx);

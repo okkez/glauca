@@ -10,7 +10,12 @@ use super::*;
 
 impl GlaucaApp {
     /// `c` — open the comments overlay for the selected item.
-    pub(crate) fn on_open_comments(&mut self, _: &OpenComments, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_open_comments(
+        &mut self,
+        _: &OpenComments,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.focus == Focus::QueryList {
             return;
         }
@@ -22,7 +27,12 @@ impl GlaucaApp {
     /// Open the comments overlay for `item` and request its comments. Clearing
     /// `comments` + setting `comments_loading` first means a quick reopen never
     /// shows the previous item's comments.
-    pub(crate) fn open_comments(&mut self, item: ItemEntry, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_comments(
+        &mut self,
+        item: ItemEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.comments.clear();
         self.comments_loading = true;
         self.comments_open = true;
@@ -69,7 +79,12 @@ impl GlaucaApp {
         cx.notify();
     }
 
-    pub(crate) fn on_comments_top(&mut self, _: &CommentsTop, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_comments_top(
+        &mut self,
+        _: &CommentsTop,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.comments_scroll.set_offset(point(px(0.), px(0.)));
         cx.notify();
     }

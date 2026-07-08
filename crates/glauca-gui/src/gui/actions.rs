@@ -38,7 +38,12 @@ impl GlaucaApp {
 
     /// `y` — copy the selected item's URL to the clipboard. Also available via
     /// the action menu.
-    pub(crate) fn on_copy_url(&mut self, _: &CopyUrl, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_copy_url(
+        &mut self,
+        _: &CopyUrl,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.focus == Focus::QueryList {
             return;
         }

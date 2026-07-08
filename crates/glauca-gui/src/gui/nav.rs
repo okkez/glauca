@@ -98,7 +98,12 @@ impl GlaucaApp {
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
     }
 
-    pub(crate) fn on_move_down(&mut self, _: &MoveDown, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_move_down(
+        &mut self,
+        _: &MoveDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.focus {
             Focus::QueryList => {
                 if self.entry_cursor + 1 < self.entries.len() {
@@ -146,7 +151,12 @@ impl GlaucaApp {
     }
 
     /// `h` cycles focus left: ItemDetail → ItemList → QueryList (clamped).
-    pub(crate) fn on_focus_left(&mut self, _: &FocusLeft, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_focus_left(
+        &mut self,
+        _: &FocusLeft,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.focus = match self.focus {
             Focus::ItemDetail => Focus::ItemList,
             Focus::ItemList | Focus::QueryList => Focus::QueryList,
@@ -155,7 +165,12 @@ impl GlaucaApp {
     }
 
     /// `l` cycles focus right: QueryList → ItemList → ItemDetail (clamped).
-    pub(crate) fn on_focus_right(&mut self, _: &FocusRight, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_focus_right(
+        &mut self,
+        _: &FocusRight,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.focus = match self.focus {
             Focus::QueryList => Focus::ItemList,
             Focus::ItemList | Focus::ItemDetail => Focus::ItemDetail,
@@ -163,7 +178,12 @@ impl GlaucaApp {
         cx.notify();
     }
 
-    pub(crate) fn on_activate(&mut self, _: &Activate, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_activate(
+        &mut self,
+        _: &Activate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.focus {
             // Commit the previewed entry (sync + mark viewed).
             Focus::QueryList => {
@@ -185,7 +205,12 @@ impl GlaucaApp {
         }
     }
 
-    pub(crate) fn on_focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_focus_filter(
+        &mut self,
+        _: &FocusFilter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.filter_input.focus_handle(cx).focus(window, cx);
     }
 

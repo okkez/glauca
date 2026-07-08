@@ -11,7 +11,12 @@ use glauca_core::types::*;
 use super::*;
 
 impl GlaucaApp {
-    pub(crate) fn on_delete_entry(&mut self, _: &DeleteEntry, _window: &mut Window, _cx: &mut Context<Self>) {
+    pub(crate) fn on_delete_entry(
+        &mut self,
+        _: &DeleteEntry,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         if self.focus != Focus::QueryList {
             return;
         }
@@ -49,11 +54,21 @@ impl GlaucaApp {
         self.send(EngineCommand::MarkAllRead { query_id, filter });
     }
 
-    pub(crate) fn on_reorder_down(&mut self, _: &ReorderDown, _window: &mut Window, _cx: &mut Context<Self>) {
+    pub(crate) fn on_reorder_down(
+        &mut self,
+        _: &ReorderDown,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         self.reorder(true);
     }
 
-    pub(crate) fn on_reorder_up(&mut self, _: &ReorderUp, _window: &mut Window, _cx: &mut Context<Self>) {
+    pub(crate) fn on_reorder_up(
+        &mut self,
+        _: &ReorderUp,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         self.reorder(false);
     }
 
@@ -231,7 +246,10 @@ impl GlaucaApp {
     /// entries rejected by `retain`, clamp the cursor, clear the inline filter,
     /// and either reselect or empty the view. Returns true when the caller must
     /// refilter (every entry is gone and the item list was cleared).
-    pub(crate) fn remove_entries_and_reselect(&mut self, retain: impl Fn(&LeftPaneEntry) -> bool) -> bool {
+    pub(crate) fn remove_entries_and_reselect(
+        &mut self,
+        retain: impl Fn(&LeftPaneEntry) -> bool,
+    ) -> bool {
         self.entries.retain(retain);
         if self.entry_cursor >= self.entries.len() {
             self.entry_cursor = self.entries.len().saturating_sub(1);

@@ -56,7 +56,12 @@ impl GlaucaApp {
     /// optional body, and Cancel / Submit. Radio order matches `review_action`'s
     /// index mapping below. Opened by the "Approve PR" menu item (defaults to
     /// Approve). Uses explicit buttons (not `on_ok`) so the actions are visible.
-    pub(crate) fn open_review_dialog(&mut self, item: ItemEntry, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_review_dialog(
+        &mut self,
+        item: ItemEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.review_action = ReviewEvent::Approve;
         let body = cx.new(|cx| {
             InputState::new(window, cx)
@@ -154,7 +159,12 @@ impl GlaucaApp {
         });
     }
 
-    pub(crate) fn open_merge_dialog(&mut self, item: ItemEntry, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_merge_dialog(
+        &mut self,
+        item: ItemEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let this = cx.weak_entity();
         window.open_dialog(cx, move |dlg, _w, _cx| {
             let this = this.clone();

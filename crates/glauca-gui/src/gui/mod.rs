@@ -31,21 +31,21 @@ use gpui_component::text::TextViewState;
 use gpui_component::{StyledExt, WindowExt, h_flex};
 use tokio::sync::mpsc::Sender;
 
-mod assets;
-mod render;
-mod detail;
-mod setup;
-mod nav;
 mod actions;
-mod dialogs;
-mod forms;
-mod entries;
+mod assets;
 mod comments;
+mod detail;
+mod dialogs;
+mod entries;
+mod forms;
 mod menu;
 mod message;
+mod nav;
+mod render;
 mod run;
 mod scroll;
 mod settings;
+mod setup;
 mod widgets;
 pub(crate) use menu::app_menu_item;
 pub(crate) use run::run;
@@ -283,6 +283,4 @@ impl GlaucaApp {
     // ── Entry add / edit dialogs ───────────────────────────────────────────────
 
     // ── Item actions ───────────────────────────────────────────────────────────
-
 }
-

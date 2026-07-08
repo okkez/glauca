@@ -226,7 +226,12 @@ impl GlaucaApp {
     }
 
     /// Switch the theme from the View menu: apply it, schedule a save, repaint.
-    pub(crate) fn set_theme(&mut self, pref: ThemePreference, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn set_theme(
+        &mut self,
+        pref: ThemePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.settings.theme = pref;
         self.apply_theme(Some(window), cx);
         self.schedule_settings_save(cx);
@@ -251,7 +256,12 @@ impl GlaucaApp {
         self.set_theme(ThemePreference::Light, window, cx);
     }
 
-    pub(crate) fn on_set_theme_dark(&mut self, _: &SetThemeDark, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_set_theme_dark(
+        &mut self,
+        _: &SetThemeDark,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.set_theme(ThemePreference::Dark, window, cx);
     }
 
