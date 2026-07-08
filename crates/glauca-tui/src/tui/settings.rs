@@ -66,31 +66,14 @@ impl TuiSettings {
             .unwrap_or_default()
     }
 
-    /// Persist settings, creating the parent directory if needed. Best-effort:
-    /// any I/O or serialization error is ignored.
-    ///
-    /// The write is atomic (temp file + rename) rather than a direct
-    /// `fs::write`, which truncates then writes: a crash or a concurrent writer
-    /// mid-write could otherwise leave a half-written file, and `load` treats any
-    /// parse failure as "reset to defaults" — silently losing every preference.
-    /// `rename` on the same directory is atomic, so a reader sees either the old
-    /// file or the fully-written new one, never a torn one. The temp name is
-    /// process-scoped so two glauca instances don't clobber each other's temp.
+    /// Persist settings via `glauca_core::fs::atomic_write` (temp file + rename;
+    /// see there for why). Best-effort: any I/O or serialization error is ignored.
     pub fn save(&self) {
         let Some(path) = Self::path() else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(serialized) = toml::to_string_pretty(self) {
-            let tmp_path = path.with_file_name(format!("tui.toml.{}.tmp", std::process::id()));
-            if std::fs::write(&tmp_path, serialized).is_ok() {
-                // If the rename fails, drop the temp file so it doesn't linger.
-                if std::fs::rename(&tmp_path, &path).is_err() {
-                    let _ = std::fs::remove_file(&tmp_path);
-                }
-            }
+            let _ = glauca_core::fs::atomic_write(&path, serialized);
         }
     }
 }
