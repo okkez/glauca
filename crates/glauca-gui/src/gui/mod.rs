@@ -274,13 +274,3 @@ pub(crate) struct GlaucaApp {
     /// Keeps the `filter_input` subscription alive for the view's lifetime.
     _subscriptions: Vec<Subscription>,
 }
-
-impl GlaucaApp {
-    // ── Keyboard action handlers ──────────────────────────────────────────────
-
-    // ── Comments overlay keys (scoped to COMMENTS_CONTEXT) ───────────────────────
-
-    // ── Entry add / edit dialogs ───────────────────────────────────────────────
-
-    // ── Item actions ───────────────────────────────────────────────────────────
-}
