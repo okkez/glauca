@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/glauca-core", "crates/glauca-tui", "crates/glauca-gui"]
+members = ["crates/glauca-core", "crates/glauca-tui", "crates/glauca-gui", "crates/glauca-tauri"]
 resolver = "3"
 
 [workspace.package]

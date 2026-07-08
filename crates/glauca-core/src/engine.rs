@@ -19,6 +19,14 @@ use tracing::{debug, info, instrument, warn};
 
 // ── Background messages ──────────────────────────────────────────────────────
 
+/// Messages the engine emits to the front-end.
+///
+/// Serialized adjacently tagged (`{"type": "ItemsLoaded", "data": {…}}`) for the
+/// web front-end (glauca-tauri), which forwards each one to JavaScript over the
+/// Tauri event bus. The adjacent representation handles every variant shape
+/// (struct/newtype/tuple/unit) uniformly. The TUI/GUI never serialize it.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", content = "data")]
 pub enum AppMessage {
     ItemsLoaded {
         query_id: i64,
@@ -291,7 +299,8 @@ pub async fn execute_comment(url: &str, kind: &str, body: &str) -> anyhow::Resul
 }
 
 /// A GitHub pull-request review event, submitted via `gh pr review`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReviewEvent {
     Comment,
     Approve,
@@ -746,6 +755,7 @@ pub async fn refresh_timer_task(
 
 /// Initial state produced by `Engine::start`: the left-pane entries (root queries
 /// interleaved with their filter streams) and the authenticated user login.
+#[derive(serde::Serialize)]
 pub struct EngineInit {
     pub entries: Vec<LeftPaneEntry>,
     pub current_user: Option<String>,
@@ -874,6 +884,44 @@ pub enum EngineCommand {
     },
 }
 
+/// Build the left-pane entries from the DB: root queries in position order, each
+/// followed by its filter streams. This is the single source of the left-pane
+/// ordering — `Engine::start` uses it for the initial state and front-ends
+/// (glauca-tauri's `list_entries`) reuse it to rebuild the pane after structural
+/// changes, so the interleaving logic is never re-implemented per front-end.
+///
+/// A DB read failure here is propagated, not swallowed — so `Engine::start`
+/// aborts launch rather than starting with an empty left pane. This is
+/// deliberate: the reads run against a freshly-opened, freshly-migrated pool, so
+/// a failure means something is genuinely wrong (corruption, disk error, schema
+/// mismatch), and showing an empty pane would look like the user's saved queries
+/// silently vanished — worse than failing loudly.
+pub async fn load_left_pane_entries(pool: &SqlitePool) -> anyhow::Result<Vec<LeftPaneEntry>> {
+    let query_rows = db::list_queries(pool).await?;
+    let mut entries: Vec<LeftPaneEntry> = Vec::new();
+    for r in query_rows {
+        let streams = db::list_filter_streams(pool, r.id).await?;
+        let kind = r.kind.clone();
+        let label = r.name.clone().unwrap_or_else(|| r.query.clone());
+        entries.push(LeftPaneEntry::Query(QueryEntry {
+            id: r.id,
+            label,
+            query_str: r.query.clone(),
+            kind: kind.clone(),
+        }));
+        for s in streams {
+            entries.push(LeftPaneEntry::FilterStream(FilterStreamEntry {
+                id: s.id,
+                parent_id: s.parent_id,
+                name: s.name,
+                filter: s.filter,
+                kind: kind.clone(),
+            }));
+        }
+    }
+    Ok(entries)
+}
+
 /// Async engine shared by the TUI and GUI front-ends. Owns the background worker,
 /// refresh timer, and command-handling loop; exposes a command channel in and an
 /// `AppMessage` channel out.
@@ -891,30 +939,7 @@ impl Engine {
         gh: Octocrab,
         sync_interval_secs: u64,
     ) -> anyhow::Result<(Engine, EngineInit)> {
-        let query_rows = db::list_queries(&pool).await.unwrap_or_default();
-        let mut entries: Vec<LeftPaneEntry> = Vec::new();
-        for r in query_rows {
-            let streams = db::list_filter_streams(&pool, r.id)
-                .await
-                .unwrap_or_default();
-            let kind = r.kind.clone();
-            let label = r.name.clone().unwrap_or_else(|| r.query.clone());
-            entries.push(LeftPaneEntry::Query(QueryEntry {
-                id: r.id,
-                label,
-                query_str: r.query.clone(),
-                kind: kind.clone(),
-            }));
-            for s in streams {
-                entries.push(LeftPaneEntry::FilterStream(FilterStreamEntry {
-                    id: s.id,
-                    parent_id: s.parent_id,
-                    name: s.name,
-                    filter: s.filter,
-                    kind: kind.clone(),
-                }));
-            }
-        }
+        let entries = load_left_pane_entries(&pool).await?;
 
         let cu = github::get_current_user(&gh).await;
         let current_user = cu.as_ref().map(|u| u.login.clone());

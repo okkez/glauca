@@ -1,0 +1,30 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>glauca</title>
+<link rel="stylesheet" href="styles.css" />
+<div id="app">
+  <aside id="sidebar">
+    <div class="pane-title">
+      <span style="flex:1">Queries</span>
+      <button id="new-query" title="New query">+</button>
+    </div>
+    <ul id="entries"></ul>
+  </aside>
+  <section id="items">
+    <div class="pane-title">
+      <span id="items-title">Items</span>
+      <input id="filter" type="text" placeholder="filter title…" autocomplete="off" />
+    </div>
+    <div id="banner" class="banner" hidden></div>
+    <ul id="item-list"></ul>
+  </section>
+  <section id="detail">
+    <div class="pane-title">
+      <span style="flex:1">Detail</span>
+      <button id="settings-btn" title="Settings">⚙</button>
+    </div>
+    <div id="detail-body" class="empty">Select an item.</div>
+  </section>
+</div>
+<footer id="statusbar"><span id="status">Loading…</span><span id="whoami"></span></footer>
+<script src="app.js"></script>

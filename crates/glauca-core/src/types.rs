@@ -1,7 +1,7 @@
 // Domain / display types shared by every frontend (TUI / GUI).
 // framework 非依存（ratatui にも db にも依存しない純粋型）。
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueryEntry {
     pub id: i64,
     /// Display label shown in the left pane (name if set, otherwise query_str).
@@ -11,7 +11,7 @@ pub struct QueryEntry {
     pub kind: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterStreamEntry {
     pub id: i64,
     pub parent_id: i64,
@@ -21,7 +21,12 @@ pub struct FilterStreamEntry {
 }
 
 /// A single row in the left pane — either a root query or a filter stream.
-#[derive(Clone)]
+///
+/// Serialized adjacently tagged (`{"type": "Query", "data": {…}}`) so web
+/// front-ends (glauca-tauri) can branch on `entry.type` without colliding with
+/// the inner `kind` field.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "data")]
 pub enum LeftPaneEntry {
     Query(QueryEntry),
     FilterStream(FilterStreamEntry),
@@ -96,7 +101,7 @@ impl UserRef {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ItemEntry {
     pub number: i64,
     pub title: String,
@@ -138,7 +143,7 @@ impl ItemEntry {
 }
 
 /// A single comment entry fetched from GitHub and displayed in the comments popup.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CommentEntry {
     pub author: String,
     pub created_at: String,
@@ -147,7 +152,7 @@ pub struct CommentEntry {
     pub minimized_reason: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ItemAction {
     OpenBrowser,
     Comment,
@@ -200,7 +205,8 @@ impl ItemAction {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MergeStrategy {
     Squash,
     Merge,
