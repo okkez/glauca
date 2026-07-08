@@ -26,17 +26,17 @@ macro_rules! octicons {
 }
 
 octicons! {
-    "octicons/issue-opened.svg" => "../assets/octicons/issue-opened.svg",
-    "octicons/issue-closed.svg" => "../assets/octicons/issue-closed.svg",
-    "octicons/git-pull-request.svg" => "../assets/octicons/git-pull-request.svg",
-    "octicons/git-merge.svg" => "../assets/octicons/git-merge.svg",
-    "octicons/git-pull-request-closed.svg" => "../assets/octicons/git-pull-request-closed.svg",
-    "octicons/git-pull-request-draft.svg" => "../assets/octicons/git-pull-request-draft.svg",
-    "octicons/lock.svg" => "../assets/octicons/lock.svg",
-    "octicons/check-circle-fill.svg" => "../assets/octicons/check-circle-fill.svg",
-    "octicons/x-circle-fill.svg" => "../assets/octicons/x-circle-fill.svg",
-    "octicons/comment.svg" => "../assets/octicons/comment.svg",
-    "octicons/clock.svg" => "../assets/octicons/clock.svg",
+    "octicons/issue-opened.svg" => "../../assets/octicons/issue-opened.svg",
+    "octicons/issue-closed.svg" => "../../assets/octicons/issue-closed.svg",
+    "octicons/git-pull-request.svg" => "../../assets/octicons/git-pull-request.svg",
+    "octicons/git-merge.svg" => "../../assets/octicons/git-merge.svg",
+    "octicons/git-pull-request-closed.svg" => "../../assets/octicons/git-pull-request-closed.svg",
+    "octicons/git-pull-request-draft.svg" => "../../assets/octicons/git-pull-request-draft.svg",
+    "octicons/lock.svg" => "../../assets/octicons/lock.svg",
+    "octicons/check-circle-fill.svg" => "../../assets/octicons/check-circle-fill.svg",
+    "octicons/x-circle-fill.svg" => "../../assets/octicons/x-circle-fill.svg",
+    "octicons/comment.svg" => "../../assets/octicons/comment.svg",
+    "octicons/clock.svg" => "../../assets/octicons/clock.svg",
 }
 
 impl AssetSource for Assets {
