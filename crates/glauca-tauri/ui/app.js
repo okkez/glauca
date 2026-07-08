@@ -260,8 +260,23 @@ function confirmModal(message) {
 
 // Lightweight context menu at (x, y). `items` is [{label, onClick}] (a null entry
 // renders a separator). Closes on selection or any outside click/Escape.
-function showContextMenu(x, y, items) {
+// The document-level close listener for the open context menu, tracked so it can
+// be unregistered when the menu goes away (via dismiss, item click, or a new menu
+// opening). Without this the listeners outlived their detached menu node.
+let ctxMenuClose = null;
+
+// Remove any open context menu AND its document-level close listeners.
+function dismissContextMenu() {
   document.querySelectorAll(".ctx-menu").forEach((m) => m.remove());
+  if (ctxMenuClose) {
+    document.removeEventListener("mousedown", ctxMenuClose, true);
+    document.removeEventListener("keydown", ctxMenuClose, true);
+    ctxMenuClose = null;
+  }
+}
+
+function showContextMenu(x, y, items) {
+  dismissContextMenu(); // clear any prior menu and its listeners first
   const menu = el("div", { class: "ctx-menu" });
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
@@ -275,7 +290,7 @@ function showContextMenu(x, y, items) {
         class: "ctx-item",
         text: it.label,
         onclick: () => {
-          menu.remove();
+          dismissContextMenu();
           it.onClick();
         },
       })
@@ -283,10 +298,9 @@ function showContextMenu(x, y, items) {
   }
   const close = (ev) => {
     if (ev.type === "keydown" && ev.key !== "Escape") return;
-    menu.remove();
-    document.removeEventListener("mousedown", close, true);
-    document.removeEventListener("keydown", close, true);
+    dismissContextMenu();
   };
+  ctxMenuClose = close;
   document.addEventListener("mousedown", close, true);
   document.addEventListener("keydown", close, true);
   document.body.appendChild(menu);
@@ -1220,7 +1234,20 @@ function applyTheme(theme) {
 function openSettingsModal() {
   const s = state.settings;
   const overlay = el("div", { class: "modal-overlay" });
-  const finish = () => overlay.remove();
+  const finish = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey, true);
+  };
+  // Escape cancels the modal (matching the other modals), reverting the live theme
+  // preview to the saved value.
+  const onKey = (ev) => {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      applyTheme(s.theme);
+      finish();
+    }
+  };
+  document.addEventListener("keydown", onKey, true);
 
   const themeSel = document.createElement("select");
   themeSel.className = "modal-input";

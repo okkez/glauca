@@ -114,16 +114,20 @@ pub fn save_settings(
     notifications_enabled: bool,
     sync_interval_secs: u64,
 ) -> Result<(), String> {
-    state
-        .notifications_enabled
-        .store(notifications_enabled, Ordering::Relaxed);
+    // Persist first, then flip the in-memory flag — so if the write fails the
+    // runtime flag and the on-disk file stay in agreement instead of diverging for
+    // the rest of the session.
     TauriSettings {
         theme,
         notifications_enabled,
         sync_interval_secs,
     }
     .save()
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    state
+        .notifications_enabled
+        .store(notifications_enabled, Ordering::Relaxed);
+    Ok(())
 }
 
 /// Compute per-entry unread counts for the entries under `query_id`, reusing
@@ -145,14 +149,16 @@ pub async fn unread_counts(
     query_id: i64,
     items: Vec<ItemEntry>,
 ) -> Result<Vec<UnreadCount>, String> {
-    Ok(compute_unread_counts(&entries, query_id, &items, state.current_user.as_deref())
-        .into_iter()
-        .map(|((is_filter_stream, entry_id), count)| UnreadCount {
-            is_filter_stream,
-            entry_id,
-            count,
-        })
-        .collect())
+    Ok(
+        compute_unread_counts(&entries, query_id, &items, state.current_user.as_deref())
+            .into_iter()
+            .map(|((is_filter_stream, entry_id), count)| UnreadCount {
+                is_filter_stream,
+                entry_id,
+                count,
+            })
+            .collect(),
+    )
 }
 
 /// Return the indices of `items` that match the selected entry's filter: the
