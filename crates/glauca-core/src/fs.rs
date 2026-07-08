@@ -78,6 +78,14 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "x = 0");
     }
 
+    #[test]
+    fn errors_on_path_with_no_file_name() {
+        // A path ending in `..` (or empty) has no file name, so no temp name can
+        // be derived — the helper must return an error rather than panic.
+        let err = atomic_write(Path::new(".."), "x = 0").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
     /// True if the directory contains any `*.tmp` file (a leaked temp write).
     fn has_tmp_leftover(dir: &Path) -> bool {
         std::fs::read_dir(dir).unwrap().any(|entry| {
