@@ -1018,6 +1018,14 @@ impl Engine {
     pub fn try_recv(&mut self) -> Option<AppMessage> {
         self.msg_rx.try_recv().ok()
     }
+
+    /// Split the engine into its command sender and message receiver, for
+    /// front-ends whose command handlers and message loop live in different
+    /// tasks (the gpui GUI awaits the receiver on its foreground executor
+    /// while click handlers hold clones of the sender).
+    pub fn into_parts(self) -> (mpsc::Sender<EngineCommand>, mpsc::Receiver<AppMessage>) {
+        (self.cmd_tx, self.msg_rx)
+    }
 }
 
 /// Dispatch `EngineCommand`s, spawning the underlying async tasks so the loop never
