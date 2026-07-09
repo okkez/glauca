@@ -54,6 +54,17 @@ The GitHub client uses `octocrab` plus GraphQL search; the cache uses `sqlx` wit
 
 ## Installation
 
+### Via gh extension (TUI)
+
+The terminal UI is distributed as a [`gh` CLI](https://cli.github.com/) extension:
+
+```bash
+gh extension install okkez/gh-glauca
+gh glauca
+```
+
+### From source
+
 ```bash
 git clone https://github.com/okkez/glauca.git
 cd glauca
