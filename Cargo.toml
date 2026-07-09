@@ -47,6 +47,15 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 reqwest_client = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "cda0fc7fd4e4809dd2a8bae0337ac43b49e9f675" }
 
+# Dev builds: keep the workspace crates unoptimized (fast incremental compiles)
+# but optimize every dependency. gpui's text layout / rasterization path is
+# unusably slow at opt-level 0, which made `cargo run -p glauca-gui` feel
+# sluggish; the hot per-frame code all lives in dependencies (gpui, taffy,
+# cosmic-text, frizbee), so this recovers near-release runtime speed while our
+# own crates still rebuild quickly.
+[profile.dev.package."*"]
+opt-level = 3
+
 # gpui-component patches psm for stacker; mirror it since [patch] does not propagate
 # from a git dependency's own workspace.
 [patch.crates-io]
