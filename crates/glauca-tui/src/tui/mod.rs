@@ -15,10 +15,17 @@ use std::{
 pub mod icons;
 pub mod settings;
 pub mod single_line_input;
+mod state;
 pub mod ui;
+
+#[cfg(test)]
+mod test_support;
 
 use icons::Icons;
 use single_line_input::SingleLineInput;
+pub(crate) use state::{
+    clear_active_modal_field, modal_fields, modal_fields_ref, sync_modal_cursors,
+};
 
 use glauca_core::actions::{CustomAction, CustomActions};
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, ReviewEvent};
@@ -32,64 +39,6 @@ use settings::TuiSettings;
 pub use glauca_core::types::{
     CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
-
-/// The two fields of the active two-field modal (name/value order), or `None`
-/// outside the input modals. Single source of the input_mode → field pair
-/// mapping used by cursor sync and field clearing. Keep [`modal_fields_ref`]
-/// (the render-path counterpart) in sync with this mapping.
-fn modal_fields(app: &mut App) -> Option<(&mut SingleLineInput, &mut SingleLineInput)> {
-    match app.input_mode {
-        InputMode::NewQuery => Some((&mut app.new_query_name, &mut app.new_query_input)),
-        InputMode::NewFilterStream => Some((
-            &mut app.new_filter_stream_name,
-            &mut app.new_filter_stream_filter,
-        )),
-        InputMode::EditQuery | InputMode::EditFilterStream => {
-            Some((&mut app.edit_input, &mut app.edit_input2))
-        }
-        _ => None,
-    }
-}
-
-/// Immutable counterpart of [`modal_fields`] for the render path (see
-/// `ui::draw_*_modal`), so the draw side doesn't re-hand-code the field pairing.
-pub fn modal_fields_ref(app: &App) -> Option<(&SingleLineInput, &SingleLineInput)> {
-    match app.input_mode {
-        InputMode::NewQuery => Some((&app.new_query_name, &app.new_query_input)),
-        InputMode::NewFilterStream => {
-            Some((&app.new_filter_stream_name, &app.new_filter_stream_filter))
-        }
-        InputMode::EditQuery | InputMode::EditFilterStream => {
-            Some((&app.edit_input, &app.edit_input2))
-        }
-        _ => None,
-    }
-}
-
-/// Show the blinking text cursor only on the active field of a two-field modal
-/// (the inactive field's cursor is hidden). No-op outside the input modals.
-fn sync_modal_cursors(app: &mut App) {
-    let field = app.modal_field;
-    let Some((f0, f1)) = modal_fields(app) else {
-        return;
-    };
-    f0.set_active(field == 0);
-    f1.set_active(field == 1);
-}
-
-/// Clear the active field of a two-field modal. Keeps Ctrl+U consistent with
-/// the filter bar's "C-u:clear" (TextArea's own Ctrl+U is undo). No-op outside
-/// the input modals.
-fn clear_active_modal_field(app: &mut App) {
-    let field = app.modal_field;
-    if let Some((f0, f1)) = modal_fields(app) {
-        if field == 0 {
-            f0.clear();
-        } else {
-            f1.clear();
-        }
-    }
-}
 
 // ── Application state ────────────────────────────────────────────────────────
 
@@ -216,188 +165,6 @@ pub struct App {
     /// Selection cursor within the custom-action picker (indexes the list
     /// returned by `custom_actions_for_selected`).
     pub custom_action_cursor: usize,
-}
-
-impl App {
-    pub fn new(queries: Vec<QueryEntry>) -> Self {
-        let entries = queries.into_iter().map(LeftPaneEntry::Query).collect();
-        Self {
-            focus: Focus::QueryList,
-            input_mode: InputMode::Normal,
-            entries,
-            entry_cursor: 0,
-            items: Vec::new(),
-            items_version: 0,
-            filtered_cache: RefCell::new(FilteredCache::default()),
-            item_cursor: 0,
-            unread_counts: HashMap::new(),
-            pending_items: None,
-            pending_count: 0,
-            filter: SingleLineInput::new(),
-            stream_filter: None,
-            new_query_input: SingleLineInput::new(),
-            new_query_name: SingleLineInput::new(),
-            new_filter_stream_name: SingleLineInput::new(),
-            new_filter_stream_filter: SingleLineInput::new(),
-            edit_input: SingleLineInput::new(),
-            edit_input2: SingleLineInput::new(),
-            modal_field: 0,
-            action_cursor: 0,
-            merge_strategy_cursor: 0,
-            review_event_cursor: 0,
-            review_body: None,
-            comments: Vec::new(),
-            comments_loading: false,
-            comments_scroll: 0,
-            comments_show_hidden: false,
-            comments_sort_desc: false,
-            status: None,
-            syncing: false,
-            bg_sync_pending: 0,
-            detail_scroll: 0,
-            current_user: None,
-            notifications_enabled: false,
-            notif_tracker: ItemTracker::new(),
-            icons: Icons::default(),
-            custom_actions: CustomActions::default(),
-            custom_action_cursor: 0,
-        }
-    }
-
-    /// Custom actions applicable to the currently selected item, in definition
-    /// order. Empty when nothing is selected or none match the item's kind.
-    pub fn custom_actions_for_selected(&self) -> Vec<&CustomAction> {
-        match self.selected_item() {
-            Some(item) => self.custom_actions.for_kind(&item.kind),
-            None => Vec::new(),
-        }
-    }
-
-    /// Whether any custom action applies to the selected item. Cheaper than
-    /// `custom_actions_for_selected` for the common "is the list non-empty?"
-    /// check (per-frame status hint, `x` guard) — it allocates nothing.
-    pub fn has_custom_actions_for_selected(&self) -> bool {
-        match self.selected_item() {
-            Some(item) => self.custom_actions.has_for_kind(&item.kind),
-            None => false,
-        }
-    }
-
-    pub fn parsed_filter(&self) -> FilterQuery {
-        FilterQuery::parse(&self.expand_me(self.filter.value()))
-    }
-
-    /// Replace `@me` with the authenticated user's login (case-insensitive).
-    /// Falls back to `@me` unchanged if the user is not known yet.
-    fn expand_me<'a>(&'a self, filter: &'a str) -> std::borrow::Cow<'a, str> {
-        glauca_core::logic::expand_me(self.current_user.as_deref(), filter)
-    }
-
-    pub fn filtered_items(&self) -> Vec<&ItemEntry> {
-        {
-            let mut cache = self.filtered_cache.borrow_mut();
-            // Compare inputs against the cached key by reference first — this runs
-            // several times per render, so we only allocate an owned key on an
-            // actual miss (filter/stream/user changed or items were replaced).
-            let stale = match &cache.key {
-                Some((version, stream, inline, user)) => {
-                    *version != self.items_version
-                        || stream.as_deref() != self.stream_filter.as_deref()
-                        || inline.as_str() != self.filter.value()
-                        || user.as_deref() != self.current_user.as_deref()
-                }
-                None => true,
-            };
-            if stale {
-                cache.indices = glauca_core::logic::filter_item_indices(
-                    &self.items,
-                    self.stream_filter.as_deref(),
-                    self.filter.value(),
-                    self.current_user.as_deref(),
-                );
-                cache.key = Some((
-                    self.items_version,
-                    self.stream_filter.clone(),
-                    self.filter.value().to_string(),
-                    self.current_user.clone(),
-                ));
-            }
-        }
-        self.filtered_cache
-            .borrow()
-            .indices
-            .iter()
-            .map(|&i| &self.items[i])
-            .collect()
-    }
-
-    pub fn selected_item(&self) -> Option<&ItemEntry> {
-        let filtered = self.filtered_items();
-        filtered.get(self.item_cursor).copied()
-    }
-
-    pub fn selected_entry(&self) -> Option<&LeftPaneEntry> {
-        self.entries.get(self.entry_cursor)
-    }
-
-    /// Returns the root query id for the currently selected entry.
-    pub fn selected_root_query_id(&self) -> Option<i64> {
-        self.selected_entry().map(|e| e.root_query_id())
-    }
-
-    fn clamp_item_cursor(&mut self) {
-        let max = self.filtered_items().len().saturating_sub(1);
-        if self.item_cursor > max {
-            self.item_cursor = max;
-        }
-    }
-
-    /// Install `items` as the visible list, clamping the cursor. `is_new` (unread)
-    /// is already set per item by `cached_item_to_item_entry` when the engine builds
-    /// them, so there is nothing to recompute here.
-    fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
-        self.items = items;
-        self.items_version = self.items_version.wrapping_add(1);
-        self.clamp_item_cursor();
-    }
-
-    /// Empty the visible list, invalidating the memoized filter cache. Use this
-    /// instead of `self.items.clear()` so `filtered_cache` never maps stale
-    /// indices into the now-empty list.
-    fn clear_items(&mut self) {
-        self.items.clear();
-        self.items_version = self.items_version.wrapping_add(1);
-    }
-
-    /// Drop any held-back background-sync results / banner.
-    fn clear_pending(&mut self) {
-        self.pending_items = None;
-        self.pending_count = 0;
-    }
-
-    /// Apply the stashed background-sync results to the visible list (the `u`
-    /// key). No-op when nothing is pending.
-    pub fn apply_pending_items(&mut self) {
-        let Some(items) = self.pending_items.take() else {
-            return;
-        };
-        self.pending_count = 0;
-        if let Some(qid) = self.selected_root_query_id() {
-            self.recompute_unread_counts_for_query(qid, &items);
-        }
-        self.apply_items_to_view(items);
-    }
-
-    fn recompute_unread_counts_for_query(&mut self, query_id: i64, items: &[ItemEntry]) {
-        for (key, unread) in glauca_core::logic::compute_unread_counts(
-            &self.entries,
-            query_id,
-            items,
-            self.current_user.as_deref(),
-        ) {
-            self.unread_counts.insert(key, unread);
-        }
-    }
 }
 
 // `AppMessage` / `SyncJob` は glauca_core::engine へ移設（A6）。
@@ -2014,319 +1781,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glauca_core::types::FilterStreamEntry;
-
-    /// A minimal open PR item; tests override only the fields they exercise via
-    /// `ItemEntry { field: …, ..make_item(n, "title") }`.
-    fn make_item(number: i64, title: &str) -> ItemEntry {
-        ItemEntry {
-            number,
-            title: title.to_string(),
-            repo_owner: "owner".into(),
-            repo_name: "repo".into(),
-            author: Some(glauca_core::types::UserRef::new("alice")),
-            state: "open".into(),
-            kind: "pull_request".into(),
-            ..Default::default()
-        }
-    }
-
-    fn make_app_with_items(titles: &[&str]) -> App {
-        let mut app = App::new(vec![QueryEntry {
-            id: 1,
-            label: "test query".into(),
-            query_str: "test query".into(),
-            kind: "pull_request".into(),
-        }]);
-        app.items = titles
-            .iter()
-            .enumerate()
-            .map(|(i, t)| make_item(i as i64 + 1, t))
-            .collect();
-        app
-    }
-
-    #[test]
-    fn clamp_item_cursor_when_filter_reduces_list() {
-        let mut app = make_app_with_items(&["Fix alpha", "Fix beta", "Add gamma"]);
-        app.item_cursor = 2; // points to "Add gamma"
-
-        // Apply filter that matches only 2 items.
-        app.filter = ta("fix");
-        app.clamp_item_cursor();
-
-        // Cursor should clamp to 1 (last index in the 2-item filtered list).
-        assert_eq!(app.item_cursor, 1);
-    }
-
-    #[test]
-    fn filtered_items_returns_all_when_empty_filter() {
-        let app = make_app_with_items(&["Alpha", "Beta", "Gamma"]);
-        assert_eq!(app.filtered_items().len(), 3);
-    }
-
-    #[test]
-    fn filtered_cache_invalidates_on_items_change() {
-        // The memoized filter cache keys on items_version; clearing or replacing
-        // items must invalidate it so stale indices are never mapped into a
-        // changed list (which would return wrong results or panic).
-        let mut app = make_app_with_items(&["Fix a", "Fix b", "Add c"]);
-        app.filter = ta("fix");
-        assert_eq!(app.filtered_items().len(), 2); // populates the cache
-
-        app.clear_items();
-        assert_eq!(app.filtered_items().len(), 0); // must reflect the clear, not panic
-
-        app.apply_items_to_view(vec![make_item(1, "Fix again"), make_item(2, "Nope")]);
-        assert_eq!(app.filtered_items().len(), 1); // recomputed against new items
-    }
-
-    #[test]
-    fn filtered_items_plain_text() {
-        let mut app = make_app_with_items(&["Fix the bug", "Add feature", "Fix crash"]);
-        app.filter = ta("fix");
-        let filtered = app.filtered_items();
-        assert_eq!(filtered.len(), 2);
-        assert!(
-            filtered
-                .iter()
-                .all(|i| i.title.to_lowercase().contains("fix"))
-        );
-    }
-
-    #[test]
-    fn selected_item_follows_cursor() {
-        let mut app = make_app_with_items(&["First", "Second", "Third"]);
-        app.item_cursor = 1;
-        assert_eq!(
-            app.selected_item().map(|i| i.title.as_str()),
-            Some("Second")
-        );
-    }
-
-    #[test]
-    fn selected_item_respects_filter() {
-        let mut app = make_app_with_items(&["Fix alpha", "Add beta", "Fix gamma"]);
-        app.filter = ta("fix");
-        app.item_cursor = 1;
-        // filtered = ["Fix alpha", "Fix gamma"], cursor=1 → "Fix gamma"
-        assert_eq!(
-            app.selected_item().map(|i| i.title.as_str()),
-            Some("Fix gamma")
-        );
-    }
-
-    #[test]
-    fn selected_item_none_when_list_empty() {
-        let app = make_app_with_items(&[]);
-        assert!(app.selected_item().is_none());
-    }
-
-    #[test]
-    fn stream_filter_applied_before_inline_filter() {
-        let mut app = make_app_with_items(&["Fix bug", "Add feature", "Fix crash closed"]);
-        // Simulate a filter stream that shows only open items
-        app.stream_filter = Some("state:open".into());
-        // All items have state "open" so all 3 pass stream filter
-        assert_eq!(app.filtered_items().len(), 3);
-
-        // Now add inline filter
-        app.filter = ta("fix");
-        // Only "Fix bug" and "Fix crash closed" match "fix", and all pass stream filter
-        assert_eq!(app.filtered_items().len(), 2);
-    }
-
-    #[test]
-    fn stream_filter_restricts_items() {
-        let mut app = App::new(vec![QueryEntry {
-            id: 1,
-            label: "test".into(),
-            query_str: "test".into(),
-            kind: "pull_request".into(),
-        }]);
-        app.items = vec![
-            make_item(1, "Open PR"),
-            ItemEntry {
-                state: "closed".into(),
-                ..make_item(2, "Closed PR")
-            },
-        ];
-        app.stream_filter = Some("state:open".into());
-        let filtered = app.filtered_items();
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].title, "Open PR");
-    }
-
-    #[test]
-    fn recompute_unread_counts_excludes_read_and_applies_filter() {
-        let mut app = App::new(vec![]);
-        app.entries = vec![
-            LeftPaneEntry::Query(QueryEntry {
-                id: 1,
-                label: "Open PRs".into(),
-                query_str: "is:pr is:open".into(),
-                kind: "pull_request".into(),
-            }),
-            LeftPaneEntry::FilterStream(FilterStreamEntry {
-                id: 2,
-                parent_id: 1,
-                name: "Open only".into(),
-                filter: "state:open".into(),
-                kind: "pull_request".into(),
-            }),
-        ];
-        let items = vec![
-            // Unread (never read).
-            ItemEntry {
-                updated_at: "2026-05-24T10:00:00Z".into(),
-                ..make_item(1, "Open unread")
-            },
-            // Read: updated_at not newer than last_read_updated_at.
-            ItemEntry {
-                updated_at: "2026-05-24T10:00:00Z".into(),
-                last_read_updated_at: Some("2026-05-24T10:00:00Z".into()),
-                ..make_item(2, "Open read")
-            },
-            // Unread but closed → excluded by the stream's state:open filter.
-            ItemEntry {
-                state: "closed".into(),
-                updated_at: "2026-05-24T10:00:00Z".into(),
-                ..make_item(3, "Closed unread")
-            },
-        ];
-
-        app.recompute_unread_counts_for_query(1, &items);
-
-        // Query #1 (no filter) → items 1 and 3 are unread → 2.
-        // Filter stream #2 (state:open) → only item 1 (item 2 read, item 3 closed) → 1.
-        assert_eq!(app.unread_counts.get(&(false, 1)), Some(&2));
-        assert_eq!(app.unread_counts.get(&(true, 2)), Some(&1));
-    }
-
-    // ── App::new defaults ────────────────────────────────────────────────────────
-
-    #[test]
-    fn app_new_default_state() {
-        let app = App::new(vec![]);
-        assert_eq!(app.focus, Focus::QueryList);
-        assert!(matches!(app.input_mode, InputMode::Normal));
-        assert!(app.entries.is_empty());
-        assert!(app.items.is_empty());
-        assert_eq!(app.item_cursor, 0);
-        assert_eq!(app.entry_cursor, 0);
-        assert!(app.filter.is_empty());
-        assert!(app.stream_filter.is_none());
-        assert!(!app.syncing);
-        assert!(app.current_user.is_none());
-    }
-
-    #[test]
-    fn app_new_creates_one_entry_per_query() {
-        let queries = vec![
-            QueryEntry {
-                id: 1,
-                label: "Open PRs".into(),
-                query_str: "is:pr is:open".into(),
-                kind: "pull_request".into(),
-            },
-            QueryEntry {
-                id: 2,
-                label: "Open issues".into(),
-                query_str: "is:issue is:open".into(),
-                kind: "issue".into(),
-            },
-        ];
-
-        let app = App::new(queries);
-
-        assert!(app.items.is_empty());
-        assert_eq!(app.entry_cursor, 0);
-        assert_eq!(app.item_cursor, 0);
-        assert_eq!(app.entries.len(), 2);
-        match &app.entries[0] {
-            LeftPaneEntry::Query(query) => {
-                assert_eq!(query.id, 1);
-                assert_eq!(query.label, "Open PRs");
-                assert_eq!(query.query_str, "is:pr is:open");
-            }
-            LeftPaneEntry::FilterStream(_) => panic!("expected query entry"),
-        }
-        match &app.entries[1] {
-            LeftPaneEntry::Query(query) => {
-                assert_eq!(query.id, 2);
-                assert_eq!(query.label, "Open issues");
-                assert_eq!(query.query_str, "is:issue is:open");
-            }
-            LeftPaneEntry::FilterStream(_) => panic!("expected query entry"),
-        }
-    }
-
-    // ── expand_me ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn expand_me_author_at_me() {
-        let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        assert_eq!(app.expand_me("author:@me"), "author:octocat");
-    }
-
-    #[test]
-    fn expand_me_review_requested_at_me() {
-        let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        assert_eq!(
-            app.expand_me("review-requested:@me"),
-            "review-requested:octocat"
-        );
-    }
-
-    #[test]
-    fn expand_me_standalone_at_me() {
-        let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        assert_eq!(app.expand_me("@me"), "octocat");
-    }
-
-    #[test]
-    fn expand_me_multiple_tokens() {
-        let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        assert_eq!(
-            app.expand_me("author:@me review-requested:@me"),
-            "author:octocat review-requested:octocat"
-        );
-    }
-
-    #[test]
-    fn expand_me_no_current_user_leaves_unchanged() {
-        let app = App::new(vec![]);
-        // current_user is None → @me is preserved.
-        assert_eq!(app.expand_me("author:@me"), "author:@me");
-    }
-
-    #[test]
-    fn expand_me_no_at_me_unchanged() {
-        let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        let q = "is:pr is:open label:bug";
-        assert_eq!(app.expand_me(q), q);
-    }
+    use crate::tui::test_support::*;
 
     // ── handle_key_new_query ─────────────────────────────────────────────────────
-
-    fn make_key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn make_ctrl_key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::CONTROL)
-    }
-
-    /// Build a single-line input field pre-filled with `s`, cursor at the end
-    /// (mimics text the user has just typed).
-    fn ta(s: &str) -> SingleLineInput {
-        SingleLineInput::from_text(s)
-    }
 
     #[test]
     fn question_mark_opens_help_overlay() {
@@ -2627,21 +2084,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_modal_cursors_shows_only_active_field() {
-        let mut app = App::new(vec![]);
-        app.input_mode = InputMode::EditFilterStream;
-        app.modal_field = 1;
-        sync_modal_cursors(&mut app);
-        assert!(!app.edit_input.is_active());
-        assert!(app.edit_input2.is_active());
-
-        app.modal_field = 0;
-        sync_modal_cursors(&mut app);
-        assert!(app.edit_input.is_active());
-        assert!(!app.edit_input2.is_active());
-    }
-
-    #[test]
     fn new_query_ctrl_u_clears_active_field() {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::NewQuery;
@@ -2678,13 +2120,6 @@ mod tests {
         // An actual text edit does reset it.
         handle_key_filter(&mut app, make_key(KeyCode::Char('z')));
         assert_eq!(app.item_cursor, 0);
-    }
-
-    #[test]
-    fn app_new_initializes_action_state() {
-        let app = App::new(vec![]);
-        assert_eq!(app.action_cursor, 0);
-        assert_eq!(app.merge_strategy_cursor, 0);
     }
 
     #[test]
@@ -2764,16 +2199,6 @@ mod tests {
         assert!(matches!(action, Action::Confirm));
     }
 
-    fn make_custom_action(name: &str, kinds: &[&str]) -> CustomAction {
-        CustomAction {
-            name: name.into(),
-            label: None,
-            command: vec!["true".into()],
-            kinds: kinds.iter().map(|s| s.to_string()).collect(),
-            env: Default::default(),
-        }
-    }
-
     #[test]
     fn x_opens_custom_action_menu_when_an_action_matches() {
         let mut app = make_app_with_items(&["First"]);
@@ -2831,24 +2256,6 @@ mod tests {
 
         assert!(matches!(action, Action::None));
         assert_eq!(app.input_mode, InputMode::Normal);
-    }
-
-    #[test]
-    fn custom_actions_for_selected_filters_by_kind() {
-        let mut app = make_app_with_items(&["First"]); // PR
-        app.custom_actions = CustomActions {
-            actions: vec![
-                make_custom_action("pr", &["pull_request"]),
-                make_custom_action("issue", &["issue"]),
-                make_custom_action("any", &[]),
-            ],
-        };
-        let names: Vec<&str> = app
-            .custom_actions_for_selected()
-            .iter()
-            .map(|a| a.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["pr", "any"]);
     }
 
     #[test]
