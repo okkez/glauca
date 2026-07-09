@@ -24,6 +24,13 @@ const MAX_LOG_FILES: usize = 7;
 pub fn init(prefix: &str, default_filter: &str) -> Option<WorkerGuard> {
     let dir = dirs::data_local_dir()?.join("glauca");
 
+    // Create the log dir up front. `max_log_files` makes tracing-appender read
+    // the directory to prune old files at startup; if it doesn't exist yet
+    // (first run on a clean machine) that read prints an "Error reading the log
+    // directory/files: No such file or directory" warning to stderr. Best-effort:
+    // if this fails, the appender build below will surface the real error.
+    let _ = std::fs::create_dir_all(&dir);
+
     let appender = Builder::new()
         .rotation(Rotation::DAILY)
         .filename_prefix(prefix)
