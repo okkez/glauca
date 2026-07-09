@@ -47,23 +47,24 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 reqwest_client = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "cda0fc7fd4e4809dd2a8bae0337ac43b49e9f675" }
 
-# Release builds: minimize binary size (the TUI is distributed as a gh
-# extension download). strip drops symbols, fat LTO + one codegen unit let the
-# linker discard everything unused across the whole graph, and panic = "abort"
-# removes unwinding tables (a panic in any thread now aborts the process
-# instead of unwinding — tokio task panics are no longer contained as
-# JoinErrors, which is acceptable since the engine treats task failure as
-# unrecoverable anyway).
-#
-# opt-level stays 3, not "z": "z" would shrink glauca-gui further (21.7M vs
-# 31.9M measured; baseline was 57.0M) but generates size-first code in gpui's
-# per-frame text shaping / rasterization loops, trading away exactly the GUI
-# responsiveness the dev-profile section below exists to protect. lto + strip
-# already cut ~44% with no runtime cost.
+# Release builds: shrink binaries (the TUI is distributed as a gh extension
+# download) without giving up debuggability or CI time. Measured on linux
+# x86_64 (glauca-gui / glauca-tui, baseline 57.0M / 20.1M):
+#   - strip = "debuginfo" keeps symbol names so crash backtraces stay readable;
+#     full strip would save a further ~5.7M / ~1.6M.
+#   - lto = "thin" halves link time vs fat LTO (4.5min vs 8min for gui+tui)
+#     for ~1.8M / ~0.6M of size; fat + full strip would reach 31.9M / 12.1M.
+#   - panic = "abort" drops unwinding tables (~4M / ~1.2M): a panic in any
+#     thread now aborts the process instead of unwinding — tokio task panics
+#     are no longer contained as JoinErrors, which is acceptable since the
+#     engine treats task failure as unrecoverable anyway.
+#   - opt-level stays 3, not "z": "z" shrinks further but generates size-first
+#     code in gpui's per-frame text shaping / rasterization loops, trading away
+#     exactly the GUI responsiveness the dev-profile section below protects.
 [profile.release]
-strip = true
+strip = "debuginfo"
 opt-level = 3
-lto = true
+lto = "thin"
 codegen-units = 1
 panic = "abort"
 
