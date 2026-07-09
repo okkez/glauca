@@ -47,6 +47,26 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 reqwest_client = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "cda0fc7fd4e4809dd2a8bae0337ac43b49e9f675" }
 
+# Release builds: minimize binary size (the TUI is distributed as a gh
+# extension download). strip drops symbols, fat LTO + one codegen unit let the
+# linker discard everything unused across the whole graph, and panic = "abort"
+# removes unwinding tables (a panic in any thread now aborts the process
+# instead of unwinding — tokio task panics are no longer contained as
+# JoinErrors, which is acceptable since the engine treats task failure as
+# unrecoverable anyway).
+#
+# opt-level stays 3, not "z": "z" would shrink glauca-gui further (21.7M vs
+# 31.9M measured; baseline was 57.0M) but generates size-first code in gpui's
+# per-frame text shaping / rasterization loops, trading away exactly the GUI
+# responsiveness the dev-profile section below exists to protect. lto + strip
+# already cut ~44% with no runtime cost.
+[profile.release]
+strip = true
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
 # Dev builds: keep the workspace crates unoptimized (fast incremental compiles)
 # but optimize every dependency. gpui's text layout / rasterization path is
 # unusably slow at opt-level 0, which made `cargo run -p glauca-gui` feel
