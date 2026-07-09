@@ -1,8 +1,19 @@
+use clap::Parser;
 use glauca_core::{db, github};
 mod tui;
 
+/// Terminal UI for browsing and triaging GitHub issues and pull requests.
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Parse args first so `--version`/`--help` print and exit before we touch the
+    // log dir, DB, or TLS provider. This also keeps those flags usable without a
+    // TTY (e.g. `gh glauca --version` in CI or piped output).
+    Cli::parse();
+
     // Keep the guard alive for the whole program so buffered logs are flushed on
     // exit. The TUI owns the terminal, so logs go to a file (see logging::init).
     let _log_guard = glauca_core::logging::init("glauca-tui", "glauca_core=info,glauca_tui=info");
