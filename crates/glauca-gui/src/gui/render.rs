@@ -597,8 +597,32 @@ impl GlaucaApp {
     }
 }
 
+impl GlaucaApp {
+    /// Perf diagnostics (RUST_LOG=glauca_gui=debug): log the gap between
+    /// element tree rebuilds. During a burst of repaints (key held down) a
+    /// growing gap means layout/paint can't keep up with input. The timestamp
+    /// is updated unconditionally — every frame, even with debug logging off —
+    /// so the first gap after enabling logging is still correct.
+    fn log_frame_gap(&mut self) {
+        let now = std::time::Instant::now();
+        let Some(prev) = self.last_render_at.replace(now) else {
+            return;
+        };
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        let gap_ms = now.duration_since(prev).as_millis() as u64;
+        // Gaps over a second are idle time, not slowness — skip them to keep
+        // the log readable.
+        if gap_ms <= 1000 {
+            tracing::debug!(gap_ms, "frame");
+        }
+    }
+}
+
 impl Render for GlaucaApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.log_frame_gap();
         v_flex()
             .id("glauca-root")
             .key_context(GLAUCA_CONTEXT)

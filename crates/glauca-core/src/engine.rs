@@ -1014,7 +1014,8 @@ impl Engine {
         self.msg_rx.recv().await
     }
 
-    /// Non-blocking drain of the next message (GUI per-frame style).
+    /// Non-blocking drain of the next message, for batching after an awaited
+    /// `recv` (the GUI applies a whole burst in one frame).
     pub fn try_recv(&mut self) -> Option<AppMessage> {
         self.msg_rx.try_recv().ok()
     }

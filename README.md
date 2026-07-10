@@ -79,8 +79,9 @@ DATABASE_URL="sqlite:crates/glauca-core/dev.db" cargo build --release
 # Terminal UI
 cargo run -p glauca-tui
 
-# Desktop GUI (requires X11/Wayland + GPU)
-cargo run -p glauca-gui
+# Desktop GUI (requires X11/Wayland + GPU). Use --release for daily use —
+# dev builds trade some runtime speed for compile speed.
+cargo run --release -p glauca-gui
 
 # Desktop web-tech UI (Tauri). Needs the Tauri CLI (Rust, no Node):
 #   cargo install tauri-cli

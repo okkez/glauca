@@ -1,9 +1,10 @@
 //! glauca-gui — gpui front-end for glauca (phase B, MVP 閲覧先行).
 //!
 //! gpui owns the main-thread event loop and is not tokio-aware, so the async
-//! engine runs on a separate multi-thread tokio runtime. The view periodically
-//! drains `engine.try_recv()` and repaints; commands are sent from non-async
-//! click handlers via a cloned `EngineCommand` sender (`engine.sender()`).
+//! engine runs on a separate multi-thread tokio runtime. A foreground task
+//! awaits the engine's message receiver and repaints per batch (see
+//! `setup.rs`); commands are sent from non-async click handlers via a cloned
+//! `EngineCommand` sender.
 //!
 //! B1: two panes. Left = the left-pane entries (root queries + indented filter
 //! streams) as a clickable list with selection highlight and unread badges.
@@ -15,7 +16,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use glauca_core::actions::{CustomAction, CustomActions};
-use glauca_core::engine::{Engine, EngineCommand, ReviewEvent};
+use glauca_core::engine::{EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::reviewer_overlays;
 use glauca_core::notify::ItemTracker;
@@ -57,9 +58,6 @@ pub(crate) use widgets::{
     review_decision_icon, reviewer_avatar, reviewer_chip, sized_avatar_url, state_label,
     user_avatar, user_chip,
 };
-
-/// How often the GUI drains engine messages and repaints.
-const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Idle delay before a filter keystroke triggers a re-filter, so typing fast in a
 /// large list doesn't recompute on every character.
@@ -159,8 +157,9 @@ pub(crate) struct FilterStreamFormParams {
 }
 
 pub(crate) struct GlaucaApp {
-    engine: Engine,
-    /// Cloneable command sender, used from non-async click handlers.
+    /// Cloneable command sender, used from non-async click handlers. The
+    /// engine itself (with the message receiver) is moved into the push-based
+    /// delivery loop spawned by `new` (see `setup.rs`), not held on the view.
     cmd_tx: Sender<EngineCommand>,
 
     entries: Vec<LeftPaneEntry>,
@@ -273,4 +272,9 @@ pub(crate) struct GlaucaApp {
     custom_actions: CustomActions,
     /// Keeps the `filter_input` subscription alive for the view's lifetime.
     _subscriptions: Vec<Subscription>,
+
+    /// When the previous frame's element tree was built. Drives the `frame`
+    /// debug log (gap between rebuilds) used to diagnose repaint backlogs;
+    /// costs one Instant per frame when debug logging is off.
+    last_render_at: Option<std::time::Instant>,
 }

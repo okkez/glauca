@@ -1,5 +1,6 @@
 //! Construction and theming: the `GlaucaApp::new` bootstrap (engine wiring, the
-//! drain loop, filter-input subscription, settings restore) and the theme /
+//! push-based message delivery loop, filter-input subscription, settings
+//! restore) and the theme /
 //! settings-save / notification-toggle handlers.
 
 use gpui::*;
@@ -24,26 +25,35 @@ impl GlaucaApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Periodically drain engine messages and repaint while the window lives.
-        // Use gpui's executor timer (not `smol::Timer`): its completion wakes the
-        // platform event loop, so the loop keeps draining while the window is idle.
-        // With `smol::Timer` the tick doesn't poke gpui's loop, so background-sync
-        // messages sat undrained until the next user interaction (no "N updated"
-        // banner appeared on its own).
+        // Deliver engine messages push-based: await the channel and repaint as
+        // soon as a message lands, like the TUI/Tauri front-ends. The old loop
+        // polled `try_recv` on a 50ms timer, which added up to 50ms of latency
+        // to every engine round trip (left-pane navigation reloads items from
+        // SQLite on each move) and woke the event loop 20×/s while idle.
+        // Awaiting a tokio mpsc receiver needs no tokio runtime context — the
+        // sender wakes the task directly, and gpui reschedules it on the main
+        // thread. After the first message, drain whatever else is queued so a
+        // background-sync burst is applied in one frame with a single repaint.
         // `spawn_in` (not `spawn`) so `apply` gets a `&mut Window`: error
         // messages surface as `push_notification` toasts, which need the window.
+        let cmd_tx = engine.sender();
         cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor().timer(DRAIN_INTERVAL).await;
+            let mut engine = engine;
+            while let Some(first) = engine.recv().await {
                 let result = this.update_in(cx, |this, window, cx| {
-                    let mut changed = false;
-                    while let Some(msg) = this.engine.try_recv() {
+                    let t = std::time::Instant::now();
+                    let mut n = 1;
+                    this.apply(first, window, cx);
+                    while let Some(msg) = engine.try_recv() {
                         this.apply(msg, window, cx);
-                        changed = true;
+                        n += 1;
                     }
-                    if changed {
-                        cx.notify();
-                    }
+                    cx.notify();
+                    tracing::debug!(
+                        batch = n,
+                        apply_us = t.elapsed().as_micros() as u64,
+                        "engine batch"
+                    );
                 });
                 if result.is_err() {
                     // Entity gone (window closed) — stop the loop.
@@ -52,8 +62,6 @@ impl GlaucaApp {
             }
         })
         .detach();
-
-        let cmd_tx = engine.sender();
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("filter…"));
         // Mirror the input value into `filter` (and reset the item cursor) on every
         // change so `recompute_filtered` re-runs and the detail pane stays in range.
@@ -86,7 +94,6 @@ impl GlaucaApp {
         let pane_state = cx.new(|_| ResizableState::default());
         let detail_text = cx.new(|cx| TextViewState::markdown("", cx));
         let mut app = Self {
-            engine,
             cmd_tx,
             entries,
             entry_cursor: 0,
@@ -130,6 +137,7 @@ impl GlaucaApp {
             notif_tracker: ItemTracker::new(),
             custom_actions: CustomActions::load(),
             _subscriptions: vec![subscription],
+            last_render_at: None,
         };
         // Apply the saved theme up front (System follows the OS appearance).
         app.apply_theme(Some(window), cx);
