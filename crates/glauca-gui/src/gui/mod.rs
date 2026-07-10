@@ -272,4 +272,9 @@ pub(crate) struct GlaucaApp {
     custom_actions: CustomActions,
     /// Keeps the `filter_input` subscription alive for the view's lifetime.
     _subscriptions: Vec<Subscription>,
+
+    /// When the previous frame's element tree was built. Drives the `frame`
+    /// debug log (gap between rebuilds) used to diagnose repaint backlogs;
+    /// costs one Instant per frame when debug logging is off.
+    last_render_at: Option<std::time::Instant>,
 }

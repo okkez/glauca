@@ -43,10 +43,17 @@ impl GlaucaApp {
                     batch.push(msg);
                 }
                 let result = this.update_in(cx, |this, window, cx| {
+                    let t = std::time::Instant::now();
+                    let n = batch.len();
                     for msg in batch {
                         this.apply(msg, window, cx);
                     }
                     cx.notify();
+                    tracing::debug!(
+                        batch = n,
+                        apply_us = t.elapsed().as_micros() as u64,
+                        "engine batch"
+                    );
                 });
                 if result.is_err() {
                     // Entity gone (window closed) — stop the loop.
@@ -130,6 +137,7 @@ impl GlaucaApp {
             notif_tracker: ItemTracker::new(),
             custom_actions: CustomActions::load(),
             _subscriptions: vec![subscription],
+            last_render_at: None,
         };
         // Apply the saved theme up front (System follows the OS appearance).
         app.apply_theme(Some(window), cx);

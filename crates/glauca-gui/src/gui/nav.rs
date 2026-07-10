@@ -114,11 +114,17 @@ impl GlaucaApp {
             Focus::ItemList => {
                 let max = self.filtered_len().saturating_sub(1);
                 if self.item_cursor < max {
+                    let t = std::time::Instant::now();
                     self.item_cursor += 1;
                     self.items_list.scroll_to_reveal_item(self.item_cursor);
                     self.reset_detail_scroll();
                     self.mark_current_item_read(cx);
                     cx.notify();
+                    tracing::debug!(
+                        handler_us = t.elapsed().as_micros() as u64,
+                        cursor = self.item_cursor,
+                        "item move down"
+                    );
                 }
             }
             Focus::ItemDetail => {
@@ -138,11 +144,17 @@ impl GlaucaApp {
             }
             Focus::ItemList => {
                 if self.item_cursor > 0 {
+                    let t = std::time::Instant::now();
                     self.item_cursor -= 1;
                     self.items_list.scroll_to_reveal_item(self.item_cursor);
                     self.reset_detail_scroll();
                     self.mark_current_item_read(cx);
                     cx.notify();
+                    tracing::debug!(
+                        handler_us = t.elapsed().as_micros() as u64,
+                        cursor = self.item_cursor,
+                        "item move up"
+                    );
                 }
             }
             Focus::ItemDetail => {

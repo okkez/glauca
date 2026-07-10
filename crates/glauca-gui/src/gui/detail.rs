@@ -183,6 +183,7 @@ impl GlaucaApp {
             .filter(|s| !s.is_empty())
         {
             Some(body) => {
+                tracing::debug!(body_len = body.len(), "detail body");
                 self.detail_text
                     .update(cx, |state, cx| state.set_text(body, cx));
                 div()
