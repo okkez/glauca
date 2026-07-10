@@ -132,27 +132,26 @@ case-insensitive substring unless noted):
 
 `@me` is expanded to the current user in both layers.
 
-### Servo rendering (experimental)
+### Servo rendering (not currently viable)
 
-`glauca-tauri` can, in principle, render through **Servo** instead of the system
-WebView, using [`tauri-runtime-verso`](https://github.com/tauri-apps/tauri-runtime-verso)
-(Tauri's Servo/Verso backend). This is **experimental and opt-in**, and is *not*
-wired in by default because:
+`glauca-tauri` renders through the system WebView (WebKitGTK / WKWebView /
+WebView2). Rendering through **Servo** instead has been investigated, but as of
+July 2026 there is no maintained bridge between Tauri and Servo:
 
-- `tauri-runtime-verso` is not published on crates.io and its API is in flux.
-- It requires a separately built `versoview` executable.
-- IPC / multi-window support is partial.
+- [`tauri-runtime-verso`](https://github.com/versotile-org/tauri-runtime-verso)
+  (the experimental Tauri backend for Servo/Verso) is dormant — no commits since
+  October 2025, never published to crates.io, and its
+  [Verso](https://gitlab.com/verso-browser/verso) upstream stopped in mid-2025.
+- Servo itself is healthy: it ships monthly as the
+  [`servo` crate](https://crates.io/crates/servo) (plus an LTS track) since
+  April 2026. But embedding it directly bypasses Tauri entirely — the IPC
+  (`invoke`/`listen`), window management, and bundling would all need
+  reimplementing, which amounts to writing a fourth frontend.
 
-Because the front-end is plain HTML/CSS/JS (no heavy framework runtime), it is a
-good fit for Servo's current capabilities. To experiment:
-
-1. Build `versoview` from the Verso project.
-2. Add `tauri-runtime-verso` (git dependency) to `crates/glauca-tauri/Cargo.toml`.
-3. Switch the builder in `crates/glauca-tauri/src/main.rs` to
-   `tauri::Builder::<VersoRuntime>::new()…`, point it at the `versoview` binary,
-   and add `.invoke_system(INVOKE_SYSTEM_SCRIPTS.to_owned())`.
-
-The default `cargo run -p glauca-tauri` keeps using the stable system WebView.
+The front-end is plain HTML/CSS/JS (no heavy framework runtime), so nothing on
+the rendering side blocks a future switch. Revisit if Tauri grows official
+Servo support (watch the [Servo blog](https://servo.org/blog/) and
+[tauri-apps discussions](https://github.com/orgs/tauri-apps/discussions/15235)).
 
 
 ## Configuration
