@@ -58,6 +58,8 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 #     thread now aborts the process instead of unwinding — tokio task panics
 #     are no longer contained as JoinErrors, which is acceptable since the
 #     engine treats task failure as unrecoverable anyway.
+#   - codegen-units = 1 lets LLVM optimize each crate as a whole (smaller and
+#     faster code); the extra compile time is paid only in release builds.
 #   - opt-level stays 3, not "z": "z" shrinks further but generates size-first
 #     code in gpui's per-frame text shaping / rasterization loops, trading away
 #     exactly the GUI responsiveness the dev-profile section below protects.
