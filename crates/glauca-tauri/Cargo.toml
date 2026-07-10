@@ -27,8 +27,6 @@ tauri = { version = "2", features = [] }
 # mirroring glauca-tui / glauca-gui.
 rustls = { version = "0.23", features = ["ring"] }
 
-# NOTE on Servo: rendering through Servo uses `tauri-runtime-verso`, which is NOT
-# published on crates.io (it lives in the tauri-apps repo and is experimental).
-# It is therefore an opt-in manual step rather than a Cargo feature here — see the
-# "Servo (experimental)" section in README.md. The default build uses the system
-# WebView (WebKitGTK / WKWebView / WebView2).
+# NOTE on Servo: there is currently no maintained Tauri↔Servo bridge
+# (`tauri-runtime-verso` is dormant), so this build uses the system WebView
+# (WebKitGTK / WKWebView / WebView2). See "Servo rendering" in README.md.
