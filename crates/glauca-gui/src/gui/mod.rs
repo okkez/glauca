@@ -158,8 +158,8 @@ pub(crate) struct FilterStreamFormParams {
 
 pub(crate) struct GlaucaApp {
     /// Cloneable command sender, used from non-async click handlers. The
-    /// matching message receiver lives in the push-based delivery loop spawned
-    /// by `new` (see `setup.rs`), not on the view.
+    /// engine itself (with the message receiver) is moved into the push-based
+    /// delivery loop spawned by `new` (see `setup.rs`), not held on the view.
     cmd_tx: Sender<EngineCommand>,
 
     entries: Vec<LeftPaneEntry>,

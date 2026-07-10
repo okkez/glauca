@@ -1014,17 +1014,10 @@ impl Engine {
         self.msg_rx.recv().await
     }
 
-    /// Non-blocking drain of the next message (GUI per-frame style).
+    /// Non-blocking drain of the next message, for batching after an awaited
+    /// `recv` (the GUI applies a whole burst in one frame).
     pub fn try_recv(&mut self) -> Option<AppMessage> {
         self.msg_rx.try_recv().ok()
-    }
-
-    /// Split the engine into its command sender and message receiver, for
-    /// front-ends whose command handlers and message loop live in different
-    /// tasks (the gpui GUI awaits the receiver on its foreground executor
-    /// while click handlers hold clones of the sender).
-    pub fn into_parts(self) -> (mpsc::Sender<EngineCommand>, mpsc::Receiver<AppMessage>) {
-        (self.cmd_tx, self.msg_rx)
     }
 }
 

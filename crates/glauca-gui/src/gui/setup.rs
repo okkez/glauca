@@ -35,18 +35,17 @@ impl GlaucaApp {
         // background-sync burst is applied in one frame with a single repaint.
         // `spawn_in` (not `spawn`) so `apply` gets a `&mut Window`: error
         // messages surface as `push_notification` toasts, which need the window.
-        let (cmd_tx, mut msg_rx) = engine.into_parts();
+        let cmd_tx = engine.sender();
         cx.spawn_in(window, async move |this, cx| {
-            while let Some(first) = msg_rx.recv().await {
-                let mut batch = vec![first];
-                while let Ok(msg) = msg_rx.try_recv() {
-                    batch.push(msg);
-                }
+            let mut engine = engine;
+            while let Some(first) = engine.recv().await {
                 let result = this.update_in(cx, |this, window, cx| {
                     let t = std::time::Instant::now();
-                    let n = batch.len();
-                    for msg in batch {
+                    let mut n = 1;
+                    this.apply(first, window, cx);
+                    while let Some(msg) = engine.try_recv() {
                         this.apply(msg, window, cx);
+                        n += 1;
                     }
                     cx.notify();
                     tracing::debug!(
