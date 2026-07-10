@@ -1,5 +1,6 @@
 //! Construction and theming: the `GlaucaApp::new` bootstrap (engine wiring, the
-//! drain loop, filter-input subscription, settings restore) and the theme /
+//! push-based message delivery loop, filter-input subscription, settings
+//! restore) and the theme /
 //! settings-save / notification-toggle handlers.
 
 use gpui::*;
