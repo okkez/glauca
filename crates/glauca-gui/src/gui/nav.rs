@@ -98,6 +98,24 @@ impl GlaucaApp {
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
     }
 
+    /// Move the item-list cursor: reveal the row, reset the detail scroll,
+    /// mark the item read, and repaint. Every cursor-move path must end in
+    /// `cx.notify()` — `mark_current_item_read` alone doesn't repaint when the
+    /// target item is already read.
+    fn move_item_cursor(&mut self, cursor: usize, cx: &mut Context<Self>) {
+        let t = std::time::Instant::now();
+        self.item_cursor = cursor;
+        self.items_list.scroll_to_reveal_item(cursor);
+        self.reset_detail_scroll();
+        self.mark_current_item_read(cx);
+        cx.notify();
+        tracing::debug!(
+            handler_us = t.elapsed().as_micros() as u64,
+            cursor,
+            "item move"
+        );
+    }
+
     pub(crate) fn on_move_down(
         &mut self,
         _: &MoveDown,
@@ -114,17 +132,7 @@ impl GlaucaApp {
             Focus::ItemList => {
                 let max = self.filtered_len().saturating_sub(1);
                 if self.item_cursor < max {
-                    let t = std::time::Instant::now();
-                    self.item_cursor += 1;
-                    self.items_list.scroll_to_reveal_item(self.item_cursor);
-                    self.reset_detail_scroll();
-                    self.mark_current_item_read(cx);
-                    cx.notify();
-                    tracing::debug!(
-                        handler_us = t.elapsed().as_micros() as u64,
-                        cursor = self.item_cursor,
-                        "item move down"
-                    );
+                    self.move_item_cursor(self.item_cursor + 1, cx);
                 }
             }
             Focus::ItemDetail => {
@@ -144,17 +152,7 @@ impl GlaucaApp {
             }
             Focus::ItemList => {
                 if self.item_cursor > 0 {
-                    let t = std::time::Instant::now();
-                    self.item_cursor -= 1;
-                    self.items_list.scroll_to_reveal_item(self.item_cursor);
-                    self.reset_detail_scroll();
-                    self.mark_current_item_read(cx);
-                    cx.notify();
-                    tracing::debug!(
-                        handler_us = t.elapsed().as_micros() as u64,
-                        cursor = self.item_cursor,
-                        "item move up"
-                    );
+                    self.move_item_cursor(self.item_cursor - 1, cx);
                 }
             }
             Focus::ItemDetail => {
