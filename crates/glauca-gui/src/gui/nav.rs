@@ -118,6 +118,7 @@ impl GlaucaApp {
                     self.items_list.scroll_to_reveal_item(self.item_cursor);
                     self.reset_detail_scroll();
                     self.mark_current_item_read(cx);
+                    cx.notify();
                 }
             }
             Focus::ItemDetail => {
@@ -141,6 +142,7 @@ impl GlaucaApp {
                     self.items_list.scroll_to_reveal_item(self.item_cursor);
                     self.reset_detail_scroll();
                     self.mark_current_item_read(cx);
+                    cx.notify();
                 }
             }
             Focus::ItemDetail => {
