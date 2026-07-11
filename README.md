@@ -118,6 +118,7 @@ case-insensitive substring unless noted):
 | Qualifier | Matches |
 | --- | --- |
 | _plain text_ | title, author, or label |
+| `-<token>` | negates any token below (`-label:bug`, `-is:draft`, `-wip`) — the item must not match it |
 | `is:pr` / `is:issue` | item kind (exact) |
 | `is:open` / `is:closed` / `is:merged`, `state:<v>` | state |
 | `is:draft` | draft pull requests only |
