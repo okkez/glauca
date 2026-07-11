@@ -225,7 +225,12 @@ ul { list-style: none; margin: 0; padding: 0; }
 .state-open   { color: var(--green); }
 .state-closed { color: var(--red); }
 .state-merged { color: var(--magenta); }
+.state-draft  { color: var(--muted); }
 .lock { font-size: 11px; }
+
+/* Inline octicon SVGs (see OCTICONS in app.js); colored via currentColor. */
+.octicon { flex-shrink: 0; }
+.octicon.muted { color: var(--muted); }
 
 /* Avatars + review-state rings. */
 .avatar {

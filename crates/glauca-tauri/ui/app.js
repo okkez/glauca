@@ -85,6 +85,72 @@ function itemKey(it) {
   return `${it.repo_owner}/${it.repo_name}#${it.number}`;
 }
 
+// ── octicons ─────────────────────────────────────────────────────────────────
+//
+// GitHub Octicons (MIT licensed, https://github.com/primer/octicons), the same
+// set the GUI vendors under crates/glauca-gui/assets/octicons. Inlined as path
+// data because the CSP has no connect-src 'self' (fetch() of an .svg would be
+// blocked), and `fill: currentColor` lets CSS color them per state/theme.
+
+const OCTICONS = {
+  "check-circle-fill": [
+    { d: "M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16Zm3.78-9.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018L6.75 9.19 5.28 7.72a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l2 2a.75.75 0 0 0 1.06 0Z", evenodd: true },
+  ],
+  clock: [
+    { d: "M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm7-3.25v2.992l2.028.812a.75.75 0 0 1-.557 1.392l-2.5-1A.751.751 0 0 1 7 8.25v-3.5a.75.75 0 0 1 1.5 0Z" },
+  ],
+  comment: [
+    { d: "M1 2.75C1 1.784 1.784 1 2.75 1h10.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 13.25 12H9.06l-2.573 2.573A1.458 1.458 0 0 1 4 13.543V12H2.75A1.75 1.75 0 0 1 1 10.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h4.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z" },
+  ],
+  "git-merge": [
+    { d: "M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM5 3.25a.75.75 0 1 0 0 .005V3.25Z" },
+  ],
+  "git-pull-request": [
+    { d: "M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z" },
+  ],
+  "git-pull-request-closed": [
+    { d: "M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 5.5a.75.75 0 0 1 .75.75v3.378a2.251 2.251 0 1 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm-2.03-5.273a.75.75 0 0 1 1.06 0l.97.97.97-.97a.748.748 0 0 1 1.265.332.75.75 0 0 1-.205.729l-.97.97.97.97a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018l-.97-.97-.97.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l.97-.97-.97-.97a.75.75 0 0 1 0-1.06ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" },
+  ],
+  "git-pull-request-draft": [
+    { d: "M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 14a2.25 2.25 0 1 1 0-4.5 2.25 2.25 0 0 1 0 4.5ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM14 7.5a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm0-4.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z" },
+  ],
+  "issue-closed": [
+    { d: "M11.28 6.78a.75.75 0 0 0-1.06-1.06L7.25 8.69 5.78 7.22a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l3.5-3.5Z" },
+    { d: "M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0Zm-1.5 0a6.5 6.5 0 1 0-13 0 6.5 6.5 0 0 0 13 0Z" },
+  ],
+  "issue-opened": [
+    { d: "M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z" },
+    { d: "M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z" },
+  ],
+  lock: [
+    { d: "M4 4a4 4 0 0 1 8 0v2h.25c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 12.25 15h-8.5A1.75 1.75 0 0 1 2 13.25v-5.5C2 6.784 2.784 6 3.75 6H4Zm8.25 3.5h-8.5a.25.25 0 0 0-.25.25v5.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25ZM10.5 6V4a2.5 2.5 0 1 0-5 0v2Z" },
+  ],
+  "x-circle-fill": [
+    { d: "M2.343 13.657A8 8 0 1 1 13.658 2.342 8 8 0 0 1 2.343 13.657ZM6.03 4.97a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042L6.94 8 4.97 9.97a.749.749 0 0 0 .326 1.275.749.749 0 0 0 .734-.215L8 9.06l1.97 1.97a.749.749 0 0 0 1.275-.326.749.749 0 0 0-.215-.734L9.06 8l1.97-1.97a.749.749 0 0 0-.326-1.275.749.749 0 0 0-.734.215L8 6.94Z", evenodd: true },
+  ],
+};
+
+// An inline <svg> for the named octicon, colored via `currentColor` (so a color
+// class like .state-open on the element tints it, matching how gpui paints the
+// same SVGs as masks).
+function octicon(name, cls = "", size = 16) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("fill", "currentColor");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("class", cls ? `octicon ${cls}` : "octicon");
+  for (const p of OCTICONS[name] || []) {
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", p.d);
+    if (p.evenodd) path.setAttribute("fill-rule", "evenodd");
+    svg.appendChild(path);
+  }
+  return svg;
+}
+
 // Jasper-style unread: the item changed since it was last read. Mirrors
 // glauca_core::logic::is_item_unread; both timestamps are RFC3339 UTC, so plain
 // string comparison orders correctly (same assumption core makes).
@@ -518,6 +584,29 @@ function stateClass(s) {
   if (s === "open") return "state-open";
   if (s === "merged") return "state-merged";
   return "state-closed";
+}
+
+// Octicon name + color class encoding an item's state: the shape says
+// issue-vs-PR, the color says open/merged/closed/draft. Mirrors the GUI's
+// item_state_icon_info.
+function itemStateIcon(it) {
+  if (it.kind === "pull_request") {
+    if (it.is_draft) return { name: "git-pull-request-draft", cls: "state-draft" };
+    if (it.state === "merged") return { name: "git-merge", cls: "state-merged" };
+    if (it.state === "closed") return { name: "git-pull-request-closed", cls: "state-closed" };
+    return { name: "git-pull-request", cls: "state-open" };
+  }
+  return it.state === "closed"
+    ? { name: "issue-closed", cls: "state-closed" }
+    : { name: "issue-opened", cls: "state-open" };
+}
+
+// GitHub-style label for the detail-header state pill (mirrors state_label).
+function stateLabel(it) {
+  if (it.kind === "pull_request" && it.is_draft) return "Draft";
+  if (it.state === "merged") return "Merged";
+  if (it.state === "closed") return "Closed";
+  return "Open";
 }
 
 // CSS modifier for a GitHub review state (mirrors logic::ReviewState::from_state).
