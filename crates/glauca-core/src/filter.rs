@@ -72,25 +72,188 @@ fn fuzzy_hit(needle: &str, haystacks: &[&str]) -> bool {
 ///   - `repo:<owner/name>` — filter by repository (substring)
 ///   - `base:<branch>` / `head:<branch>` — filter PRs by base/head branch
 ///   - `review-requested:<login>` — filter by requested reviewer login
+///   - `-<token>` — negate any token above, GitHub-style: the item must NOT
+///     match it (`-label:bug`, `-is:draft`, `-wip`). A lone `-` is a plain
+///     text token, not a negation.
 ///
-/// Multiple tokens are ANDed together.
+/// Multiple tokens are ANDed together; each negated token independently
+/// excludes matching items.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct FilterQuery {
-    pub text_tokens: Vec<String>,
-    pub kinds: Vec<String>,
-    pub states: Vec<String>,
-    pub authors: Vec<String>,
-    pub assignees: Vec<String>,
-    pub labels: Vec<String>,
-    pub milestones: Vec<String>,
-    pub repos: Vec<String>,
-    pub base_refs: Vec<String>,
-    pub head_refs: Vec<String>,
-    pub review_requested: Vec<String>,
+    /// Positive conditions — an item must match every one.
+    require: Conditions,
+    /// Negated (`-` prefixed) conditions — an item must match none.
+    exclude: Conditions,
+}
+
+/// One direction's worth of parsed conditions (see [`FilterQuery`]'s
+/// `require` / `exclude`).
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Conditions {
+    text_tokens: Vec<String>,
+    kinds: Vec<String>,
+    states: Vec<String>,
+    authors: Vec<String>,
+    assignees: Vec<String>,
+    labels: Vec<String>,
+    milestones: Vec<String>,
+    repos: Vec<String>,
+    base_refs: Vec<String>,
+    head_refs: Vec<String>,
+    review_requested: Vec<String>,
     /// `is:draft` → `Some(true)`. Only constrained when set.
-    pub is_draft: Option<bool>,
+    is_draft: Option<bool>,
     /// `is:private` → `Some(true)`, `is:public` → `Some(false)`.
-    pub is_private: Option<bool>,
+    is_private: Option<bool>,
+}
+
+impl Conditions {
+    /// Parse one token (already lowercased, `-` stripped) into this set.
+    fn add_token(&mut self, lower: &str) {
+        if let Some(val) = lower.strip_prefix("state:") {
+            self.states.push(val.to_string());
+        } else if let Some(val) = lower.strip_prefix("is:") {
+            // `is:` is overloaded: kind (pr/issue), draft, repo visibility,
+            // else a state value (open/closed/merged/…).
+            match val {
+                "pr" | "pull_request" | "pull-request" => self.kinds.push("pull_request".into()),
+                "issue" | "issues" => self.kinds.push("issue".into()),
+                "draft" => self.is_draft = Some(true),
+                "public" => self.is_private = Some(false),
+                "private" => self.is_private = Some(true),
+                _ => self.states.push(val.to_string()),
+            }
+        } else if let Some(val) = lower.strip_prefix("author:") {
+            self.authors.push(val.to_string());
+        } else if let Some(val) = lower.strip_prefix("assignee:") {
+            self.assignees.push(val.to_string());
+        } else if let Some(val) = lower.strip_prefix("label:") {
+            self.labels.push(val.to_string());
+        } else if let Some(val) = lower.strip_prefix("milestone:") {
+            self.milestones.push(val.to_string());
+        } else if let Some(val) = lower.strip_prefix("repo:") {
+            self.repos.push(val.to_string());
+        } else if let Some(val) = lower.strip_prefix("base:") {
+            self.base_refs.push(val.to_string());
+        } else if let Some(val) = lower.strip_prefix("head:") {
+            self.head_refs.push(val.to_string());
+        } else if let Some(val) = lower.strip_prefix("review-requested:") {
+            self.review_requested.push(val.to_string());
+        } else {
+            self.text_tokens.push(lower.to_string());
+        }
+    }
+
+    /// `true` when every condition in this set evaluates to `want` against
+    /// `item` — `want == true` checks a require set (all must hit),
+    /// `want == false` an exclude set (none may hit).
+    fn all_eval_to(&self, item: &ItemEntry, want: bool) -> bool {
+        // kind filter (is:pr / is:issue) — exact match on normalized kind
+        for k in &self.kinds {
+            if (item.kind.to_lowercase() == k.as_str()) != want {
+                return false;
+            }
+        }
+        // is:draft — draft pull requests
+        if let Some(v) = self.is_draft
+            && (item.is_draft == v) != want
+        {
+            return false;
+        }
+        // is:public / is:private — repository visibility
+        if let Some(v) = self.is_private
+            && (item.repo_private == v) != want
+        {
+            return false;
+        }
+        // state filter
+        for s in &self.states {
+            if item.state.to_lowercase().contains(s.as_str()) != want {
+                return false;
+            }
+        }
+        // author filter
+        let author_lower = item
+            .author
+            .as_ref()
+            .map(|u| u.login.to_lowercase())
+            .unwrap_or_default();
+        for a in &self.authors {
+            if author_lower.contains(a.as_str()) != want {
+                return false;
+            }
+        }
+        // assignee filter
+        for a in &self.assignees {
+            let hit = item
+                .assignees
+                .iter()
+                .any(|u| u.login.to_lowercase().contains(a.as_str()));
+            if hit != want {
+                return false;
+            }
+        }
+        // label filter
+        for l in &self.labels {
+            let hit = item
+                .labels
+                .iter()
+                .any(|lbl| lbl.to_lowercase().contains(l.as_str()));
+            if hit != want {
+                return false;
+            }
+        }
+        // milestone filter
+        for m in &self.milestones {
+            let milestone_lower = item.milestone.as_deref().unwrap_or_default().to_lowercase();
+            if milestone_lower.contains(m.as_str()) != want {
+                return false;
+            }
+        }
+        // repo filter
+        let repo_lower = item.repo_display().to_lowercase();
+        for r in &self.repos {
+            if repo_lower.contains(r.as_str()) != want {
+                return false;
+            }
+        }
+        // base/head branch filter (PRs)
+        for b in &self.base_refs {
+            let base_lower = item.base_ref.as_deref().unwrap_or_default().to_lowercase();
+            if base_lower.contains(b.as_str()) != want {
+                return false;
+            }
+        }
+        for h in &self.head_refs {
+            let head_lower = item.head_ref.as_deref().unwrap_or_default().to_lowercase();
+            if head_lower.contains(h.as_str()) != want {
+                return false;
+            }
+        }
+        // review-requested filter
+        for rv in &self.review_requested {
+            let hit = item
+                .requested_reviewers
+                .iter()
+                .any(|u| u.login.to_lowercase().contains(rv.as_str()));
+            if hit != want {
+                return false;
+            }
+        }
+        // plain text tokens — fuzzy-match title | author | repo | labels
+        if !self.text_tokens.is_empty() {
+            let author_login = item.author.as_ref().map(|u| u.login.as_str()).unwrap_or("");
+            let repo = item.repo_display();
+            let mut fields: Vec<&str> = vec![item.title.as_str(), author_login, repo.as_str()];
+            fields.extend(item.labels.iter().map(|l| l.as_str()));
+            for tok in &self.text_tokens {
+                if fuzzy_hit(tok, &fields) != want {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 impl FilterQuery {
@@ -98,37 +261,10 @@ impl FilterQuery {
         let mut q = FilterQuery::default();
         for token in input.split_whitespace() {
             let lower = token.to_lowercase();
-            if let Some(val) = lower.strip_prefix("state:") {
-                q.states.push(val.to_string());
-            } else if let Some(val) = lower.strip_prefix("is:") {
-                // `is:` is overloaded: kind (pr/issue), draft, repo visibility,
-                // else a state value (open/closed/merged/…).
-                match val {
-                    "pr" | "pull_request" | "pull-request" => q.kinds.push("pull_request".into()),
-                    "issue" | "issues" => q.kinds.push("issue".into()),
-                    "draft" => q.is_draft = Some(true),
-                    "public" => q.is_private = Some(false),
-                    "private" => q.is_private = Some(true),
-                    _ => q.states.push(val.to_string()),
-                }
-            } else if let Some(val) = lower.strip_prefix("author:") {
-                q.authors.push(val.to_string());
-            } else if let Some(val) = lower.strip_prefix("assignee:") {
-                q.assignees.push(val.to_string());
-            } else if let Some(val) = lower.strip_prefix("label:") {
-                q.labels.push(val.to_string());
-            } else if let Some(val) = lower.strip_prefix("milestone:") {
-                q.milestones.push(val.to_string());
-            } else if let Some(val) = lower.strip_prefix("repo:") {
-                q.repos.push(val.to_string());
-            } else if let Some(val) = lower.strip_prefix("base:") {
-                q.base_refs.push(val.to_string());
-            } else if let Some(val) = lower.strip_prefix("head:") {
-                q.head_refs.push(val.to_string());
-            } else if let Some(val) = lower.strip_prefix("review-requested:") {
-                q.review_requested.push(val.to_string());
-            } else {
-                q.text_tokens.push(lower);
+            match lower.strip_prefix('-') {
+                // `-token` negates; a lone `-` stays a plain text token.
+                Some(rest) if !rest.is_empty() => q.exclude.add_token(rest),
+                _ => q.require.add_token(&lower),
             }
         }
         q
@@ -142,111 +278,7 @@ impl FilterQuery {
 
     /// Returns `true` if `item` matches all conditions in this query.
     pub fn matches(&self, item: &ItemEntry) -> bool {
-        // kind filter (is:pr / is:issue) — exact match on normalized kind
-        for k in &self.kinds {
-            if item.kind.to_lowercase() != k.as_str() {
-                return false;
-            }
-        }
-        // is:draft — only draft pull requests
-        if let Some(want) = self.is_draft
-            && item.is_draft != want
-        {
-            return false;
-        }
-        // is:public / is:private — repository visibility
-        if let Some(want) = self.is_private
-            && item.repo_private != want
-        {
-            return false;
-        }
-        // state filter
-        for s in &self.states {
-            if !item.state.to_lowercase().contains(s.as_str()) {
-                return false;
-            }
-        }
-        // author filter
-        let author_lower = item
-            .author
-            .as_ref()
-            .map(|u| u.login.to_lowercase())
-            .unwrap_or_default();
-        for a in &self.authors {
-            if !author_lower.contains(a.as_str()) {
-                return false;
-            }
-        }
-        // assignee filter
-        for a in &self.assignees {
-            let hit = item
-                .assignees
-                .iter()
-                .any(|u| u.login.to_lowercase().contains(a.as_str()));
-            if !hit {
-                return false;
-            }
-        }
-        // label filter
-        for l in &self.labels {
-            let hit = item
-                .labels
-                .iter()
-                .any(|lbl| lbl.to_lowercase().contains(l.as_str()));
-            if !hit {
-                return false;
-            }
-        }
-        // milestone filter
-        for m in &self.milestones {
-            let milestone_lower = item.milestone.as_deref().unwrap_or_default().to_lowercase();
-            if !milestone_lower.contains(m.as_str()) {
-                return false;
-            }
-        }
-        // repo filter
-        let repo_lower = item.repo_display().to_lowercase();
-        for r in &self.repos {
-            if !repo_lower.contains(r.as_str()) {
-                return false;
-            }
-        }
-        // base/head branch filter (PRs)
-        for b in &self.base_refs {
-            let base_lower = item.base_ref.as_deref().unwrap_or_default().to_lowercase();
-            if !base_lower.contains(b.as_str()) {
-                return false;
-            }
-        }
-        for h in &self.head_refs {
-            let head_lower = item.head_ref.as_deref().unwrap_or_default().to_lowercase();
-            if !head_lower.contains(h.as_str()) {
-                return false;
-            }
-        }
-        // review-requested filter
-        for rv in &self.review_requested {
-            let hit = item
-                .requested_reviewers
-                .iter()
-                .any(|u| u.login.to_lowercase().contains(rv.as_str()));
-            if !hit {
-                return false;
-            }
-        }
-        // plain text tokens — fuzzy-match title | author | repo | labels
-        if !self.text_tokens.is_empty() {
-            let author_login = item.author.as_ref().map(|u| u.login.as_str()).unwrap_or("");
-            let repo = item.repo_display();
-            let mut fields: Vec<&str> = vec![item.title.as_str(), author_login, repo.as_str()];
-            fields.extend(item.labels.iter().map(|l| l.as_str()));
-            for tok in &self.text_tokens {
-                if !fuzzy_hit(tok, &fields) {
-                    return false;
-                }
-            }
-        }
-        true
+        self.require.all_eval_to(item, true) && self.exclude.all_eval_to(item, false)
     }
 
     /// Byte ranges `(start, end)` in `text` covering every plain-text-token
@@ -255,9 +287,9 @@ impl FilterQuery {
     /// plain text token or no match. Frontends turn these into styled spans.
     ///
     /// Because fuzzy matches are non-contiguous, a single token can produce
-    /// several ranges.
+    /// several ranges. Negated (`-`) text tokens never highlight.
     pub fn highlight_ranges(&self, text: &str) -> Vec<(usize, usize)> {
-        if self.text_tokens.is_empty() {
+        if self.require.text_tokens.is_empty() {
             return Vec::new();
         }
 
@@ -268,7 +300,7 @@ impl FilterQuery {
         // highlights. `frizbee_reports_byte_offsets` guards this contract; if it
         // fails after upgrading frizbee, revisit the byte→char handling here.
         let mut byte_hits: Vec<usize> = Vec::new();
-        for tok in &self.text_tokens {
+        for tok in &self.require.text_tokens {
             for mi in with_matcher(tok, |m| m.match_list_indices(&[text])) {
                 byte_hits.extend(mi.indices);
             }
@@ -595,25 +627,151 @@ mod tests {
     #[test]
     fn parse_case_insensitive_structured_token() {
         let q = FilterQuery::parse("State:Open");
-        assert_eq!(q.states, vec!["open"]);
-        assert!(q.text_tokens.is_empty());
+        assert_eq!(q.require.states, vec!["open"]);
+        assert!(q.require.text_tokens.is_empty());
     }
 
     #[test]
     fn parse_repeated_state_tokens() {
         let q = FilterQuery::parse("state:open state:closed");
-        assert_eq!(q.states.len(), 2);
-        assert!(q.states.contains(&"open".to_string()));
-        assert!(q.states.contains(&"closed".to_string()));
+        assert_eq!(q.require.states.len(), 2);
+        assert!(q.require.states.contains(&"open".to_string()));
+        assert!(q.require.states.contains(&"closed".to_string()));
     }
 
     #[test]
     fn parse_multiple_structured_types() {
         let q = FilterQuery::parse("author:alice label:bug state:open");
-        assert_eq!(q.authors, vec!["alice"]);
-        assert_eq!(q.labels, vec!["bug"]);
-        assert_eq!(q.states, vec!["open"]);
-        assert!(q.text_tokens.is_empty());
+        assert_eq!(q.require.authors, vec!["alice"]);
+        assert_eq!(q.require.labels, vec!["bug"]);
+        assert_eq!(q.require.states, vec!["open"]);
+        assert!(q.require.text_tokens.is_empty());
+    }
+
+    #[test]
+    fn parse_negated_tokens_go_to_exclude() {
+        let q = FilterQuery::parse("-label:bug -wip state:open");
+        assert_eq!(q.exclude.labels, vec!["bug"]);
+        assert_eq!(q.exclude.text_tokens, vec!["wip"]);
+        assert_eq!(q.require.states, vec!["open"]);
+        assert!(q.require.labels.is_empty());
+    }
+
+    // ── negation (`-` prefix) ─────────────────────────────────────────────────
+
+    #[test]
+    fn negated_label_excludes_matching_items() {
+        let q = FilterQuery::parse("-label:bug");
+        assert!(!q.matches(&item("PR", "a", "open", &["bug"], "o/r")));
+        assert!(q.matches(&item("PR", "a", "open", &["enhancement"], "o/r")));
+        assert!(q.matches(&item("PR", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn negated_author_repo_and_state() {
+        assert!(!FilterQuery::parse("-author:bob").matches(&item("PR", "bob", "open", &[], "o/r")));
+        assert!(FilterQuery::parse("-author:bob").matches(&item(
+            "PR",
+            "alice",
+            "open",
+            &[],
+            "o/r"
+        )));
+        assert!(!FilterQuery::parse("-repo:owner/myrepo").matches(&item(
+            "PR",
+            "a",
+            "open",
+            &[],
+            "owner/myrepo"
+        )));
+        assert!(FilterQuery::parse("-repo:owner/myrepo").matches(&item(
+            "PR",
+            "a",
+            "open",
+            &[],
+            "other/repo"
+        )));
+        assert!(!FilterQuery::parse("-state:closed").matches(&item(
+            "PR",
+            "a",
+            "closed",
+            &[],
+            "o/r"
+        )));
+        assert!(FilterQuery::parse("-is:closed").matches(&item("PR", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn negated_is_draft_excludes_drafts() {
+        let q = FilterQuery::parse("-is:draft");
+        let mut draft = item("PR", "a", "open", &[], "o/r");
+        draft.is_draft = true;
+        assert!(!q.matches(&draft));
+        assert!(q.matches(&item("PR", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn negated_is_pr_keeps_issues_only() {
+        let q = FilterQuery::parse("-is:pr");
+        assert!(q.matches(&issue("Issue", "a", "open")));
+        assert!(!q.matches(&item("PR", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn negated_is_public_keeps_private_only() {
+        let mut private = item("PR", "a", "open", &[], "o/r");
+        private.repo_private = true;
+        let public = item("PR", "a", "open", &[], "o/r");
+        let q = FilterQuery::parse("-is:public");
+        assert!(q.matches(&private));
+        assert!(!q.matches(&public));
+    }
+
+    #[test]
+    fn negated_plain_text_excludes_fuzzy_hits() {
+        let q = FilterQuery::parse("-wip");
+        assert!(!q.matches(&item("WIP: fix crash", "a", "open", &[], "o/r")));
+        // Fuzzy, like positive tokens: "wip" is a subsequence of this title.
+        assert!(!q.matches(&item("Work in progress", "a", "open", &[], "o/r")));
+        assert!(q.matches(&item("Fix crash", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn positive_and_negative_tokens_combine() {
+        let q = FilterQuery::parse("is:pr -label:wontfix state:open");
+        assert!(q.matches(&item("PR", "a", "open", &["bug"], "o/r")));
+        assert!(!q.matches(&item("PR", "a", "open", &["bug", "wontfix"], "o/r")));
+        assert!(!q.matches(&item("PR", "a", "closed", &["bug"], "o/r")));
+        assert!(!q.matches(&issue("Issue", "a", "open")));
+    }
+
+    #[test]
+    fn lone_hyphen_is_a_plain_text_token() {
+        let q = FilterQuery::parse("-");
+        assert!(!q.is_empty());
+        assert!(q.matches(&item("re-add feature", "a", "open", &[], "o/r")));
+        assert!(!q.matches(&item("add feature", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn negated_query_is_not_empty() {
+        assert!(!FilterQuery::parse("-is:draft").is_empty());
+    }
+
+    #[test]
+    fn negation_of_missing_field_passes() {
+        // No milestone set → `-milestone:v2` keeps the item (same as GitHub).
+        let q = FilterQuery::parse("-milestone:v2");
+        assert!(q.matches(&item("PR", "a", "open", &[], "o/r")));
+        let mut with_ms = item("PR", "a", "open", &[], "o/r");
+        with_ms.milestone = Some("v2.0".into());
+        assert!(!q.matches(&with_ms));
+    }
+
+    #[test]
+    fn negated_text_token_does_not_highlight() {
+        let q = FilterQuery::parse("-bug");
+        assert_eq!(q.highlight_ranges("Fix the bug"), vec![]);
     }
 
     // ── matches edge cases ───────────────────────────────────────────────────────
