@@ -169,7 +169,7 @@ pub async fn unread_counts(
 #[derive(Serialize)]
 pub struct TitleSegment {
     pub text: String,
-    pub hl: bool,
+    pub highlighted: bool,
 }
 
 /// One match from [`filter_items`]: the item's index into the input list plus
@@ -191,19 +191,19 @@ fn split_title(title: &str, ranges: &[(usize, usize)]) -> Vec<TitleSegment> {
         if start > pos {
             out.push(TitleSegment {
                 text: title[pos..start].to_string(),
-                hl: false,
+                highlighted: false,
             });
         }
         out.push(TitleSegment {
             text: title[start..end].to_string(),
-            hl: true,
+            highlighted: true,
         });
         pos = end;
     }
     if pos < title.len() {
         out.push(TitleSegment {
             text: title[pos..].to_string(),
-            hl: false,
+            highlighted: false,
         });
     }
     out

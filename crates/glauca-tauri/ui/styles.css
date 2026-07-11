@@ -8,7 +8,8 @@
   --border: #30363d;
   --fg: #e6edf3;
   --muted: #8b949e;
-  --accent: #373e47;      /* neutral grey: unread badge + unread-row tint */
+  --accent: #373e47;      /* neutral grey: unread badge (the unread-row tint is
+                             the separate --unread-tint below) */
   --accent-fg: #e6edf3;
   --link: #2f81f7;        /* blue: links, focus frame, filter-match highlight */
   --list-active: #21262d;

@@ -20,8 +20,8 @@ const state = {
   itemsByQuery: new Map(), // rootQueryId -> ItemEntry[]
   pending: new Map(),      // rootQueryId -> held-back background items (not yet applied)
   visibleItems: [],        // current entry's items after stream + inline filtering
-  visibleHighlights: [],   // per visibleItems row: pre-split {text, hl} title
-                          // segments from filter_items (empty = no highlight)
+  visibleTitleSegments: [], // per visibleItems row: pre-split {text, highlighted}
+                          // title segments from filter_items (empty = no highlight)
   unread: new Map(),       // unreadKey(isFilterStream, entryId) -> count
   selectedEntry: -1,
   selectedItemKey: null,
@@ -33,7 +33,7 @@ const state = {
   settings: { theme: "system", notifications_enabled: false, sync_interval_secs: 60, pane_sizes: null },
   filterSeq: 0,            // bumped per refreshVisible() call; guards against a stale
                           // filter_items result overwriting a newer entry's items
-  syncing: 0,              // in-flight foreground syncs (SyncStarted − SyncDone/Error)
+  syncingCount: 0,         // in-flight foreground syncs (SyncStarted − SyncDone/Error)
   bgSyncPending: 0,        // queued background-sync jobs (BgSyncQueued − BgSyncJobDone)
 };
 
@@ -66,7 +66,7 @@ function setStatus(msg, isError = false) {
 function renderFooter() {
   const footer = $("sidebar-footer");
   const bits = [];
-  if (state.syncing > 0) bits.push("syncing…");
+  if (state.syncingCount > 0) bits.push("syncing…");
   if (state.bgSyncPending > 0) bits.push(`${state.bgSyncPending} bg`);
   const rows = [];
   if (bits.length) rows.push(el("div", { text: bits.join("  ") }));
@@ -396,7 +396,7 @@ function infoModal(title, bodyEls, { closeKeys = ["Escape", "q"], boxClass = "" 
 let ctxMenuClose = null;
 
 // Menu-bar button id whose dropdown is currently open (null for ordinary
-// context menus). First-class ownership lets menuButton decide toggle-close
+// context menus). First-class ownership lets wireMenuButton decide toggle-close
 // vs. open from the *current* state, with no dismissal-history heuristics.
 let menuBarOwner = null;
 
@@ -437,10 +437,15 @@ function showContextMenu(x, y, items, ownerEl = null) {
   }
   const close = (ev) => {
     if (ev.type === "keydown" && ev.key !== "Escape") return;
-    // Clicks inside the menu are the items' own onclick business; closing (and
-    // detaching the node) on the capture-phase mousedown would race the click.
-    // Same for the owner element — its click handler decides open vs. toggle.
-    if (ev.type === "mousedown" && (ev.target.closest(".ctx-menu") || (ownerEl && ownerEl.contains(ev.target)))) return;
+    if (ev.type === "mousedown") {
+      // Clicks inside the menu are the items' own onclick business; closing
+      // (and detaching the node) on the capture-phase mousedown would race the
+      // click. Same for the owner element — its click handler decides open
+      // vs. toggle.
+      const insideMenu = ev.target.closest(".ctx-menu");
+      const insideOwner = ownerEl && ownerEl.contains(ev.target);
+      if (insideMenu || insideOwner) return;
+    }
     dismissContextMenu();
   };
   ctxMenuClose = close;
@@ -457,23 +462,6 @@ function showContextMenu(x, y, items, ownerEl = null) {
 // "✓ " prefix on the active option; NBSPs keep inactive labels aligned.
 function checkmark(active) {
   return active ? "✓ " : "   ";
-}
-
-// Persist the full settings object (the TOML holds all fields, so partial
-// updates spread over the current state) and adopt it locally on success. The
-// object passes through to Rust's TauriSettings as-is — no per-field mapping
-// to keep in sync when settings grow.
-function persistSettings(next) {
-  return invoke("save_settings", { settings: next })
-    .then(() => {
-      state.settings = next;
-    })
-    .catch((e) => setStatus(`settings: ${e}`, true));
-}
-
-function setTheme(theme) {
-  applyTheme(theme);
-  persistSettings({ ...state.settings, theme });
 }
 
 function glaucaMenuItems() {
@@ -532,7 +520,7 @@ function openAboutModal() {
 // it again while its own menu is open closes it (mousedowns on the owner are
 // exempt from the auto-dismiss, so this handler sees the still-open state).
 // A click on a different menu button switches menus in one click.
-function menuButton(id, buildItems) {
+function wireMenuButton(id, buildItems) {
   const btn = $(id);
   btn.addEventListener("click", () => {
     if (menuBarOwner === id) {
@@ -541,7 +529,7 @@ function menuButton(id, buildItems) {
     }
     const r = btn.getBoundingClientRect();
     showContextMenu(Math.round(r.left), Math.round(r.bottom + 2), buildItems(), btn);
-    menuBarOwner = id;
+    menuBarOwner = id; // must come after showContextMenu — its dismissContextMenu() resets the owner
   });
 }
 
@@ -595,12 +583,12 @@ function setupPaneResize() {
       document.addEventListener("mouseup", up);
     });
   };
-  wire("div-left", (sidebar, detail, dx) => {
+  wire("divider-left", (sidebar, detail, dx) => {
     const max = Math.min(SIDEBAR_MAX, window.innerWidth - detail - CENTER_MIN);
     const w = Math.max(SIDEBAR_MIN, Math.min(max, sidebar + dx));
     $("sidebar").style.width = `${w}px`;
   });
-  wire("div-right", (sidebar, detail, dx) => {
+  wire("divider-right", (sidebar, detail, dx) => {
     const max = window.innerWidth - sidebar - CENTER_MIN;
     const w = Math.max(DETAIL_MIN, Math.min(max, detail - dx));
     $("detail").style.width = `${w}px`;
@@ -652,12 +640,12 @@ async function refreshVisible() {
     });
     if (seq !== state.filterSeq) return;
     state.visibleItems = matches.map((m) => all[m.index]);
-    state.visibleHighlights = matches.map((m) => m.title_segments);
+    state.visibleTitleSegments = matches.map((m) => m.title_segments);
   } catch (err) {
     if (seq !== state.filterSeq) return;
     setStatus(`filter: ${err}`, true);
     state.visibleItems = all;
-    state.visibleHighlights = [];
+    state.visibleTitleSegments = [];
   }
   renderItemList();
 }
@@ -739,18 +727,20 @@ function avatarEl(user, cls = "avatar", displayPx = 24) {
   return span;
 }
 
+// Octicon per review state for the badge overlay (the GUI's
+// review_state_icon); COMMENTED / DISMISSED and anything unknown fall back to
+// the comment icon.
+const REVIEW_BADGE_ICON = {
+  APPROVED: "check-circle-fill",
+  CHANGES_REQUESTED: "x-circle-fill",
+  PENDING: "clock",
+};
+
 // A reviewer avatar with a review-state octicon badge overlaid bottom-right
-// (the GUI's reviewer_avatar / review_state_icon): approved=green check,
-// changes=red x, pending=yellow clock, commented/dismissed=grey comment.
+// (the GUI's reviewer_avatar): approved=green check, changes=red x,
+// pending=yellow clock, commented/dismissed=grey comment.
 function reviewerAvatar(user, reviewState) {
-  const icon =
-    reviewState === "APPROVED"
-      ? "check-circle-fill"
-      : reviewState === "CHANGES_REQUESTED"
-        ? "x-circle-fill"
-        : reviewState === "PENDING"
-          ? "clock"
-          : "comment";
+  const icon = REVIEW_BADGE_ICON[reviewState] || "comment";
   return el("span", { class: "rv-wrap" }, [
     avatarEl(user),
     octicon(icon, `rv-badge ${reviewStateClass(reviewState)}`, 14),
@@ -758,8 +748,8 @@ function reviewerAvatar(user, reviewState) {
 }
 
 // The item title with the inline-filter matches highlighted. `segments` come
-// pre-split from filter_items ({text, hl} pieces — the Rust side owns the
-// byte-offset arithmetic); empty/missing means no highlight.
+// pre-split from filter_items ({text, highlighted} pieces — the Rust side owns
+// the byte-offset arithmetic); empty/missing means no highlight.
 function renderHighlightedTitle(title, segments) {
   const span = el("span", { class: "it-title" });
   if (!segments || !segments.length) {
@@ -767,7 +757,7 @@ function renderHighlightedTitle(title, segments) {
     return span;
   }
   for (const s of segments) {
-    if (s.hl) span.appendChild(el("span", { class: "hl", text: s.text }));
+    if (s.highlighted) span.appendChild(el("span", { class: "hl", text: s.text }));
     else span.appendChild(document.createTextNode(s.text));
   }
   return span;
@@ -827,13 +817,14 @@ function renderItemList() {
     const rows = [
       el("div", { class: "it-title-row" }, [
         octicon(icon.name, `it-state ${icon.cls}`, 16),
-        renderHighlightedTitle(it.title, state.visibleHighlights[idx]),
+        renderHighlightedTitle(it.title, state.visibleTitleSegments[idx]),
       ]),
     ];
 
     const assignees = it.assignees || [];
     const overlays = reviewerOverlays(it);
-    if (it.author || assignees.length || overlays.length || it.comment_count > 0) {
+    const hasParticipants = it.author || assignees.length || overlays.length || it.comment_count > 0;
+    if (hasParticipants) {
       const left = el("div", { class: "it-people-side" });
       if (it.author) left.appendChild(avatarEl(it.author));
       // Arrow reads "author → assignee(s)" when both sides exist.
@@ -895,17 +886,19 @@ function clearDetail() {
   scroll.replaceChildren(el("div", { class: "detail-empty", text: "Select an item" }));
 }
 
-// Review-decision octicon for the detail header (the GUI's
-// review_decision_icon); the wrapping span carries the tooltip.
+// Octicon name, color class, and tooltip label for a PR's reviewDecision
+// (mirrors the GUI's review_decision_icon).
+function reviewDecisionInfo(decision) {
+  if (decision === "APPROVED") return ["check-circle-fill", "state-open", "Approved"];
+  if (decision === "CHANGES_REQUESTED") return ["x-circle-fill", "state-closed", "Changes requested"];
+  if (decision === "REVIEW_REQUIRED") return ["clock", "state-pending", "Review required"];
+  return ["comment", "muted", "Review"];
+}
+
+// Review-decision octicon for the detail header; the wrapping span carries
+// the tooltip.
 function reviewDecisionIcon(decision) {
-  const [name, cls, label] =
-    decision === "APPROVED"
-      ? ["check-circle-fill", "state-open", "Approved"]
-      : decision === "CHANGES_REQUESTED"
-        ? ["x-circle-fill", "state-closed", "Changes requested"]
-        : decision === "REVIEW_REQUIRED"
-          ? ["clock", "state-pending", "Review required"]
-          : ["comment", "muted", "Review"];
+  const [name, cls, label] = reviewDecisionInfo(decision);
   const span = el("span", { class: "decision-icon" }, [octicon(name, cls, 20)]);
   span.title = label;
   return span;
@@ -1643,15 +1636,15 @@ function handleMessage(msg) {
       setStatus(d, true);
       break;
     case "SyncStarted":
-      state.syncing += 1;
+      state.syncingCount += 1;
       setStatus(`syncing #${d.query_id}…`);
       break;
     case "SyncDone":
-      state.syncing = Math.max(0, state.syncing - 1);
+      state.syncingCount = Math.max(0, state.syncingCount - 1);
       setStatus(`synced ${d.count} item(s)`);
       break;
     case "SyncError":
-      state.syncing = Math.max(0, state.syncing - 1);
+      state.syncingCount = Math.max(0, state.syncingCount - 1);
       setStatus(`sync error: ${d.error}`, true);
       break;
     // Background-sync queue depth, shown as "N bg" in the sidebar footer (the
@@ -1692,6 +1685,23 @@ function applyTheme(theme) {
     const light = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
     html.classList.toggle("sys-light", !!light);
   }
+}
+
+// Persist the full settings object (the TOML holds all fields, so partial
+// updates spread over the current state) and adopt it locally on success. The
+// object passes through to Rust's TauriSettings as-is — no per-field mapping
+// to keep in sync when settings grow.
+function persistSettings(next) {
+  return invoke("save_settings", { settings: next })
+    .then(() => {
+      state.settings = next;
+    })
+    .catch((e) => setStatus(`settings: ${e}`, true));
+}
+
+function setTheme(theme) {
+  applyTheme(theme);
+  persistSettings({ ...state.settings, theme });
 }
 
 // Settings modal (Glauca > Settings…). Theme and notifications moved to the
@@ -1737,9 +1747,9 @@ async function main() {
   // (e.g. a future missed await) lands on the sidebar footer, not the void.
   window.addEventListener("unhandledrejection", (ev) => setStatus(String(ev.reason), true));
 
-  menuButton("menu-glauca", glaucaMenuItems);
-  menuButton("menu-view", viewMenuItems);
-  menuButton("menu-help", helpMenuItems);
+  wireMenuButton("menu-glauca", glaucaMenuItems);
+  wireMenuButton("menu-view", viewMenuItems);
+  wireMenuButton("menu-help", helpMenuItems);
 
   // Right-click on the entry list's empty space → New query (the GUI's
   // NewQueryOnly menu). Rows handle their own context menu (entryMenu).
@@ -1755,7 +1765,7 @@ async function main() {
     if (it) showItemActionMenu(it, ev.clientX, ev.clientY);
   });
 
-  // Load + apply persisted settings (theme) before anything renders.
+  // Load + apply persisted settings (theme, pane widths) before anything renders.
   try {
     state.settings = await invoke("get_settings");
   } catch {
