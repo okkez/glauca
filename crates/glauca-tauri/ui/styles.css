@@ -240,13 +240,11 @@ ul { list-style: none; margin: 0; padding: 0; }
 .it-meta { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
 .it-meta .meta-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .it-meta .meta-time { flex: none; }
-
-.tag { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--border); }
 .state-open   { color: var(--green); }
 .state-closed { color: var(--red); }
 .state-merged { color: var(--magenta); }
 .state-draft  { color: var(--muted); }
-.lock { font-size: 11px; }
+.state-pending { color: var(--yellow); }
 
 /* Inline octicon SVGs (see OCTICONS in app.js); colored via currentColor. */
 .octicon { flex-shrink: 0; }
@@ -265,7 +263,6 @@ ul { list-style: none; margin: 0; padding: 0; }
   justify-content: center;
   flex: none;
 }
-.avatar.sm { width: 16px; height: 16px; font-size: 9px; }
 .avatar-fallback { color: var(--muted); font-weight: 600; font-size: 11px; }
 
 /* Reviewer avatar with a review-state octicon badge overlaid bottom-right
@@ -284,51 +281,64 @@ ul { list-style: none; margin: 0; padding: 0; }
 .rv-badge.rv-commented,
 .rv-badge.rv-dismissed { color: var(--muted); background: var(--bg); }
 
-/* Detail review-decision badge + people chips. */
-.decision { font-weight: 600; }
-.decision.rv-approved  { color: var(--green); }
-.decision.rv-changes   { color: var(--red); }
-.decision.rv-pending   { color: var(--muted); }
-.people { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.people-label { color: var(--muted); font-size: 12px; }
-.chip {
+/* Detail pane: pinned header (title line, field rows, actions) above a
+   scrollable plain-text body, mirroring the GUI's render_detail. */
+#detail-header {
+  flex: none;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.detail-title-row { display: flex; align-items: flex-start; gap: 8px; }
+.detail-lead { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+.detail-title { font-size: 16px; font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
+.decision-icon { display: inline-flex; }
+
+/* GitHub-style state pill: colored, rounded, light text; the octicon inside
+   inherits the white via currentColor. */
+.state-pill {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: var(--sidebar);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 1px 8px 1px 2px;
-  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
 }
-.chip.rv-approved { border-color: var(--green); }
-.chip.rv-changes  { border-color: var(--red); }
+.state-pill.state-open   { background: var(--green); color: #ffffff; }
+.state-pill.state-merged { background: var(--magenta); color: #ffffff; }
+.state-pill.state-closed { background: var(--red); color: #ffffff; }
+.state-pill.state-draft  { background: var(--muted); color: #ffffff; }
 
-#detail-body { padding: 14px; overflow-y: auto; flex: 1; }
-#detail-body.empty { color: var(--muted); }
-#detail-body h2 { margin: 0 0 6px; font-size: 16px; }
-#detail-body .meta { color: var(--muted); margin-bottom: 10px; }
-#detail-body .labels { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 4px; }
-#detail-body .body {
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  background: var(--sidebar);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 10px;
-  margin-top: 10px;
-}
-.actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+/* `label: value` field rows (the GUI's detail_field / detail_people_field). */
+.field { display: flex; gap: 8px; font-size: 12px; }
+.field-label { flex: 0 0 96px; color: var(--muted); }
+.field-value { flex: 1; min-width: 0; }
+.field-chips { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+
+/* Action buttons (mouse convenience; the GUI drives these from the item menu). */
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .actions button {
-  background: var(--sidebar);
+  background: transparent;
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 4px 10px;
+  padding: 3px 10px;
   cursor: pointer;
   font-size: 12px;
 }
-.actions button:hover { background: var(--list-active); border-color: var(--link); }
+.actions button:hover { background: var(--list-hover); border-color: var(--link); }
+
+/* Scrollable body below the pinned header. */
+#detail-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+#detail-scroll.with-header {
+  border-top: 1px solid var(--border);
+  padding: 8px 16px 16px;
+}
+.detail-empty { padding: 16px; color: var(--muted); }
+.body { white-space: pre-wrap; word-wrap: break-word; }
+.body-empty { font-size: 12px; color: var(--muted); }
 
 .comment { border-top: 1px solid var(--border); padding: 8px 0; }
 .comment .chead { color: var(--muted); font-size: 12px; margin-bottom: 3px; }

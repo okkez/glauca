@@ -584,12 +584,6 @@ async function refreshVisible() {
   renderItemList();
 }
 
-function stateClass(s) {
-  if (s === "open") return "state-open";
-  if (s === "merged") return "state-merged";
-  return "state-closed";
-}
-
 // Octicon name + color class encoding an item's state: the shape says
 // issue-vs-PR, the color says open/merged/closed/draft. Mirrors the GUI's
 // item_state_icon_info.
@@ -707,6 +701,22 @@ function renderHighlightedTitle(title, ranges) {
   return span;
 }
 
+// Local "YYYY-MM-DD HH:MM:SS ±HH:MM", a port of core's format_local_datetime
+// (chrono's "%Y-%m-%d %H:%M:%S %:z"). Unparseable input passes through.
+function localDatetime(rfc3339) {
+  const t = new Date(rfc3339);
+  if (Number.isNaN(t.getTime())) return rfc3339;
+  const p = (n) => String(n).padStart(2, "0");
+  const off = -t.getTimezoneOffset();
+  const sign = off < 0 ? "-" : "+";
+  const abs = Math.abs(off);
+  return (
+    `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ` +
+    `${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())} ` +
+    `${sign}${p(Math.floor(abs / 60))}:${p(abs % 60)}`
+  );
+}
+
 // Compact relative time ("now", "5m", "3h", "2d", "3mo", "1y"), a port of
 // glauca_core::time::humanize_secs (same buckets, negative clamps to "now").
 function relativeTime(rfc3339, nowMs = Date.now()) {
@@ -804,59 +814,87 @@ function renderItemList() {
   });
 }
 
+// Reset the detail pane to its "nothing selected" state.
+function clearDetail() {
+  const header = $("detail-header");
+  header.hidden = true;
+  header.replaceChildren();
+  const scroll = $("detail-scroll");
+  scroll.className = "";
+  scroll.replaceChildren(el("div", { class: "detail-empty", text: "Select an item" }));
+}
+
+// Review-decision octicon for the detail header (the GUI's
+// review_decision_icon); the wrapping span carries the tooltip.
+function reviewDecisionIcon(decision) {
+  const [name, cls, label] =
+    decision === "APPROVED"
+      ? ["check-circle-fill", "state-open", "Approved"]
+      : decision === "CHANGES_REQUESTED"
+        ? ["x-circle-fill", "state-closed", "Changes requested"]
+        : decision === "REVIEW_REQUIRED"
+          ? ["clock", "state-pending", "Review required"]
+          : ["comment", "muted", "Review"];
+  const span = el("span", { class: "decision-icon" }, [octicon(name, cls, 20)]);
+  span.title = label;
+  return span;
+}
+
+// Detail pane, mirroring the GUI's render_detail: a pinned header (title line
+// with state pill, then `label: value` field rows, then the action buttons)
+// above a scrollable plain-text body. Markdown rendering is a separate task.
 function renderDetail(it) {
-  const body = $("detail-body");
-  body.classList.remove("empty");
-  body.replaceChildren();
-  body.scrollTop = 0; // new item shown → back to the top, mirroring the TUI/GUI
+  const header = $("detail-header");
+  const scroll = $("detail-scroll");
+  header.hidden = false;
+  header.replaceChildren();
+  scroll.scrollTop = 0; // new item shown → back to the top, mirroring the TUI/GUI
 
-  body.appendChild(el("h2", { text: it.title }));
-  const metaBits = [
-    it.repo_private ? el("span", { class: "lock", text: "🔒" }) : null,
-    el("span", { class: stateClass(it.state), text: it.state }),
-    el("span", { text: `${it.repo_owner}/${it.repo_name} #${it.number}` }),
-  ].filter(Boolean);
-  if (it.author) metaBits.push(el("span", {}, [avatarEl(it.author, "avatar sm"), el("span", { text: ` @${it.author.login}` })]));
-  if (it.review_decision) metaBits.push(el("span", { class: `decision ${reviewStateClass(it.review_decision)}`, text: it.review_decision }));
-  if (it.milestone) metaBits.push(el("span", { text: `🎯 ${it.milestone}` }));
-  body.appendChild(el("div", { class: "meta" }, metaBits.flatMap((b) => [b, document.createTextNode(" · ")]).slice(0, -1)));
+  // Title line: author avatar + state pill + (PR) review-decision icon + the
+  // wrapping bold title.
+  const icon = itemStateIcon(it);
+  const pill = el("span", { class: `state-pill ${icon.cls}` }, [
+    octicon(icon.name, "", 12),
+    el("span", { text: stateLabel(it) }),
+  ]);
+  header.appendChild(
+    el("div", { class: "detail-title-row" }, [
+      el("span", { class: "detail-lead" }, [
+        it.author ? avatarEl(it.author) : null,
+        pill,
+        it.review_decision ? reviewDecisionIcon(it.review_decision) : null,
+      ]),
+      el("span", { class: "detail-title", text: it.title }),
+    ])
+  );
 
-  if (it.kind === "pull_request" && (it.base_ref || it.head_ref)) {
-    body.appendChild(el("div", { class: "meta", text: `${it.head_ref || "?"} → ${it.base_ref || "?"}` }));
-  }
+  // `label: value` field rows (the GUI's detail_field / detail_people_field).
+  const field = (label, value) =>
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: label }), value]);
+  const textField = (label, text) => field(label, el("span", { class: "field-value", text }));
+  const userChip = (u) => el("span", { class: "chip" }, [avatarEl(u), el("span", { text: u.login })]);
+  const reviewerChip = (o) => el("span", { class: "chip" }, [reviewerAvatar(o.user, o.state), el("span", { text: o.user.login })]);
 
-  if (it.labels && it.labels.length) {
-    body.appendChild(el("div", { class: "labels" }, it.labels.map((l) => el("span", { class: "tag", text: l }))));
-  }
-
-  // People: assignees and reviewers (with review state) as avatar chips.
-  if (it.assignees && it.assignees.length) {
-    body.appendChild(
-      el("div", { class: "people" }, [
-        el("span", { class: "people-label", text: "Assignees:" }),
-        ...it.assignees.map((u) => el("span", { class: "chip" }, [avatarEl(u, "avatar sm"), el("span", { text: u.login })])),
-      ])
-    );
-  }
+  if ((it.labels || []).length) header.appendChild(textField("labels", it.labels.join(", ")));
+  if (it.base_ref && it.head_ref) header.appendChild(textField("branch", `${it.head_ref} → ${it.base_ref}`));
+  const assignees = it.assignees || [];
+  if (assignees.length)
+    header.appendChild(field("assignees", el("span", { class: "field-chips" }, assignees.map(userChip))));
   const overlays = reviewerOverlays(it);
-  if (overlays.length) {
-    body.appendChild(
-      el("div", { class: "people" }, [
-        el("span", { class: "people-label", text: "Reviewers:" }),
-        ...overlays.map((o) =>
-          el("span", { class: `chip ${reviewStateClass(o.state)}` }, [avatarEl(o.user, "avatar sm"), el("span", { text: o.user.login })])
-        ),
-      ])
-    );
-  }
+  if (overlays.length)
+    header.appendChild(field("reviewers", el("span", { class: "field-chips" }, overlays.map(reviewerChip))));
+  if (it.milestone) header.appendChild(textField("milestone", it.milestone));
+  if (it.created_at_item) header.appendChild(textField("created", localDatetime(it.created_at_item)));
+  header.appendChild(textField("updated", localDatetime(it.updated_at)));
 
   // Actions. The engine performs the external work (gh CLI / browser); the
-  // front-end only sends the command.
+  // front-end only sends the command. The GUI drives these solely from the
+  // item menu; the buttons stay here as a mouse convenience.
   const actions = el("div", { class: "actions" });
   for (const a of itemActions(it)) {
     actions.appendChild(el("button", { text: a.label, onclick: a.run }));
   }
-  body.appendChild(actions);
+  header.appendChild(actions);
 
   // Custom actions (actions.toml): appended asynchronously and only when at
   // least one action applies to this kind, mirroring the GUI's conditional
@@ -874,7 +912,12 @@ function renderDetail(it) {
     })
     .catch((e) => setStatus(`custom actions: ${e}`, true));
 
-  body.appendChild(el("div", { class: "body", text: it.body && it.body.length ? it.body : "(no description)" }));
+  scroll.className = "with-header";
+  scroll.replaceChildren(
+    it.body && it.body.trim().length
+      ? el("div", { class: "body", text: it.body })
+      : el("div", { class: "body-empty", text: "(no description)" })
+  );
 }
 
 // The actions applicable to `it`, shared by the detail-pane buttons and the
@@ -1048,8 +1091,7 @@ function previewEntry(idx) {
   renderSidebar();
   refreshVisible();
   updateBanner();
-  $("detail-body").className = "empty";
-  $("detail-body").textContent = "Select an item.";
+  clearDetail();
 }
 
 // Commit to an entry (click / Enter): preview plus a sync of the backing root
@@ -1230,7 +1272,7 @@ const DETAIL_SCROLL_STEP = 60;
 // Scroll the detail body when the detail pane is focused. The browser clamps
 // scrollTop to [0, scrollHeight - clientHeight], so no bounds math is needed.
 function scrollDetail(dy) {
-  $("detail-body").scrollTop += dy;
+  $("detail-scroll").scrollTop += dy;
 }
 
 // Which key context the event belongs to. Modals and menus own their keys;
