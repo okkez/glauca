@@ -112,13 +112,21 @@ body {
   border-top: 1px solid var(--border);
 }
 #sidebar.focused, #items.focused, #detail.focused { border-top-color: var(--link); }
+#sidebar { border-right: 1px solid var(--border); }
+#detail { border-left: 1px solid var(--border); }
 
-/* Pane separators (drag-to-resize handles). */
+/* Pane separators: invisible 5px drag handles overlapping the pane borders
+   (which draw the visible 1px line); highlighted while hovered. */
 .divider {
-  width: 1px;
+  width: 5px;
+  margin: 0 -2px;
   flex: none;
-  background: var(--border);
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  background: transparent;
 }
+.divider:hover { background: var(--link); opacity: 0.4; }
 
 /* Sidebar header: signed-in user (avatar + login + display name). */
 #sidebar-header {

@@ -121,6 +121,7 @@ pub fn save_settings(
     theme: String,
     notifications_enabled: bool,
     sync_interval_secs: u64,
+    pane_sizes: Option<(f64, f64)>,
 ) -> Result<(), String> {
     // Persist first, then flip the in-memory flag — so if the write fails the
     // runtime flag and the on-disk file stay in agreement instead of diverging for
@@ -129,6 +130,7 @@ pub fn save_settings(
         theme,
         notifications_enabled,
         sync_interval_secs,
+        pane_sizes,
     }
     .save()
     .map_err(|e| e.to_string())?;

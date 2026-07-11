@@ -30,7 +30,7 @@ const state = {
   comments: [],            // last-loaded comments (shown in the comments modal)
   commentsShowMinimized: false,
   commentsSortNewest: false,
-  settings: { theme: "system", notifications_enabled: false, sync_interval_secs: 60 },
+  settings: { theme: "system", notifications_enabled: false, sync_interval_secs: 60, pane_sizes: null },
   filterSeq: 0,            // bumped per refreshVisible() call; guards against a stale
                           // filter_items result overwriting a newer entry's items
   syncing: 0,              // in-flight foreground syncs (SyncStarted − SyncDone/Error)
@@ -421,6 +421,7 @@ function persistSettings(next) {
     theme: next.theme,
     notificationsEnabled: next.notifications_enabled,
     syncIntervalSecs: next.sync_interval_secs,
+    paneSizes: next.pane_sizes || null,
   })
     .then(() => {
       state.settings = next;
@@ -526,6 +527,58 @@ function menuButton(id, buildItems) {
     if (Date.now() - lastMenuDismiss.at < 300 && btn.contains(lastMenuDismiss.target)) return;
     const r = btn.getBoundingClientRect();
     showContextMenu(Math.round(r.left), Math.round(r.bottom + 2), buildItems());
+  });
+}
+
+// ── pane resize ─────────────────────────────────────────────────────────────-
+//
+// Drag the dividers to resize the fixed side panes, mirroring the GUI's
+// resizable panes (same clamps: sidebar 250–560, detail ≥ 300; the flexible
+// center keeps ≥ 250 by capping the dragged pane against the window width).
+// Widths persist to settings.pane_sizes on drag end.
+
+const SIDEBAR_MIN = 250;
+const SIDEBAR_MAX = 560;
+const DETAIL_MIN = 300;
+const CENTER_MIN = 250;
+
+function applyPaneSizes(sizes) {
+  if (!sizes) return;
+  const [sidebar, detail] = sizes;
+  if (sidebar > 0) $("sidebar").style.width = `${sidebar}px`;
+  if (detail > 0) $("detail").style.width = `${detail}px`;
+}
+
+function paneWidth(id) {
+  return Math.round($(id).getBoundingClientRect().width);
+}
+
+function setupPaneResize() {
+  const wire = (dividerId, resize) => {
+    $(dividerId).addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
+      const startX = ev.clientX;
+      const startSidebar = paneWidth("sidebar");
+      const startDetail = paneWidth("detail");
+      const move = (mv) => resize(startSidebar, startDetail, mv.clientX - startX);
+      const up = () => {
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+        persistSettings({ ...state.settings, pane_sizes: [paneWidth("sidebar"), paneWidth("detail")] });
+      };
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    });
+  };
+  wire("div-left", (sidebar, detail, dx) => {
+    const max = Math.min(SIDEBAR_MAX, window.innerWidth - detail - CENTER_MIN);
+    const w = Math.max(SIDEBAR_MIN, Math.min(max, sidebar + dx));
+    $("sidebar").style.width = `${w}px`;
+  });
+  wire("div-right", (sidebar, detail, dx) => {
+    const max = window.innerWidth - sidebar - CENTER_MIN;
+    const w = Math.max(DETAIL_MIN, Math.min(max, detail - dx));
+    $("detail").style.width = `${w}px`;
   });
 }
 
@@ -1737,6 +1790,8 @@ async function main() {
     /* defaults */
   }
   applyTheme(state.settings.theme);
+  applyPaneSizes(state.settings.pane_sizes);
+  setupPaneResize();
   if (window.matchMedia) {
     window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
       if (state.settings.theme === "system") applyTheme("system");
