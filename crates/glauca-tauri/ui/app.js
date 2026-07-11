@@ -636,11 +636,23 @@ function reviewerOverlays(it) {
   return out;
 }
 
+// Max avatars per group (assignees / reviewers) before a "+N" overflow,
+// matching the GUI's AVATAR_LIMIT.
+const AVATAR_LIMIT = 5;
+
+// GitHub serves a 460px avatar by default; downscaling that to a 24px <img>
+// aliases badly. Ask GitHub to resize server-side to 2× the displayed size
+// (HiDPI), mirroring the GUI's sized_avatar_url.
+function sizedAvatarUrl(url, displayPx) {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}s=${displayPx * 2}`;
+}
+
 // An avatar <img> (or an initial fallback when no avatar_url is known).
-function avatarEl(user, cls = "avatar") {
+function avatarEl(user, cls = "avatar", displayPx = 24) {
   if (user && user.avatar_url) {
     const img = el("img", { class: cls });
-    img.src = user.avatar_url;
+    img.src = sizedAvatarUrl(user.avatar_url, displayPx);
     img.alt = user.login || "";
     img.title = user.login || "";
     return img;
@@ -651,41 +663,111 @@ function avatarEl(user, cls = "avatar") {
   return span;
 }
 
-// A small cluster of reviewer avatars, each ringed by its review state.
-function reviewerCluster(it) {
-  const overlays = reviewerOverlays(it);
-  if (!overlays.length) return null;
-  return el(
-    "span",
-    { class: "reviewers" },
-    overlays.map((o) => avatarEl(o.user, `avatar sm ${reviewStateClass(o.state)}`))
-  );
+// A reviewer avatar with a review-state octicon badge overlaid bottom-right
+// (the GUI's reviewer_avatar / review_state_icon): approved=green check,
+// changes=red x, pending=yellow clock, commented/dismissed=grey comment.
+function reviewerAvatar(user, reviewState) {
+  const icon =
+    reviewState === "APPROVED"
+      ? "check-circle-fill"
+      : reviewState === "CHANGES_REQUESTED"
+        ? "x-circle-fill"
+        : reviewState === "PENDING"
+          ? "clock"
+          : "comment";
+  return el("span", { class: "rv-wrap" }, [
+    avatarEl(user),
+    octicon(icon, `rv-badge ${reviewStateClass(reviewState)}`, 14),
+  ]);
 }
 
+// Compact relative time ("now", "5m", "3h", "2d", "3mo", "1y"), a port of
+// glauca_core::time::humanize_secs (same buckets, negative clamps to "now").
+function relativeTime(rfc3339, nowMs = Date.now()) {
+  const t = Date.parse(rfc3339);
+  if (Number.isNaN(t)) return rfc3339;
+  const secs = Math.floor((nowMs - t) / 1000);
+  const MIN = 60;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  const MONTH = 30 * DAY;
+  const YEAR = 365 * DAY;
+  if (secs < MIN) return "now";
+  if (secs < HOUR) return `${Math.floor(secs / MIN)}m`;
+  if (secs < DAY) return `${Math.floor(secs / HOUR)}h`;
+  if (secs < MONTH) return `${Math.floor(secs / DAY)}d`;
+  if (secs < YEAR) return `${Math.floor(secs / MONTH)}mo`;
+  return `${Math.floor(secs / YEAR)}y`;
+}
+
+// Build one item row, mirroring the GUI's render_item_row: (1) state octicon
+// beside a wrapping bold title, (2) participants — author → assignees left,
+// reviewers + comment count right, (3) meta — lock, owner/name#num · labels,
+// relative update time. Unread rows get a faint background tint (is_new);
+// selection takes precedence.
 function renderItemList() {
   const list = $("item-list");
   list.replaceChildren();
   const e = state.entries[state.selectedEntry];
   $("items-title").textContent = e ? e.label : "Items";
+  const now = Date.now(); // sample the clock once for all rows
   for (const it of state.visibleItems) {
     const key = itemKey(it);
-    const meta = el("div", { class: "it-meta" }, [
-      it.repo_private ? el("span", { class: "lock", text: "🔒" }) : null,
-      el("span", { class: stateClass(it.state), text: it.state }),
-      el("span", { text: `${it.repo_owner}/${it.repo_name} #${it.number}` }),
-      it.author ? avatarEl(it.author, "avatar sm") : null,
-      it.author ? el("span", { text: `@${it.author.login}` }) : null,
-      it.is_new ? el("span", { class: "tag new", text: "NEW" }) : null,
-      it.is_draft ? el("span", { class: "tag draft", text: "draft" }) : null,
-      reviewerCluster(it),
-    ]);
+    const selected = key === state.selectedItemKey;
+
+    const icon = itemStateIcon(it);
+    const rows = [
+      el("div", { class: "it-title-row" }, [
+        octicon(icon.name, `it-state ${icon.cls}`, 16),
+        el("span", { class: "it-title", text: it.title }),
+      ]),
+    ];
+
+    const assignees = it.assignees || [];
+    const overlays = reviewerOverlays(it);
+    if (it.author || assignees.length || overlays.length || it.comment_count > 0) {
+      const left = el("div", { class: "it-people-side" });
+      if (it.author) left.appendChild(avatarEl(it.author));
+      // Arrow reads "author → assignee(s)" when both sides exist.
+      if (it.author && assignees.length) left.appendChild(el("span", { class: "people-extra", text: "→" }));
+      for (const u of assignees.slice(0, AVATAR_LIMIT)) left.appendChild(avatarEl(u));
+      if (assignees.length > AVATAR_LIMIT)
+        left.appendChild(el("span", { class: "people-extra", text: `+${assignees.length - AVATAR_LIMIT}` }));
+
+      const right = el("div", { class: "it-people-side" });
+      for (const o of overlays.slice(0, AVATAR_LIMIT)) right.appendChild(reviewerAvatar(o.user, o.state));
+      if (overlays.length > AVATAR_LIMIT)
+        right.appendChild(el("span", { class: "people-extra", text: `+${overlays.length - AVATAR_LIMIT}` }));
+      if (it.comment_count > 0) {
+        right.appendChild(
+          el("span", { class: "comment-count" }, [octicon("comment", "muted", 12), el("span", { text: String(it.comment_count) })])
+        );
+      }
+      rows.push(el("div", { class: "it-people" }, [left, right]));
+    }
+
+    let metaText = `${it.repo_owner}/${it.repo_name}#${it.number}`;
+    if ((it.labels || []).length) metaText += ` · ${it.labels.join(", ")}`;
+    rows.push(
+      el("div", { class: "it-meta" }, [
+        it.repo_private ? octicon("lock", "muted", 12) : null,
+        el("span", { class: "meta-text", text: metaText }),
+        el("span", { class: "meta-time", text: relativeTime(it.updated_at, now) }),
+      ])
+    );
+
     const li = el(
       "li",
       {
-        class: [!isUnread(it) ? "read" : "", key === state.selectedItemKey ? "selected" : ""].filter(Boolean).join(" "),
-        onclick: () => selectItem(it),
+        class: [selected ? "selected" : "", !selected && it.is_new ? "unread" : ""].filter(Boolean).join(" "),
+        // Shift+click also opens the row in the browser (mouse-only equivalent
+        // of the `o` key), like the GUI.
+        onclick: (ev) => {
+          selectItem(it);
+          if (ev.shiftKey) call("open_browser", { item: it });
+        },
       },
-      [el("span", { class: "it-title", text: it.title }), meta]
+      rows
     );
     li.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
@@ -1606,7 +1688,7 @@ async function main() {
   const header = $("sidebar-header");
   if (init.current_user) {
     header.replaceChildren(
-      avatarEl({ login: init.current_user, avatar_url: init.current_user_avatar_url }, "avatar lg"),
+      avatarEl({ login: init.current_user, avatar_url: init.current_user_avatar_url }, "avatar lg", 36),
       el("div", { class: "who" }, [
         el("div", { class: "login", text: `@${init.current_user}` }),
         init.current_user_name ? el("div", { class: "name", text: init.current_user_name }) : null,

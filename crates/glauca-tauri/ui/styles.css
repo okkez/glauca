@@ -210,18 +210,36 @@ ul { list-style: none; margin: 0; padding: 0; }
 
 #item-list { overflow-y: auto; flex: 1; }
 #item-list li {
-  padding: 8px 12px;
+  padding: 8px 16px;
   cursor: pointer;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
-#item-list li.selected { background: var(--list-active); }
+/* Row backgrounds, in precedence order (last rule wins at equal specificity):
+   unread tint < hover < selection. */
+#item-list li.unread { background: var(--unread-tint); }
 #item-list li:hover { background: var(--list-hover); }
-#item-list li.read .it-title { color: var(--muted); }
-.it-title { font-weight: 500; display: block; }
-.it-meta { color: var(--muted); font-size: 12px; margin-top: 2px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+#item-list li.selected { background: var(--list-active); }
+
+/* Row 1: state octicon beside the first line of a wrapping bold title. */
+.it-title-row { display: flex; align-items: flex-start; gap: 8px; }
+.it-state { margin-top: 2px; }
+.it-title { font-weight: 700; min-width: 0; }
+
+/* Row 2: author → assignees on the left, reviewers + comment count right. */
+.it-people { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.it-people-side { display: flex; align-items: center; gap: 4px; }
+.people-extra { color: var(--muted); font-size: 11px; }
+.comment-count { display: inline-flex; align-items: center; gap: 2px; color: var(--muted); font-size: 11px; }
+
+/* Row 3: lock, owner/name#num · labels, relative update time. */
+.it-meta { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
+.it-meta .meta-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.it-meta .meta-time { flex: none; }
+
 .tag { font-size: 10px; padding: 0 5px; border-radius: 3px; border: 1px solid var(--border); }
-.tag.new   { color: var(--yellow); border-color: var(--yellow); }
-.tag.draft { color: var(--muted); }
 .state-open   { color: var(--green); }
 .state-closed { color: var(--red); }
 .state-merged { color: var(--magenta); }
@@ -232,8 +250,10 @@ ul { list-style: none; margin: 0; padding: 0; }
 .octicon { flex-shrink: 0; }
 .octicon.muted { color: var(--muted); }
 
-/* Avatars + review-state rings. */
+/* Avatars + review-state badges. */
 .avatar {
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   object-fit: cover;
   vertical-align: middle;
@@ -241,15 +261,26 @@ ul { list-style: none; margin: 0; padding: 0; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
 }
 .avatar.sm { width: 16px; height: 16px; font-size: 9px; }
-.avatar-fallback { color: var(--muted); font-weight: 600; }
-.reviewers { display: inline-flex; gap: 2px; margin-left: 4px; }
-.rv-approved  { box-shadow: 0 0 0 2px var(--green); }
-.rv-changes   { box-shadow: 0 0 0 2px var(--red); }
-.rv-pending   { box-shadow: 0 0 0 2px var(--muted); }
-.rv-dismissed { box-shadow: 0 0 0 2px var(--border); opacity: .6; }
-.rv-commented { box-shadow: 0 0 0 2px var(--link); }
+.avatar-fallback { color: var(--muted); font-weight: 600; font-size: 11px; }
+
+/* Reviewer avatar with a review-state octicon badge overlaid bottom-right
+   (the GUI's reviewer_avatar): the badge background shows through the filled
+   check/x knockout — white, GitHub-style — or acts as a plain ring otherwise. */
+.rv-wrap { position: relative; display: inline-flex; flex: none; }
+.rv-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  border-radius: 50%;
+}
+.rv-badge.rv-approved  { color: var(--green); background: #ffffff; }
+.rv-badge.rv-changes   { color: var(--red); background: #ffffff; }
+.rv-badge.rv-pending   { color: var(--yellow); background: var(--bg); }
+.rv-badge.rv-commented,
+.rv-badge.rv-dismissed { color: var(--muted); background: var(--bg); }
 
 /* Detail review-decision badge + people chips. */
 .decision { font-weight: 600; }
