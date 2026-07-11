@@ -169,7 +169,17 @@ pub async fn unread_counts(
     )
 }
 
-/// Return the indices of `items` that match the selected entry's filter: the
+/// One match from [`filter_items`]: the item's index into the input list plus
+/// the inline filter's match ranges in its title — **UTF-8 byte offsets**, from
+/// `FilterQuery::highlight_ranges` (the same data the GUI feeds its title
+/// highlight) — so the front-end can paint the filter-match highlight.
+#[derive(Serialize)]
+pub struct FilteredItem {
+    pub index: usize,
+    pub highlight_ranges: Vec<(usize, usize)>,
+}
+
+/// Return the entries of `items` that match the selected entry's filter: the
 /// filter-stream filter (`stream_filter`, `None` for a root query) ANDed with the
 /// inline search-box text (`inline_filter`). Reuses `glauca_core::filter` and
 /// `expand_me` so the matching semantics (`state:`/`author:`/`label:`/… plus
@@ -182,7 +192,7 @@ pub async fn filter_items(
     items: Vec<ItemEntry>,
     stream_filter: Option<String>,
     inline_filter: String,
-) -> Result<Vec<usize>, String> {
+) -> Result<Vec<FilteredItem>, String> {
     let su = state.current_user.as_deref();
     let stream_q = stream_filter
         .as_deref()
@@ -195,7 +205,16 @@ pub async fn filter_items(
             stream_q.as_ref().is_none_or(|q| q.matches(it))
                 && (inline_q.is_empty() || inline_q.matches(it))
         })
-        .map(|(i, _)| i)
+        .map(|(index, it)| FilteredItem {
+            index,
+            // Only the inline (search-box) filter highlights, like the GUI;
+            // stream filters describe the list, not a search.
+            highlight_ranges: if inline_q.is_empty() {
+                Vec::new()
+            } else {
+                inline_q.highlight_ranges(&it.title)
+            },
+        })
         .collect())
 }
 

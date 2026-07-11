@@ -20,6 +20,8 @@ const state = {
   itemsByQuery: new Map(), // rootQueryId -> ItemEntry[]
   pending: new Map(),      // rootQueryId -> held-back background items (not yet applied)
   visibleItems: [],        // current entry's items after stream + inline filtering
+  visibleHighlights: [],   // per visibleItems row: inline-filter title match ranges
+                          // (UTF-8 byte offsets from filter_items)
   unread: new Map(),       // unreadKey(isFilterStream, entryId) -> count
   selectedEntry: -1,
   selectedItemKey: null,
@@ -565,17 +567,19 @@ async function refreshVisible() {
   // wrong list). Bail if a later call has already superseded us.
   const seq = ++state.filterSeq;
   try {
-    const indices = await invoke("filter_items", {
+    const matches = await invoke("filter_items", {
       items: all,
       streamFilter: e.streamFilter,
       inlineFilter: state.filterText,
     });
     if (seq !== state.filterSeq) return;
-    state.visibleItems = indices.map((i) => all[i]);
+    state.visibleItems = matches.map((m) => all[m.index]);
+    state.visibleHighlights = matches.map((m) => m.highlight_ranges);
   } catch (err) {
     if (seq !== state.filterSeq) return;
     setStatus(`filter: ${err}`, true);
     state.visibleItems = all;
+    state.visibleHighlights = [];
   }
   renderItemList();
 }
@@ -681,6 +685,28 @@ function reviewerAvatar(user, reviewState) {
   ]);
 }
 
+// The item title with the inline-filter match ranges highlighted. `ranges` are
+// sorted, non-overlapping **UTF-8 byte offsets** (from core's
+// FilterQuery::highlight_ranges), so slice the encoded bytes and decode each
+// piece — indexing the JS string directly would drift on multibyte titles.
+function renderHighlightedTitle(title, ranges) {
+  const span = el("span", { class: "it-title" });
+  if (!ranges || !ranges.length) {
+    span.textContent = title;
+    return span;
+  }
+  const bytes = new TextEncoder().encode(title);
+  const dec = new TextDecoder();
+  let pos = 0;
+  for (const [start, end] of ranges) {
+    if (start > pos) span.appendChild(document.createTextNode(dec.decode(bytes.subarray(pos, start))));
+    span.appendChild(el("span", { class: "hl", text: dec.decode(bytes.subarray(start, end)) }));
+    pos = end;
+  }
+  if (pos < bytes.length) span.appendChild(document.createTextNode(dec.decode(bytes.subarray(pos))));
+  return span;
+}
+
 // Compact relative time ("now", "5m", "3h", "2d", "3mo", "1y"), a port of
 // glauca_core::time::humanize_secs (same buckets, negative clamps to "now").
 function relativeTime(rfc3339, nowMs = Date.now()) {
@@ -711,7 +737,7 @@ function renderItemList() {
   const e = state.entries[state.selectedEntry];
   $("items-title").textContent = e ? e.label : "Items";
   const now = Date.now(); // sample the clock once for all rows
-  for (const it of state.visibleItems) {
+  state.visibleItems.forEach((it, idx) => {
     const key = itemKey(it);
     const selected = key === state.selectedItemKey;
 
@@ -719,7 +745,7 @@ function renderItemList() {
     const rows = [
       el("div", { class: "it-title-row" }, [
         octicon(icon.name, `it-state ${icon.cls}`, 16),
-        el("span", { class: "it-title", text: it.title }),
+        renderHighlightedTitle(it.title, state.visibleHighlights[idx]),
       ]),
     ];
 
@@ -775,7 +801,7 @@ function renderItemList() {
       showItemActionMenu(it, ev.clientX, ev.clientY);
     });
     list.appendChild(li);
-  }
+  });
 }
 
 function renderDetail(it) {

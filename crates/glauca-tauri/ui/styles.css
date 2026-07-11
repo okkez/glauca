@@ -227,6 +227,8 @@ ul { list-style: none; margin: 0; padding: 0; }
 .it-title-row { display: flex; align-items: flex-start; gap: 8px; }
 .it-state { margin-top: 2px; }
 .it-title { font-weight: 700; min-width: 0; }
+/* Inline-filter match highlight inside a title (the GUI's highlight_title). */
+.hl { background: var(--link); color: #ffffff; }
 
 /* Row 2: author → assignees on the left, reviewers + comment count right. */
 .it-people { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
