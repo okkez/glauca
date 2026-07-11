@@ -178,6 +178,13 @@ async function updateBanner() {
   } catch {
     n = fresh.length; // banner is display-only; fall back to a coarse count
   }
+  if (n === 0) {
+    // Nothing user-visible changed; drop the held-back items instead of
+    // showing a "0 updated" banner (the GUI clears pending the same way).
+    state.pending.delete(e.rootQueryId);
+    banner.hidden = true;
+    return;
+  }
   banner.textContent = `${n} updated in background — click to refresh`;
   banner.hidden = false;
   banner.onclick = () => applyPending(e.rootQueryId);
