@@ -2,29 +2,29 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>glauca</title>
 <link rel="stylesheet" href="styles.css" />
+<header id="menubar">
+  <button class="menu-btn" id="menu-glauca">Glauca</button>
+  <button class="menu-btn" id="menu-view">View</button>
+  <button class="menu-btn" id="menu-help">Help</button>
+</header>
 <div id="app">
   <aside id="sidebar">
-    <div class="pane-title">
-      <span style="flex:1">Queries</span>
-      <button id="new-query" title="New query">+</button>
-    </div>
+    <div id="sidebar-header"></div>
     <ul id="entries"></ul>
+    <div id="sidebar-footer" hidden></div>
   </aside>
+  <div class="divider" id="div-left"></div>
   <section id="items">
-    <div class="pane-title">
-      <span id="items-title">Items</span>
+    <div id="items-header"><span id="items-title">Items</span></div>
+    <div id="filter-row">
       <input id="filter" type="text" placeholder="filter title…" autocomplete="off" />
     </div>
     <div id="banner" class="banner" hidden></div>
     <ul id="item-list"></ul>
   </section>
+  <div class="divider" id="div-right"></div>
   <section id="detail">
-    <div class="pane-title">
-      <span style="flex:1">Detail</span>
-      <button id="settings-btn" title="Settings">⚙</button>
-    </div>
     <div id="detail-body" class="empty">Select an item.</div>
   </section>
 </div>
-<footer id="statusbar"><span id="status">Loading…</span><span id="whoami"></span></footer>
 <script src="app.js"></script>

@@ -55,32 +55,114 @@ html, body {
   font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-#app {
+body {
   display: flex;
-  height: calc(100vh - 26px);
+  flex-direction: column;
 }
 
-#sidebar { width: 260px; min-width: 200px; border-right: 1px solid var(--border); overflow-y: auto; }
-#items   { width: 420px; min-width: 280px; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-#detail  { flex: 1; min-width: 280px; display: flex; flex-direction: column; }
-
-.pane-title {
-  padding: 8px 12px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  color: var(--muted);
-  background: var(--sidebar);
+/* Menu bar (Glauca / View / Help), mirroring the GUI's render_menu_bar. */
+#menubar {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--border);
+}
+.menu-btn {
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.menu-btn:hover { background: var(--list-hover); }
+
+#app {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Pane widths mirror the GUI: fixed sidebar / flexible items / fixed detail.
+   Each pane gets a 1px top border that turns blue when the pane has keyboard
+   focus (the GUI's pane_frame focus indicator). */
+#sidebar {
+  width: 280px;
+  min-width: 250px;
+  flex: none;
+  background: var(--sidebar);
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+#items {
+  flex: 1;
+  min-width: 250px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+#detail {
+  width: 440px;
+  min-width: 300px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+#sidebar.focused, #items.focused, #detail.focused { border-top-color: var(--link); }
+
+/* Pane separators (drag-to-resize handles). */
+.divider {
+  width: 1px;
+  flex: none;
+  background: var(--border);
+}
+
+/* Sidebar header: signed-in user (avatar + login + display name). */
+#sidebar-header {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
 }
-.pane-title #items-title { flex: 1; }
+#sidebar-header .who { min-width: 0; }
+#sidebar-header .who .login { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sidebar-header .who .name {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.avatar.lg { width: 36px; height: 36px; font-size: 14px; }
 
+/* Sidebar footer: sync activity + latest status, shown only when non-empty. */
+#sidebar-footer {
+  border-top: 1px solid var(--border);
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+#sidebar-footer .status-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sidebar-footer.error .status-line { color: var(--red); }
+
+/* Items pane header (selected entry name) and inline filter row. */
+#items-header {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#filter-row {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
 #filter {
-  flex: 1;
-  max-width: 220px;
+  width: 100%;
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--fg);
@@ -91,6 +173,7 @@ html, body {
 
 ul { list-style: none; margin: 0; padding: 0; }
 
+#entries { flex: 1; min-height: 0; overflow-y: auto; }
 #entries li {
   padding: 6px 12px;
   cursor: pointer;
@@ -229,22 +312,6 @@ ul { list-style: none; margin: 0; padding: 0; }
 .comments-header button:hover { border-color: var(--link); }
 .comments-list { overflow-y: auto; flex: 1; }
 
-#statusbar {
-  height: 26px;
-  background: var(--sidebar);
-  border-top: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  font-size: 12px;
-  color: var(--muted);
-}
-#statusbar.error #status { color: var(--red); }
-#statusbar #status { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* Signed-in user (avatar + name) on the right of the status bar. */
-#whoami { display: inline-flex; align-items: center; gap: 6px; }
-
 /* In-page prompt modal (replaces window.prompt, unreliable in some webviews). */
 .modal-overlay {
   position: fixed;
@@ -267,42 +334,6 @@ ul { list-style: none; margin: 0; padding: 0; }
 .modal-label { margin-bottom: 4px; margin-top: 8px; color: var(--muted); font-size: 12px; }
 .modal-actions button.danger { border-color: var(--red); color: var(--red); }
 .modal-actions button.danger:hover { background: var(--red); color: #fff; }
-
-/* Sidebar "+ New query" button. */
-#new-query {
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  width: 20px;
-  height: 20px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0;
-}
-#new-query:hover { border-color: var(--link); }
-
-#settings-btn {
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  height: 20px;
-  cursor: pointer;
-  padding: 0 5px;
-}
-#settings-btn:hover { border-color: var(--link); }
-
-.modal-check { display: flex; align-items: center; gap: 4px; margin-top: 10px; cursor: pointer; }
-select.modal-input { appearance: auto; }
-
-/* Focused-pane indicator for keyboard navigation (h/l switches). */
-#sidebar.focused .pane-title,
-#items.focused .pane-title,
-#detail.focused .pane-title {
-  color: var(--link);
-  box-shadow: inset 0 2px 0 var(--link);
-}
 
 /* Keyboard-shortcuts help modal (`?`). */
 .help-box { width: min(560px, 92vw); max-height: 80vh; overflow-y: auto; }

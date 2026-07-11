@@ -31,6 +31,8 @@ const state = {
   settings: { theme: "system", notifications_enabled: false, sync_interval_secs: 60 },
   filterSeq: 0,            // bumped per refreshVisible() call; guards against a stale
                           // filter_items result overwriting a newer entry's items
+  syncing: 0,              // in-flight foreground syncs (SyncStarted − SyncDone/Error)
+  bgSyncPending: 0,        // queued background-sync jobs (BgSyncQueued − BgSyncJobDone)
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -46,9 +48,30 @@ function el(tag, opts = {}, children = []) {
   return node;
 }
 
+// Latest status message, rendered into the sidebar footer (the GUI keeps its
+// status in the left pane's footer rather than a global status bar).
+let statusMsg = "";
+let statusIsError = false;
+
 function setStatus(msg, isError = false) {
-  $("status").textContent = msg;
-  $("statusbar").classList.toggle("error", isError);
+  statusMsg = msg;
+  statusIsError = isError;
+  renderFooter();
+}
+
+// Sidebar footer: sync activity ("syncing…", "N bg") plus the latest status
+// message. Hidden entirely when there is nothing to show, like the GUI.
+function renderFooter() {
+  const footer = $("sidebar-footer");
+  const bits = [];
+  if (state.syncing > 0) bits.push("syncing…");
+  if (state.bgSyncPending > 0) bits.push(`${state.bgSyncPending} bg`);
+  const rows = [];
+  if (bits.length) rows.push(el("div", { class: "sync-line", text: bits.join("  ") }));
+  if (statusMsg) rows.push(el("div", { class: "status-line", text: statusMsg }));
+  footer.classList.toggle("error", statusIsError);
+  footer.replaceChildren(...rows);
+  footer.hidden = rows.length === 0;
 }
 
 // invoke() for fire-and-forget commands: report failures on the status bar
@@ -265,6 +288,12 @@ function confirmModal(message) {
 // opening). Without this the listeners outlived their detached menu node.
 let ctxMenuClose = null;
 
+// The mousedown that dismissed the last menu, so a menu-bar button can tell
+// "clicked while my menu was open" (a toggle-close: the capture-phase mousedown
+// dismissed it, and the button's click must not immediately reopen it) from a
+// fresh open.
+let lastMenuDismiss = { target: null, at: 0 };
+
 // Remove any open context menu AND its document-level close listeners.
 function dismissContextMenu() {
   document.querySelectorAll(".ctx-menu").forEach((m) => m.remove());
@@ -298,12 +327,138 @@ function showContextMenu(x, y, items) {
   }
   const close = (ev) => {
     if (ev.type === "keydown" && ev.key !== "Escape") return;
+    if (ev.type === "mousedown") lastMenuDismiss = { target: ev.target, at: Date.now() };
     dismissContextMenu();
   };
   ctxMenuClose = close;
   document.addEventListener("mousedown", close, true);
   document.addEventListener("keydown", close, true);
   document.body.appendChild(menu);
+}
+
+// ── menu bar ──────────────────────────────────────────────────────────────---
+//
+// HTML buttons + the shared context menu, mirroring the GUI's menu bar
+// (Glauca / View / Help dropdowns).
+
+// "✓ " prefix on the active option; NBSPs keep inactive labels aligned.
+function checkmark(active) {
+  return active ? "✓ " : "   ";
+}
+
+// Persist the full settings (the TOML holds all fields, so partial updates
+// spread over the current state) and adopt them locally on success.
+function persistSettings(next) {
+  return invoke("save_settings", {
+    theme: next.theme,
+    notificationsEnabled: next.notifications_enabled,
+    syncIntervalSecs: next.sync_interval_secs,
+  })
+    .then(() => {
+      state.settings = next;
+    })
+    .catch((e) => setStatus(`settings: ${e}`, true));
+}
+
+function setTheme(theme) {
+  applyTheme(theme);
+  persistSettings({ ...state.settings, theme });
+}
+
+function glaucaMenuItems() {
+  const e = state.entries[state.selectedEntry];
+  const q = e ? rootQueryStr(e) : null;
+  return [
+    {
+      label: "Sync now",
+      onClick: () => {
+        if (e && q) call("sync", { queryId: e.rootQueryId, queryStr: q });
+      },
+    },
+    {
+      label: "Full resync",
+      onClick: () => {
+        if (e && q) call("full_resync", { queryId: e.rootQueryId, queryStr: q });
+      },
+    },
+    null,
+    { label: "Settings…", onClick: openSettingsModal },
+    null,
+    { label: "Quit", onClick: () => call("quit") },
+  ];
+}
+
+function viewMenuItems() {
+  const s = state.settings;
+  const themeItem = (t, label) => ({
+    label: `${checkmark(s.theme === t)}Theme: ${label}`,
+    onClick: () => setTheme(t),
+  });
+  return [
+    themeItem("system", "System"),
+    themeItem("light", "Light"),
+    themeItem("dark", "Dark"),
+    null,
+    {
+      label: `${checkmark(s.notifications_enabled)}Desktop notifications`,
+      onClick: () => persistSettings({ ...s, notifications_enabled: !s.notifications_enabled }),
+    },
+  ];
+}
+
+function helpMenuItems() {
+  return [
+    { label: "About Glauca", onClick: openAboutModal },
+    { label: "Keyboard shortcuts", onClick: openHelpModal },
+  ];
+}
+
+function openAboutModal() {
+  document.querySelectorAll(".modal-overlay").forEach((m) => m.remove());
+  const overlay = el("div", { class: "modal-overlay" });
+  const closeOverlay = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey, true);
+  };
+  const onKey = (ev) => {
+    if (ev.key === "Escape" || ev.key === "q") {
+      ev.preventDefault();
+      closeOverlay();
+    }
+  };
+  document.addEventListener("keydown", onKey, true);
+  const version = el("div", { class: "modal-label", text: "" });
+  // Version comes from tauri.conf.json via the core app API (allowed by the
+  // core:default capability).
+  window.__TAURI__.app
+    .getVersion()
+    .then((v) => {
+      version.textContent = `Version ${v}`;
+    })
+    .catch(() => {
+      version.textContent = "";
+    });
+  overlay.appendChild(
+    el("div", { class: "modal-box" }, [
+      el("div", { class: "modal-title", text: "Glauca" }),
+      version,
+      el("div", { class: "modal-actions" }, [el("button", { text: "Close", onclick: closeOverlay })]),
+    ])
+  );
+  document.body.appendChild(overlay);
+}
+
+// Wire a menu-bar button: click opens the dropdown under the button. Clicking
+// the button while its own menu is open must close it, not reopen it — the
+// capture-phase mousedown already dismissed the menu, so the click is
+// suppressed when that dismissal just came from this button (lastMenuDismiss).
+function menuButton(id, buildItems) {
+  const btn = $(id);
+  btn.addEventListener("click", () => {
+    if (Date.now() - lastMenuDismiss.at < 300 && btn.contains(lastMenuDismiss.target)) return;
+    const r = btn.getBoundingClientRect();
+    showContextMenu(Math.round(r.left), Math.round(r.bottom + 2), buildItems());
+  });
 }
 
 // ── rendering ──────────────────────────────────────────────────────────────--
@@ -1192,13 +1347,26 @@ function handleMessage(msg) {
       setStatus(d, true);
       break;
     case "SyncStarted":
+      state.syncing += 1;
       setStatus(`syncing #${d.query_id}…`);
       break;
     case "SyncDone":
+      state.syncing = Math.max(0, state.syncing - 1);
       setStatus(`synced ${d.count} item(s)`);
       break;
     case "SyncError":
+      state.syncing = Math.max(0, state.syncing - 1);
       setStatus(`sync error: ${d.error}`, true);
+      break;
+    // Background-sync queue depth, shown as "N bg" in the sidebar footer (the
+    // GUI's bg_sync_pending counter).
+    case "BgSyncQueued":
+      state.bgSyncPending += d;
+      renderFooter();
+      break;
+    case "BgSyncJobDone":
+      state.bgSyncPending = Math.max(0, state.bgSyncPending - 1);
+      renderFooter();
       break;
     // Structural changes: the engine confirms with these; rebuild the left pane
     // from the DB (list_entries) rather than reordering in JS.
@@ -1212,7 +1380,6 @@ function handleMessage(msg) {
     case "FilterStreamsSwapped":
       refreshEntries();
       break;
-    // Remaining variants (BgSync*) aren't surfaced here; ignore.
     default:
       break;
   }
@@ -1231,6 +1398,9 @@ function applyTheme(theme) {
   }
 }
 
+// Settings modal (Glauca > Settings…). Theme and notifications moved to the
+// View menu, matching the GUI; only the sync interval — which the GUI has no
+// menu equivalent for — remains here.
 function openSettingsModal() {
   const s = state.settings;
   const overlay = el("div", { class: "modal-overlay" });
@@ -1238,32 +1408,13 @@ function openSettingsModal() {
     overlay.remove();
     document.removeEventListener("keydown", onKey, true);
   };
-  // Escape cancels the modal (matching the other modals), reverting the live theme
-  // preview to the saved value.
   const onKey = (ev) => {
     if (ev.key === "Escape") {
       ev.preventDefault();
-      applyTheme(s.theme);
       finish();
     }
   };
   document.addEventListener("keydown", onKey, true);
-
-  const themeSel = document.createElement("select");
-  themeSel.className = "modal-input";
-  for (const t of ["system", "light", "dark"]) {
-    const opt = document.createElement("option");
-    opt.value = t;
-    opt.textContent = t;
-    if (t === s.theme) opt.selected = true;
-    themeSel.appendChild(opt);
-  }
-  // Live theme preview as the user changes the select.
-  themeSel.addEventListener("change", () => applyTheme(themeSel.value));
-
-  const notif = el("input");
-  notif.type = "checkbox";
-  notif.checked = !!s.notifications_enabled;
 
   const interval = el("input", { class: "modal-input" });
   interval.type = "number";
@@ -1273,40 +1424,17 @@ function openSettingsModal() {
   const save = el("button", {
     text: "Save",
     onclick: async () => {
-      const next = {
-        theme: themeSel.value,
-        notifications_enabled: notif.checked,
-        sync_interval_secs: Math.max(10, parseInt(interval.value, 10) || 60),
-      };
-      try {
-        await invoke("save_settings", {
-          theme: next.theme,
-          notificationsEnabled: next.notifications_enabled,
-          syncIntervalSecs: next.sync_interval_secs,
-        });
-        state.settings = next;
-        applyTheme(next.theme);
-        setStatus("settings saved (sync interval applies on restart)");
-      } catch (e) {
-        setStatus(`settings: ${e}`, true);
-      }
+      const secs = Math.max(10, parseInt(interval.value, 10) || 60);
+      await persistSettings({ ...s, sync_interval_secs: secs });
+      setStatus("settings saved (sync interval applies on restart)");
       finish();
     },
   });
-  const cancel = el("button", {
-    text: "Cancel",
-    onclick: () => {
-      applyTheme(s.theme); // revert live preview
-      finish();
-    },
-  });
+  const cancel = el("button", { text: "Cancel", onclick: finish });
 
   overlay.appendChild(
     el("div", { class: "modal-box" }, [
       el("div", { class: "modal-title", text: "Settings" }),
-      el("div", { class: "modal-label", text: "Theme" }),
-      themeSel,
-      el("label", { class: "modal-check" }, [notif, el("span", { text: " Desktop notifications" })]),
       el("div", { class: "modal-label", text: "Sync interval (seconds)" }),
       interval,
       el("div", { class: "modal-actions" }, [cancel, save]),
@@ -1342,11 +1470,26 @@ async function main() {
   setFocus("entries");
 
   // Safety net: anything that still slips through as an unhandled rejection
-  // (e.g. a future missed await) lands on the status bar, not the void.
+  // (e.g. a future missed await) lands on the sidebar footer, not the void.
   window.addEventListener("unhandledrejection", (ev) => setStatus(String(ev.reason), true));
 
-  $("new-query").addEventListener("click", newQuery);
-  $("settings-btn").addEventListener("click", openSettingsModal);
+  menuButton("menu-glauca", glaucaMenuItems);
+  menuButton("menu-view", viewMenuItems);
+  menuButton("menu-help", helpMenuItems);
+
+  // Right-click on the entry list's empty space → New query (the GUI's
+  // NewQueryOnly menu). Rows handle their own context menu (entryMenu).
+  $("entries").addEventListener("contextmenu", (ev) => {
+    if (ev.target.closest("li")) return;
+    ev.preventDefault();
+    showContextMenu(ev.clientX, ev.clientY, [{ label: "New query", onClick: newQuery }]);
+  });
+  // Right-click anywhere in the detail pane → the selected item's action menu.
+  $("detail").addEventListener("contextmenu", (ev) => {
+    ev.preventDefault();
+    const it = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
+    if (it) showItemActionMenu(it, ev.clientX, ev.clientY);
+  });
 
   // Load + apply persisted settings (theme) before anything renders.
   try {
@@ -1369,14 +1512,19 @@ async function main() {
   state.entries = init.entries.map(normalize);
   renderSidebar();
 
-  // Signed-in user chip (avatar + display name), like the GUI's sidebar header.
+  // Sidebar header: signed-in user (36px avatar + login + display name),
+  // mirroring the GUI's left-pane header.
+  const header = $("sidebar-header");
   if (init.current_user) {
-    $("whoami").replaceChildren(
-      avatarEl({ login: init.current_user, avatar_url: init.current_user_avatar_url }, "avatar sm"),
-      el("span", {
-        text: init.current_user_name ? `${init.current_user_name} (@${init.current_user})` : `@${init.current_user}`,
-      })
+    header.replaceChildren(
+      avatarEl({ login: init.current_user, avatar_url: init.current_user_avatar_url }, "avatar lg"),
+      el("div", { class: "who" }, [
+        el("div", { class: "login", text: `@${init.current_user}` }),
+        init.current_user_name ? el("div", { class: "name", text: init.current_user_name }) : null,
+      ])
     );
+  } else {
+    header.replaceChildren(el("div", { class: "who" }, [el("div", { class: "name", text: "not authenticated" })]));
   }
 
   // Prime cached items (and thus unread badges) for every root query, mirroring
@@ -1391,7 +1539,9 @@ async function main() {
     call("load_cached", { queryId: e.rootQueryId });
   }
 
-  setStatus(state.currentUser ? `Signed in as @${state.currentUser}` : "Not authenticated (set GH_TOKEN)");
+  // The signed-in user is shown in the sidebar header; only the unauthenticated
+  // case warrants a status message.
+  if (!state.currentUser) setStatus("Not authenticated (set GH_TOKEN)");
   if (state.entries.length) {
     // Startup selection mirrors the GUI: sync only if the cache is stale, then
     // let the engine background-sync the remaining stale queries.

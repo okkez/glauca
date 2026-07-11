@@ -68,6 +68,14 @@ pub fn init(state: State<'_, AppState>) -> serde_json::Value {
     state.init.clone()
 }
 
+/// Quit the app (Glauca > Quit). A command rather than a window close from JS,
+/// because the `core:default` capability doesn't include window-close
+/// permissions; this also mirrors how the GUI quits through its own action.
+#[tauri::command]
+pub fn quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 /// Rebuild the left-pane entries (root queries interleaved with their filter
 /// streams) from the DB. The front-end calls this after any structural change
 /// (add/edit/delete/reorder); the ordering logic lives in
