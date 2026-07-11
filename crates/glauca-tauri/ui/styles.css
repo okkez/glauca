@@ -297,9 +297,9 @@ ul { list-style: none; margin: 0; padding: 0; }
   flex-direction: column;
   gap: 8px;
 }
-/* The author-level `display: flex` above beats the UA's `[hidden]` rule, so
-   restate it or the empty state shows a ghost padding box. */
-#detail-header[hidden] { display: none; }
+/* Visibility derives from content: no children (nothing selected) means no
+   header box — no hidden-attribute bookkeeping to keep in sync in JS. */
+#detail-header:empty { display: none; }
 .detail-title-row { display: flex; align-items: flex-start; gap: 8px; }
 .detail-lead { display: inline-flex; align-items: center; gap: 8px; flex: none; }
 .detail-title { font-size: 16px; font-weight: 700; min-width: 0; overflow-wrap: anywhere; }

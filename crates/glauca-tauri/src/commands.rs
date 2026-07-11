@@ -114,29 +114,19 @@ pub fn get_settings() -> TauriSettings {
 }
 
 /// Persist settings and apply the notifications flag immediately. The sync
-/// interval change takes effect on the next launch (the engine is already running).
+/// interval change takes effect on the next launch (the engine is already
+/// running). Takes the whole [`TauriSettings`] struct — serde already defines
+/// the field names and defaults, so adding a setting touches only settings.rs
+/// and the front-end sends its settings object through unchanged.
 #[tauri::command]
-pub fn save_settings(
-    state: State<'_, AppState>,
-    theme: String,
-    notifications_enabled: bool,
-    sync_interval_secs: u64,
-    pane_sizes: Option<(f64, f64)>,
-) -> Result<(), String> {
+pub fn save_settings(state: State<'_, AppState>, settings: TauriSettings) -> Result<(), String> {
     // Persist first, then flip the in-memory flag — so if the write fails the
     // runtime flag and the on-disk file stay in agreement instead of diverging for
     // the rest of the session.
-    TauriSettings {
-        theme,
-        notifications_enabled,
-        sync_interval_secs,
-        pane_sizes,
-    }
-    .save()
-    .map_err(|e| e.to_string())?;
+    settings.save().map_err(|e| e.to_string())?;
     state
         .notifications_enabled
-        .store(notifications_enabled, Ordering::Relaxed);
+        .store(settings.notifications_enabled, Ordering::Relaxed);
     Ok(())
 }
 
@@ -171,14 +161,52 @@ pub async fn unread_counts(
     )
 }
 
+/// One piece of an item title, pre-split on the inline filter's match
+/// boundaries so the front-end can paint the highlight without any offset
+/// arithmetic. `FilterQuery::highlight_ranges` speaks UTF-8 byte offsets,
+/// which JS strings can't index safely — the conversion happens here so that
+/// knowledge never crosses the IPC boundary.
+#[derive(Serialize)]
+pub struct TitleSegment {
+    pub text: String,
+    pub hl: bool,
+}
+
 /// One match from [`filter_items`]: the item's index into the input list plus
-/// the inline filter's match ranges in its title — **UTF-8 byte offsets**, from
-/// `FilterQuery::highlight_ranges` (the same data the GUI feeds its title
-/// highlight) — so the front-end can paint the filter-match highlight.
+/// its title split into highlighted / plain segments (empty when the inline
+/// filter is empty — the front-end then renders the title as-is).
 #[derive(Serialize)]
 pub struct FilteredItem {
     pub index: usize,
-    pub highlight_ranges: Vec<(usize, usize)>,
+    pub title_segments: Vec<TitleSegment>,
+}
+
+/// Split `title` on `ranges` (sorted, non-overlapping, char-boundary-snapped
+/// byte ranges from `FilterQuery::highlight_ranges`) into plain/highlighted
+/// segments.
+fn split_title(title: &str, ranges: &[(usize, usize)]) -> Vec<TitleSegment> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    for &(start, end) in ranges {
+        if start > pos {
+            out.push(TitleSegment {
+                text: title[pos..start].to_string(),
+                hl: false,
+            });
+        }
+        out.push(TitleSegment {
+            text: title[start..end].to_string(),
+            hl: true,
+        });
+        pos = end;
+    }
+    if pos < title.len() {
+        out.push(TitleSegment {
+            text: title[pos..].to_string(),
+            hl: false,
+        });
+    }
+    out
 }
 
 /// Return the entries of `items` that match the selected entry's filter: the
@@ -211,10 +239,10 @@ pub async fn filter_items(
             index,
             // Only the inline (search-box) filter highlights, like the GUI;
             // stream filters describe the list, not a search.
-            highlight_ranges: if inline_q.is_empty() {
+            title_segments: if inline_q.is_empty() {
                 Vec::new()
             } else {
-                inline_q.highlight_ranges(&it.title)
+                split_title(&it.title, &inline_q.highlight_ranges(&it.title))
             },
         })
         .collect())

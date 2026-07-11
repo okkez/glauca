@@ -20,8 +20,8 @@ const state = {
   itemsByQuery: new Map(), // rootQueryId -> ItemEntry[]
   pending: new Map(),      // rootQueryId -> held-back background items (not yet applied)
   visibleItems: [],        // current entry's items after stream + inline filtering
-  visibleHighlights: [],   // per visibleItems row: inline-filter title match ranges
-                          // (UTF-8 byte offsets from filter_items)
+  visibleHighlights: [],   // per visibleItems row: pre-split {text, hl} title
+                          // segments from filter_items (empty = no highlight)
   unread: new Map(),       // unreadKey(isFilterStream, entryId) -> count
   selectedEntry: -1,
   selectedItemKey: null,
@@ -69,7 +69,7 @@ function renderFooter() {
   if (state.syncing > 0) bits.push("syncing…");
   if (state.bgSyncPending > 0) bits.push(`${state.bgSyncPending} bg`);
   const rows = [];
-  if (bits.length) rows.push(el("div", { class: "sync-line", text: bits.join("  ") }));
+  if (bits.length) rows.push(el("div", { text: bits.join("  ") }));
   if (statusMsg) rows.push(el("div", { class: "status-line", text: statusMsg }));
   footer.classList.toggle("error", statusIsError);
   footer.replaceChildren(...rows);
@@ -361,6 +361,33 @@ function confirmModal(message) {
   });
 }
 
+// A dismissable read-only modal (About / Help): overlay + title + body rows +
+// a Close button; any of `closeKeys` also dismisses it. Owns the pairing of
+// its capture-phase keydown listener with every close path, so callers can't
+// leak the listener.
+function infoModal(title, bodyEls, { closeKeys = ["Escape", "q"], boxClass = "" } = {}) {
+  document.querySelectorAll(".modal-overlay").forEach((m) => m.remove());
+  const overlay = el("div", { class: "modal-overlay" });
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey, true);
+  };
+  const onKey = (ev) => {
+    if (!closeKeys.includes(ev.key)) return;
+    ev.preventDefault();
+    close();
+  };
+  document.addEventListener("keydown", onKey, true);
+  overlay.appendChild(
+    el("div", { class: boxClass ? `modal-box ${boxClass}` : "modal-box" }, [
+      el("div", { class: "modal-title", text: title }),
+      ...bodyEls,
+      el("div", { class: "modal-actions" }, [el("button", { text: "Close", onclick: close })]),
+    ])
+  );
+  document.body.appendChild(overlay);
+}
+
 // Lightweight context menu at (x, y). `items` is [{label, onClick}] (a null entry
 // renders a separator). Closes on selection or any outside click/Escape.
 // The document-level close listener for the open context menu, tracked so it can
@@ -368,20 +395,15 @@ function confirmModal(message) {
 // opening). Without this the listeners outlived their detached menu node.
 let ctxMenuClose = null;
 
-// The mousedown that dismissed the last menu, so a menu-bar button can tell
-// "clicked while my own menu was open" (a toggle-close: the capture-phase
-// mousedown dismissed it, and the button's click must not immediately reopen
-// it) from a fresh open or a switch to another menu. `owner` is the menu-bar
-// button id whose dropdown was open, null for ordinary context menus.
-let lastMenuDismiss = { target: null, at: 0, owner: null };
-
 // Menu-bar button id whose dropdown is currently open (null for ordinary
-// context menus); captured into lastMenuDismiss when the menu closes.
+// context menus). First-class ownership lets menuButton decide toggle-close
+// vs. open from the *current* state, with no dismissal-history heuristics.
 let menuBarOwner = null;
 
 // Remove any open context menu AND its document-level close listeners.
 function dismissContextMenu() {
   document.querySelectorAll(".ctx-menu").forEach((m) => m.remove());
+  menuBarOwner = null;
   if (ctxMenuClose) {
     document.removeEventListener("mousedown", ctxMenuClose, true);
     document.removeEventListener("keydown", ctxMenuClose, true);
@@ -389,9 +411,11 @@ function dismissContextMenu() {
   }
 }
 
-function showContextMenu(x, y, items) {
+// `ownerEl` (optional) is the element that opened the menu: mousedowns inside
+// it don't auto-dismiss, so its own click handler stays the single decision
+// point (used by the menu-bar buttons for one-click toggling).
+function showContextMenu(x, y, items, ownerEl = null) {
   dismissContextMenu(); // clear any prior menu and its listeners first
-  menuBarOwner = null; // ordinary context menu unless menuButton claims it
   const menu = el("div", { class: "ctx-menu" });
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
@@ -415,8 +439,8 @@ function showContextMenu(x, y, items) {
     if (ev.type === "keydown" && ev.key !== "Escape") return;
     // Clicks inside the menu are the items' own onclick business; closing (and
     // detaching the node) on the capture-phase mousedown would race the click.
-    if (ev.type === "mousedown" && ev.target.closest(".ctx-menu")) return;
-    if (ev.type === "mousedown") lastMenuDismiss = { target: ev.target, at: Date.now(), owner: menuBarOwner };
+    // Same for the owner element — its click handler decides open vs. toggle.
+    if (ev.type === "mousedown" && (ev.target.closest(".ctx-menu") || (ownerEl && ownerEl.contains(ev.target)))) return;
     dismissContextMenu();
   };
   ctxMenuClose = close;
@@ -435,15 +459,12 @@ function checkmark(active) {
   return active ? "✓ " : "   ";
 }
 
-// Persist the full settings (the TOML holds all fields, so partial updates
-// spread over the current state) and adopt them locally on success.
+// Persist the full settings object (the TOML holds all fields, so partial
+// updates spread over the current state) and adopt it locally on success. The
+// object passes through to Rust's TauriSettings as-is — no per-field mapping
+// to keep in sync when settings grow.
 function persistSettings(next) {
-  return invoke("save_settings", {
-    theme: next.theme,
-    notificationsEnabled: next.notifications_enabled,
-    syncIntervalSecs: next.sync_interval_secs,
-    paneSizes: next.pane_sizes || null,
-  })
+  return invoke("save_settings", { settings: next })
     .then(() => {
       state.settings = next;
     })
@@ -457,20 +478,9 @@ function setTheme(theme) {
 
 function glaucaMenuItems() {
   const e = state.entries[state.selectedEntry];
-  const q = e ? rootQueryStr(e) : null;
   return [
-    {
-      label: "Sync now",
-      onClick: () => {
-        if (e && q) call("sync", { queryId: e.rootQueryId, queryStr: q });
-      },
-    },
-    {
-      label: "Full resync",
-      onClick: () => {
-        if (e && q) call("full_resync", { queryId: e.rootQueryId, queryStr: q });
-      },
-    },
+    { label: "Sync now", onClick: () => syncEntry(e) },
+    { label: "Full resync", onClick: () => fullResyncEntry(e) },
     null,
     { label: "Settings…", onClick: openSettingsModal },
     null,
@@ -504,19 +514,6 @@ function helpMenuItems() {
 }
 
 function openAboutModal() {
-  document.querySelectorAll(".modal-overlay").forEach((m) => m.remove());
-  const overlay = el("div", { class: "modal-overlay" });
-  const closeOverlay = () => {
-    overlay.remove();
-    document.removeEventListener("keydown", onKey, true);
-  };
-  const onKey = (ev) => {
-    if (ev.key === "Escape" || ev.key === "q") {
-      ev.preventDefault();
-      closeOverlay();
-    }
-  };
-  document.addEventListener("keydown", onKey, true);
   const version = el("div", { class: "modal-label", text: "" });
   // Version comes from tauri.conf.json via the core app API (allowed by the
   // core:default capability).
@@ -528,33 +525,22 @@ function openAboutModal() {
     .catch(() => {
       version.textContent = "";
     });
-  overlay.appendChild(
-    el("div", { class: "modal-box" }, [
-      el("div", { class: "modal-title", text: "Glauca" }),
-      version,
-      el("div", { class: "modal-actions" }, [el("button", { text: "Close", onclick: closeOverlay })]),
-    ])
-  );
-  document.body.appendChild(overlay);
+  infoModal("Glauca", [version]);
 }
 
-// Wire a menu-bar button: click opens the dropdown under the button. Clicking
-// the button while its *own* menu is open must close it, not reopen it — the
-// capture-phase mousedown already dismissed the menu, so the click is
-// suppressed when that dismissal was this button toggling its own dropdown.
-// A click on a different menu button switches menus in one click (its own
-// dropdown wasn't the one dismissed, so the guard doesn't fire).
+// Wire a menu-bar button: click opens the dropdown under the button; clicking
+// it again while its own menu is open closes it (mousedowns on the owner are
+// exempt from the auto-dismiss, so this handler sees the still-open state).
+// A click on a different menu button switches menus in one click.
 function menuButton(id, buildItems) {
   const btn = $(id);
   btn.addEventListener("click", () => {
-    if (
-      lastMenuDismiss.owner === id &&
-      Date.now() - lastMenuDismiss.at < 300 &&
-      btn.contains(lastMenuDismiss.target)
-    )
+    if (menuBarOwner === id) {
+      dismissContextMenu();
       return;
+    }
     const r = btn.getBoundingClientRect();
-    showContextMenu(Math.round(r.left), Math.round(r.bottom + 2), buildItems());
+    showContextMenu(Math.round(r.left), Math.round(r.bottom + 2), buildItems(), btn);
     menuBarOwner = id;
   });
 }
@@ -666,7 +652,7 @@ async function refreshVisible() {
     });
     if (seq !== state.filterSeq) return;
     state.visibleItems = matches.map((m) => all[m.index]);
-    state.visibleHighlights = matches.map((m) => m.highlight_ranges);
+    state.visibleHighlights = matches.map((m) => m.title_segments);
   } catch (err) {
     if (seq !== state.filterSeq) return;
     setStatus(`filter: ${err}`, true);
@@ -771,25 +757,19 @@ function reviewerAvatar(user, reviewState) {
   ]);
 }
 
-// The item title with the inline-filter match ranges highlighted. `ranges` are
-// sorted, non-overlapping **UTF-8 byte offsets** (from core's
-// FilterQuery::highlight_ranges), so slice the encoded bytes and decode each
-// piece — indexing the JS string directly would drift on multibyte titles.
-function renderHighlightedTitle(title, ranges) {
+// The item title with the inline-filter matches highlighted. `segments` come
+// pre-split from filter_items ({text, hl} pieces — the Rust side owns the
+// byte-offset arithmetic); empty/missing means no highlight.
+function renderHighlightedTitle(title, segments) {
   const span = el("span", { class: "it-title" });
-  if (!ranges || !ranges.length) {
+  if (!segments || !segments.length) {
     span.textContent = title;
     return span;
   }
-  const bytes = new TextEncoder().encode(title);
-  const dec = new TextDecoder();
-  let pos = 0;
-  for (const [start, end] of ranges) {
-    if (start > pos) span.appendChild(document.createTextNode(dec.decode(bytes.subarray(pos, start))));
-    span.appendChild(el("span", { class: "hl", text: dec.decode(bytes.subarray(start, end)) }));
-    pos = end;
+  for (const s of segments) {
+    if (s.hl) span.appendChild(el("span", { class: "hl", text: s.text }));
+    else span.appendChild(document.createTextNode(s.text));
   }
-  if (pos < bytes.length) span.appendChild(document.createTextNode(dec.decode(bytes.subarray(pos))));
   return span;
 }
 
@@ -906,11 +886,10 @@ function renderItemList() {
   });
 }
 
-// Reset the detail pane to its "nothing selected" state.
+// Reset the detail pane to its "nothing selected" state. The emptied header
+// hides itself via the #detail-header:empty CSS rule.
 function clearDetail() {
-  const header = $("detail-header");
-  header.hidden = true;
-  header.replaceChildren();
+  $("detail-header").replaceChildren();
   const scroll = $("detail-scroll");
   scroll.className = "";
   scroll.replaceChildren(el("div", { class: "detail-empty", text: "Select an item" }));
@@ -938,7 +917,6 @@ function reviewDecisionIcon(decision) {
 function renderDetail(it) {
   const header = $("detail-header");
   const scroll = $("detail-scroll");
-  header.hidden = false;
   header.replaceChildren();
   scroll.scrollTop = 0; // new item shown → back to the top, mirroring the TUI/GUI
 
@@ -1337,10 +1315,7 @@ function entryMenu(ev, idx) {
   items.push(null);
   items.push({ label: "Mark all read", onClick: () => markAllRead(e) });
   if (!e.isFilterStream) {
-    items.push({
-      label: "Full resync",
-      onClick: () => call("full_resync", { queryId: e.rootQueryId, queryStr: e.queryStr }),
-    });
+    items.push({ label: "Full resync", onClick: () => fullResyncEntry(e) });
   }
   showContextMenu(ev.clientX, ev.clientY, items);
 }
@@ -1414,6 +1389,19 @@ function rootQueryStr(e) {
   if (!e.isFilterStream) return e.queryStr;
   const root = state.entries.find((x) => !x.isFilterStream && x.id === e.rootQueryId);
   return root ? root.queryStr : null;
+}
+
+// Sync / full-resync the entry's backing root query — the single dispatch
+// point shared by the Glauca menu, the r/S keys, and the entry context menu.
+// No-ops when there is no entry or its root query can't be resolved.
+function syncEntry(e) {
+  const q = e && rootQueryStr(e);
+  if (q) call("sync", { queryId: e.rootQueryId, queryStr: q });
+}
+
+function fullResyncEntry(e) {
+  const q = e && rootQueryStr(e);
+  if (q) call("full_resync", { queryId: e.rootQueryId, queryStr: q });
 }
 
 // Comments-modal keyboard controller, installed by openCommentsModal while the
@@ -1547,17 +1535,14 @@ function handleNavKey(ev) {
       // Context-dependent like the TUI: entries → re-sync the selected entry's
       // root query, items → re-fetch the selected item.
       if (state.focus === "entries") {
-        const q = e && rootQueryStr(e);
-        if (e && q) call("sync", { queryId: e.rootQueryId, queryStr: q });
+        syncEntry(e);
       } else if (it && e) {
         call("refresh_item", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
       }
       return handled();
-    case "S": {
-      const q = e && rootQueryStr(e);
-      if (e && q) call("full_resync", { queryId: e.rootQueryId, queryStr: q });
+    case "S":
+      fullResyncEntry(e);
       return handled();
-    }
     case "u":
       if (e) applyPending(e.rootQueryId);
       return handled();
@@ -1610,30 +1595,10 @@ const KEY_HELP = [
 ];
 
 function openHelpModal() {
-  document.querySelectorAll(".modal-overlay").forEach((m) => m.remove());
-  const overlay = el("div", { class: "modal-overlay" });
-  const close = () => {
-    overlay.remove();
-    document.removeEventListener("keydown", onKey, true);
-  };
-  const onKey = (ev) => {
-    if (ev.key === "Escape" || ev.key === "q" || ev.key === "?") {
-      ev.preventDefault();
-      close();
-    }
-  };
-  document.addEventListener("keydown", onKey, true);
   const rows = KEY_HELP.map(([keys, desc]) =>
     el("div", { class: "help-row" }, [el("span", { class: "help-keys", text: keys }), el("span", { text: desc })])
   );
-  overlay.appendChild(
-    el("div", { class: "modal-box help-box" }, [
-      el("div", { class: "modal-title", text: "Keyboard shortcuts" }),
-      ...rows,
-      el("div", { class: "modal-actions" }, [el("button", { text: "Close", onclick: close })]),
-    ])
-  );
-  document.body.appendChild(overlay);
+  infoModal("Keyboard shortcuts", rows, { closeKeys: ["Escape", "q", "?"], boxClass: "help-box" });
 }
 
 // ── engine messages ────────────────────────────────────────────────────────--
@@ -1731,47 +1696,15 @@ function applyTheme(theme) {
 
 // Settings modal (Glauca > Settings…). Theme and notifications moved to the
 // View menu, matching the GUI; only the sync interval — which the GUI has no
-// menu equivalent for — remains here.
-function openSettingsModal() {
+// menu equivalent for — remains here, so the generic form modal covers it.
+async function openSettingsModal() {
   const s = state.settings;
-  const overlay = el("div", { class: "modal-overlay" });
-  const finish = () => {
-    overlay.remove();
-    document.removeEventListener("keydown", onKey, true);
-  };
-  const onKey = (ev) => {
-    if (ev.key === "Escape") {
-      ev.preventDefault();
-      finish();
-    }
-  };
-  document.addEventListener("keydown", onKey, true);
-
-  const interval = el("input", { class: "modal-input" });
-  interval.type = "number";
-  interval.min = "10";
-  interval.value = String(s.sync_interval_secs);
-
-  const save = el("button", {
-    text: "Save",
-    onclick: async () => {
-      const secs = Math.max(10, parseInt(interval.value, 10) || 60);
-      await persistSettings({ ...s, sync_interval_secs: secs });
-      setStatus("settings saved (sync interval applies on restart)");
-      finish();
-    },
-  });
-  const cancel = el("button", { text: "Cancel", onclick: finish });
-
-  overlay.appendChild(
-    el("div", { class: "modal-box" }, [
-      el("div", { class: "modal-title", text: "Settings" }),
-      el("div", { class: "modal-label", text: "Sync interval (seconds)" }),
-      interval,
-      el("div", { class: "modal-actions" }, [cancel, save]),
-    ])
-  );
-  document.body.appendChild(overlay);
+  const out = await formModal("Settings", [
+    { key: "secs", label: "Sync interval (seconds)", value: String(s.sync_interval_secs) },
+  ]);
+  if (!out) return;
+  await persistSettings({ ...s, sync_interval_secs: Math.max(10, parseInt(out.secs, 10) || 60) });
+  setStatus("settings saved (sync interval applies on restart)");
 }
 
 // ── bootstrap ──────────────────────────────────────────────────────────────--
