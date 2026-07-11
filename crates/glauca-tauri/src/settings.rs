@@ -34,6 +34,10 @@ pub struct TauriSettings {
     /// updated items. Defaults to `false` (opt-in), like the TUI/GUI.
     #[serde(default)]
     pub notifications_enabled: bool,
+    /// Persisted `(sidebar, detail)` pane widths in px, like the GUI's
+    /// `pane_sizes`. `None` until the user first drags a divider.
+    #[serde(default)]
+    pub pane_sizes: Option<(f64, f64)>,
 }
 
 impl Default for TauriSettings {
@@ -42,6 +46,7 @@ impl Default for TauriSettings {
             sync_interval_secs: default_sync_interval_secs(),
             theme: default_theme(),
             notifications_enabled: false,
+            pane_sizes: None,
         }
     }
 }

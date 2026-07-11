@@ -138,6 +138,7 @@ fn main() -> anyhow::Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             commands::init,
+            commands::quit,
             commands::get_settings,
             commands::save_settings,
             commands::list_entries,

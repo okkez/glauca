@@ -20,6 +20,8 @@ const state = {
   itemsByQuery: new Map(), // rootQueryId -> ItemEntry[]
   pending: new Map(),      // rootQueryId -> held-back background items (not yet applied)
   visibleItems: [],        // current entry's items after stream + inline filtering
+  visibleTitleSegments: [], // per visibleItems row: pre-split {text, highlighted}
+                          // title segments from filter_items (empty = no highlight)
   unread: new Map(),       // unreadKey(isFilterStream, entryId) -> count
   selectedEntry: -1,
   selectedItemKey: null,
@@ -28,9 +30,11 @@ const state = {
   comments: [],            // last-loaded comments (shown in the comments modal)
   commentsShowMinimized: false,
   commentsSortNewest: false,
-  settings: { theme: "system", notifications_enabled: false, sync_interval_secs: 60 },
+  settings: { theme: "system", notifications_enabled: false, sync_interval_secs: 60, pane_sizes: null },
   filterSeq: 0,            // bumped per refreshVisible() call; guards against a stale
                           // filter_items result overwriting a newer entry's items
+  syncingCount: 0,         // in-flight foreground syncs (SyncStarted − SyncDone/Error)
+  bgSyncPending: 0,        // queued background-sync jobs (BgSyncQueued − BgSyncJobDone)
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -46,20 +50,107 @@ function el(tag, opts = {}, children = []) {
   return node;
 }
 
+// Latest status message, rendered into the sidebar footer (the GUI keeps its
+// status in the left pane's footer rather than a global status bar).
+let statusMsg = "";
+let statusIsError = false;
+
 function setStatus(msg, isError = false) {
-  $("status").textContent = msg;
-  $("statusbar").classList.toggle("error", isError);
+  statusMsg = msg;
+  statusIsError = isError;
+  renderFooter();
 }
 
-// invoke() for fire-and-forget commands: report failures on the status bar
-// instead of losing them as unhandled rejections. Use plain invoke() (with
-// await / .catch) when the result matters.
+// Sidebar footer: sync activity ("syncing…", "N bg") plus the latest status
+// message. Hidden entirely when there is nothing to show, like the GUI.
+function renderFooter() {
+  const footer = $("sidebar-footer");
+  const bits = [];
+  if (state.syncingCount > 0) bits.push("syncing…");
+  if (state.bgSyncPending > 0) bits.push(`${state.bgSyncPending} bg`);
+  const rows = [];
+  if (bits.length) rows.push(el("div", { text: bits.join("  ") }));
+  if (statusMsg) rows.push(el("div", { class: "status-line", text: statusMsg }));
+  footer.classList.toggle("error", statusIsError);
+  footer.replaceChildren(...rows);
+  footer.hidden = rows.length === 0;
+}
+
+// invoke() for fire-and-forget commands: report failures on the sidebar
+// footer instead of losing them as unhandled rejections. Use plain invoke()
+// (with await / .catch) when the result matters.
 function call(cmd, args) {
   return invoke(cmd, args).catch((e) => setStatus(`${cmd}: ${e}`, true));
 }
 
 function itemKey(it) {
   return `${it.repo_owner}/${it.repo_name}#${it.number}`;
+}
+
+// ── octicons ─────────────────────────────────────────────────────────────────
+//
+// GitHub Octicons (MIT licensed, https://github.com/primer/octicons), the same
+// set the GUI vendors under crates/glauca-gui/assets/octicons. Inlined as path
+// data because the CSP has no connect-src 'self' (fetch() of an .svg would be
+// blocked), and `fill: currentColor` lets CSS color them per state/theme.
+
+const OCTICONS = {
+  "check-circle-fill": [
+    { d: "M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16Zm3.78-9.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018L6.75 9.19 5.28 7.72a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l2 2a.75.75 0 0 0 1.06 0Z", evenodd: true },
+  ],
+  clock: [
+    { d: "M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm7-3.25v2.992l2.028.812a.75.75 0 0 1-.557 1.392l-2.5-1A.751.751 0 0 1 7 8.25v-3.5a.75.75 0 0 1 1.5 0Z" },
+  ],
+  comment: [
+    { d: "M1 2.75C1 1.784 1.784 1 2.75 1h10.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 13.25 12H9.06l-2.573 2.573A1.458 1.458 0 0 1 4 13.543V12H2.75A1.75 1.75 0 0 1 1 10.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h4.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z" },
+  ],
+  "git-merge": [
+    { d: "M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM5 3.25a.75.75 0 1 0 0 .005V3.25Z" },
+  ],
+  "git-pull-request": [
+    { d: "M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z" },
+  ],
+  "git-pull-request-closed": [
+    { d: "M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 5.5a.75.75 0 0 1 .75.75v3.378a2.251 2.251 0 1 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm-2.03-5.273a.75.75 0 0 1 1.06 0l.97.97.97-.97a.748.748 0 0 1 1.265.332.75.75 0 0 1-.205.729l-.97.97.97.97a.751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018l-.97-.97-.97.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l.97-.97-.97-.97a.75.75 0 0 1 0-1.06ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" },
+  ],
+  "git-pull-request-draft": [
+    { d: "M3.25 1A2.25 2.25 0 0 1 4 5.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.251 2.251 0 0 1 3.25 1Zm9.5 14a2.25 2.25 0 1 1 0-4.5 2.25 2.25 0 0 1 0 4.5ZM2.5 3.25a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0ZM3.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm9.5 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM14 7.5a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm0-4.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z" },
+  ],
+  "issue-closed": [
+    { d: "M11.28 6.78a.75.75 0 0 0-1.06-1.06L7.25 8.69 5.78 7.22a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l3.5-3.5Z" },
+    { d: "M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0Zm-1.5 0a6.5 6.5 0 1 0-13 0 6.5 6.5 0 0 0 13 0Z" },
+  ],
+  "issue-opened": [
+    { d: "M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z" },
+    { d: "M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z" },
+  ],
+  lock: [
+    { d: "M4 4a4 4 0 0 1 8 0v2h.25c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 12.25 15h-8.5A1.75 1.75 0 0 1 2 13.25v-5.5C2 6.784 2.784 6 3.75 6H4Zm8.25 3.5h-8.5a.25.25 0 0 0-.25.25v5.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25ZM10.5 6V4a2.5 2.5 0 1 0-5 0v2Z" },
+  ],
+  "x-circle-fill": [
+    { d: "M2.343 13.657A8 8 0 1 1 13.658 2.342 8 8 0 0 1 2.343 13.657ZM6.03 4.97a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042L6.94 8 4.97 9.97a.749.749 0 0 0 .326 1.275.749.749 0 0 0 .734-.215L8 9.06l1.97 1.97a.749.749 0 0 0 1.275-.326.749.749 0 0 0-.215-.734L9.06 8l1.97-1.97a.749.749 0 0 0-.326-1.275.749.749 0 0 0-.734.215L8 6.94Z", evenodd: true },
+  ],
+};
+
+// An inline <svg> for the named octicon, colored via `currentColor` (so a color
+// class like .state-open on the element tints it, matching how gpui paints the
+// same SVGs as masks).
+function octicon(name, cls = "", size = 16) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("fill", "currentColor");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("class", cls ? `octicon ${cls}` : "octicon");
+  for (const p of OCTICONS[name] || []) {
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", p.d);
+    if (p.evenodd) path.setAttribute("fill-rule", "evenodd");
+    svg.appendChild(path);
+  }
+  return svg;
 }
 
 // Jasper-style unread: the item changed since it was last read. Mirrors
@@ -86,6 +177,18 @@ async function updateBanner() {
     n = await invoke("count_changed_items", { current: state.itemsByQuery.get(e.rootQueryId) || [], fresh });
   } catch {
     n = fresh.length; // banner is display-only; fall back to a coarse count
+  }
+  // The selection may have moved while the count was in flight; a stale
+  // resolution must not repaint the banner for a query no longer shown
+  // (previewEntry already re-ran updateBanner for the new one).
+  const cur = state.entries[state.selectedEntry];
+  if (!cur || cur.rootQueryId !== e.rootQueryId) return;
+  if (n === 0) {
+    // Nothing user-visible changed; drop the held-back items instead of
+    // showing a "0 updated" banner (the GUI clears pending the same way).
+    state.pending.delete(e.rootQueryId);
+    banner.hidden = true;
+    return;
   }
   banner.textContent = `${n} updated in background — click to refresh`;
   banner.hidden = false;
@@ -258,6 +361,33 @@ function confirmModal(message) {
   });
 }
 
+// A dismissable read-only modal (About / Help): overlay + title + body rows +
+// a Close button; any of `closeKeys` also dismisses it. Owns the pairing of
+// its capture-phase keydown listener with every close path, so callers can't
+// leak the listener.
+function infoModal(title, bodyEls, { closeKeys = ["Escape", "q"], boxClass = "" } = {}) {
+  document.querySelectorAll(".modal-overlay").forEach((m) => m.remove());
+  const overlay = el("div", { class: "modal-overlay" });
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey, true);
+  };
+  const onKey = (ev) => {
+    if (!closeKeys.includes(ev.key)) return;
+    ev.preventDefault();
+    close();
+  };
+  document.addEventListener("keydown", onKey, true);
+  overlay.appendChild(
+    el("div", { class: boxClass ? `modal-box ${boxClass}` : "modal-box" }, [
+      el("div", { class: "modal-title", text: title }),
+      ...bodyEls,
+      el("div", { class: "modal-actions" }, [el("button", { text: "Close", onclick: close })]),
+    ])
+  );
+  document.body.appendChild(overlay);
+}
+
 // Lightweight context menu at (x, y). `items` is [{label, onClick}] (a null entry
 // renders a separator). Closes on selection or any outside click/Escape.
 // The document-level close listener for the open context menu, tracked so it can
@@ -265,9 +395,15 @@ function confirmModal(message) {
 // opening). Without this the listeners outlived their detached menu node.
 let ctxMenuClose = null;
 
+// Menu-bar button id whose dropdown is currently open (null for ordinary
+// context menus). First-class ownership lets wireMenuButton decide toggle-close
+// vs. open from the *current* state, with no dismissal-history heuristics.
+let menuBarOwner = null;
+
 // Remove any open context menu AND its document-level close listeners.
 function dismissContextMenu() {
   document.querySelectorAll(".ctx-menu").forEach((m) => m.remove());
+  menuBarOwner = null;
   if (ctxMenuClose) {
     document.removeEventListener("mousedown", ctxMenuClose, true);
     document.removeEventListener("keydown", ctxMenuClose, true);
@@ -275,7 +411,10 @@ function dismissContextMenu() {
   }
 }
 
-function showContextMenu(x, y, items) {
+// `ownerEl` (optional) is the element that opened the menu: mousedowns inside
+// it don't auto-dismiss, so its own click handler stays the single decision
+// point (used by the menu-bar buttons for one-click toggling).
+function showContextMenu(x, y, items, ownerEl = null) {
   dismissContextMenu(); // clear any prior menu and its listeners first
   const menu = el("div", { class: "ctx-menu" });
   menu.style.left = `${x}px`;
@@ -298,12 +437,162 @@ function showContextMenu(x, y, items) {
   }
   const close = (ev) => {
     if (ev.type === "keydown" && ev.key !== "Escape") return;
+    if (ev.type === "mousedown") {
+      // Clicks inside the menu are the items' own onclick business; closing
+      // (and detaching the node) on the capture-phase mousedown would race the
+      // click. Same for the owner element — its click handler decides open
+      // vs. toggle.
+      const insideMenu = ev.target.closest(".ctx-menu");
+      const insideOwner = ownerEl && ownerEl.contains(ev.target);
+      if (insideMenu || insideOwner) return;
+    }
     dismissContextMenu();
   };
   ctxMenuClose = close;
   document.addEventListener("mousedown", close, true);
   document.addEventListener("keydown", close, true);
   document.body.appendChild(menu);
+}
+
+// ── menu bar ──────────────────────────────────────────────────────────────---
+//
+// HTML buttons + the shared context menu, mirroring the GUI's menu bar
+// (Glauca / View / Help dropdowns).
+
+// "✓ " prefix on the active option; NBSPs keep inactive labels aligned.
+function checkmark(active) {
+  return active ? "✓ " : "   ";
+}
+
+function glaucaMenuItems() {
+  const e = state.entries[state.selectedEntry];
+  return [
+    { label: "Sync now", onClick: () => syncEntry(e) },
+    { label: "Full resync", onClick: () => fullResyncEntry(e) },
+    null,
+    { label: "Settings…", onClick: openSettingsModal },
+    null,
+    { label: "Quit", onClick: () => call("quit") },
+  ];
+}
+
+function viewMenuItems() {
+  const s = state.settings;
+  const themeItem = (t, label) => ({
+    label: `${checkmark(s.theme === t)}Theme: ${label}`,
+    onClick: () => setTheme(t),
+  });
+  return [
+    themeItem("system", "System"),
+    themeItem("light", "Light"),
+    themeItem("dark", "Dark"),
+    null,
+    {
+      label: `${checkmark(s.notifications_enabled)}Desktop notifications`,
+      onClick: () => persistSettings({ ...s, notifications_enabled: !s.notifications_enabled }),
+    },
+  ];
+}
+
+function helpMenuItems() {
+  return [
+    { label: "About Glauca", onClick: openAboutModal },
+    { label: "Keyboard shortcuts", onClick: openHelpModal },
+  ];
+}
+
+function openAboutModal() {
+  const version = el("div", { class: "modal-label", text: "" });
+  // Version comes from tauri.conf.json via the core app API (allowed by the
+  // core:default capability).
+  window.__TAURI__.app
+    .getVersion()
+    .then((v) => {
+      version.textContent = `Version ${v}`;
+    })
+    .catch(() => {
+      version.textContent = "";
+    });
+  infoModal("Glauca", [version]);
+}
+
+// Wire a menu-bar button: click opens the dropdown under the button; clicking
+// it again while its own menu is open closes it (mousedowns on the owner are
+// exempt from the auto-dismiss, so this handler sees the still-open state).
+// A click on a different menu button switches menus in one click.
+function wireMenuButton(id, buildItems) {
+  const btn = $(id);
+  btn.addEventListener("click", () => {
+    if (menuBarOwner === id) {
+      dismissContextMenu();
+      return;
+    }
+    const r = btn.getBoundingClientRect();
+    showContextMenu(Math.round(r.left), Math.round(r.bottom + 2), buildItems(), btn);
+    menuBarOwner = id; // must come after showContextMenu — its dismissContextMenu() resets the owner
+  });
+}
+
+// ── pane resize ─────────────────────────────────────────────────────────────-
+//
+// Drag the dividers to resize the fixed side panes, mirroring the GUI's
+// resizable panes (same clamps: sidebar 250–560, detail ≥ 300; the flexible
+// center keeps ≥ 250 by capping the dragged pane against the window width).
+// Widths persist to settings.pane_sizes on drag end.
+
+const SIDEBAR_MIN = 250;
+const SIDEBAR_MAX = 560;
+const DETAIL_MIN = 300;
+const CENTER_MIN = 250;
+
+// Restore persisted widths, re-clamped: the file may have been written on a
+// larger window (or edited by hand), and unclamped values would overflow the
+// flexible center below its minimum.
+function applyPaneSizes(sizes) {
+  if (!sizes) return;
+  let [sidebar, detail] = sizes;
+  if (sidebar > 0) {
+    sidebar = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, sidebar));
+    $("sidebar").style.width = `${sidebar}px`;
+  }
+  if (detail > 0) {
+    const max = Math.max(DETAIL_MIN, window.innerWidth - paneWidth("sidebar") - CENTER_MIN);
+    detail = Math.max(DETAIL_MIN, Math.min(max, detail));
+    $("detail").style.width = `${detail}px`;
+  }
+}
+
+function paneWidth(id) {
+  return Math.round($(id).getBoundingClientRect().width);
+}
+
+function setupPaneResize() {
+  const wire = (dividerId, resize) => {
+    $(dividerId).addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
+      const startX = ev.clientX;
+      const startSidebar = paneWidth("sidebar");
+      const startDetail = paneWidth("detail");
+      const move = (mv) => resize(startSidebar, startDetail, mv.clientX - startX);
+      const up = () => {
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+        persistSettings({ ...state.settings, pane_sizes: [paneWidth("sidebar"), paneWidth("detail")] });
+      };
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    });
+  };
+  wire("divider-left", (sidebar, detail, dx) => {
+    const max = Math.min(SIDEBAR_MAX, window.innerWidth - detail - CENTER_MIN);
+    const w = Math.max(SIDEBAR_MIN, Math.min(max, sidebar + dx));
+    $("sidebar").style.width = `${w}px`;
+  });
+  wire("divider-right", (sidebar, detail, dx) => {
+    const max = window.innerWidth - sidebar - CENTER_MIN;
+    const w = Math.max(DETAIL_MIN, Math.min(max, detail - dx));
+    $("detail").style.width = `${w}px`;
+  });
 }
 
 // ── rendering ──────────────────────────────────────────────────────────────--
@@ -344,25 +633,44 @@ async function refreshVisible() {
   // wrong list). Bail if a later call has already superseded us.
   const seq = ++state.filterSeq;
   try {
-    const indices = await invoke("filter_items", {
+    const matches = await invoke("filter_items", {
       items: all,
       streamFilter: e.streamFilter,
       inlineFilter: state.filterText,
     });
     if (seq !== state.filterSeq) return;
-    state.visibleItems = indices.map((i) => all[i]);
+    state.visibleItems = matches.map((m) => all[m.index]);
+    state.visibleTitleSegments = matches.map((m) => m.title_segments);
   } catch (err) {
     if (seq !== state.filterSeq) return;
     setStatus(`filter: ${err}`, true);
     state.visibleItems = all;
+    state.visibleTitleSegments = [];
   }
   renderItemList();
 }
 
-function stateClass(s) {
-  if (s === "open") return "state-open";
-  if (s === "merged") return "state-merged";
-  return "state-closed";
+// Octicon name + color class encoding an item's state: the shape says
+// issue-vs-PR, the color says open/merged/closed/draft. Mirrors the GUI's
+// item_state_icon_info.
+function itemStateIcon(it) {
+  if (it.kind === "pull_request") {
+    if (it.is_draft) return { name: "git-pull-request-draft", cls: "state-draft" };
+    if (it.state === "merged") return { name: "git-merge", cls: "state-merged" };
+    if (it.state === "closed") return { name: "git-pull-request-closed", cls: "state-closed" };
+    return { name: "git-pull-request", cls: "state-open" };
+  }
+  return it.state === "closed"
+    ? { name: "issue-closed", cls: "state-closed" }
+    : { name: "issue-opened", cls: "state-open" };
+}
+
+// GitHub-style label for the detail-header state pill (mirrors state_label).
+function stateLabel(it) {
+  if (it.kind === "pull_request" && it.is_draft) return "Draft";
+  if (it.state === "merged") return "Merged";
+  if (it.state === "closed") return "Closed";
+  return "Open";
 }
 
 // CSS modifier for a GitHub review state (mirrors logic::ReviewState::from_state).
@@ -392,11 +700,23 @@ function reviewerOverlays(it) {
   return out;
 }
 
+// Max avatars per group (assignees / reviewers) before a "+N" overflow,
+// matching the GUI's AVATAR_LIMIT.
+const AVATAR_LIMIT = 5;
+
+// GitHub serves a 460px avatar by default; downscaling that to a 24px <img>
+// aliases badly. Ask GitHub to resize server-side to 2× the displayed size
+// (HiDPI), mirroring the GUI's sized_avatar_url.
+function sizedAvatarUrl(url, displayPx) {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}s=${displayPx * 2}`;
+}
+
 // An avatar <img> (or an initial fallback when no avatar_url is known).
-function avatarEl(user, cls = "avatar") {
+function avatarEl(user, cls = "avatar", displayPx = 24) {
   if (user && user.avatar_url) {
     const img = el("img", { class: cls });
-    img.src = user.avatar_url;
+    img.src = sizedAvatarUrl(user.avatar_url, displayPx);
     img.alt = user.login || "";
     img.title = user.login || "";
     return img;
@@ -407,41 +727,146 @@ function avatarEl(user, cls = "avatar") {
   return span;
 }
 
-// A small cluster of reviewer avatars, each ringed by its review state.
-function reviewerCluster(it) {
-  const overlays = reviewerOverlays(it);
-  if (!overlays.length) return null;
-  return el(
-    "span",
-    { class: "reviewers" },
-    overlays.map((o) => avatarEl(o.user, `avatar sm ${reviewStateClass(o.state)}`))
+// Octicon per review state for the badge overlay (the GUI's
+// review_state_icon); COMMENTED / DISMISSED and anything unknown fall back to
+// the comment icon.
+const REVIEW_BADGE_ICON = {
+  APPROVED: "check-circle-fill",
+  CHANGES_REQUESTED: "x-circle-fill",
+  PENDING: "clock",
+};
+
+// A reviewer avatar with a review-state octicon badge overlaid bottom-right
+// (the GUI's reviewer_avatar): approved=green check, changes=red x,
+// pending=yellow clock, commented/dismissed=grey comment.
+function reviewerAvatar(user, reviewState) {
+  const icon = REVIEW_BADGE_ICON[reviewState] || "comment";
+  return el("span", { class: "rv-wrap" }, [
+    avatarEl(user),
+    octicon(icon, `rv-badge ${reviewStateClass(reviewState)}`, 14),
+  ]);
+}
+
+// The item title with the inline-filter matches highlighted. `segments` come
+// pre-split from filter_items ({text, highlighted} pieces — the Rust side owns
+// the byte-offset arithmetic); empty/missing means no highlight.
+function renderHighlightedTitle(title, segments) {
+  const span = el("span", { class: "it-title" });
+  if (!segments || !segments.length) {
+    span.textContent = title;
+    return span;
+  }
+  for (const s of segments) {
+    if (s.highlighted) span.appendChild(el("span", { class: "hl", text: s.text }));
+    else span.appendChild(document.createTextNode(s.text));
+  }
+  return span;
+}
+
+// Local "YYYY-MM-DD HH:MM:SS ±HH:MM", a port of core's format_local_datetime
+// (chrono's "%Y-%m-%d %H:%M:%S %:z"). Unparseable input passes through.
+function localDatetime(rfc3339) {
+  const t = new Date(rfc3339);
+  if (Number.isNaN(t.getTime())) return rfc3339;
+  const p = (n) => String(n).padStart(2, "0");
+  const off = -t.getTimezoneOffset();
+  const sign = off < 0 ? "-" : "+";
+  const abs = Math.abs(off);
+  return (
+    `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ` +
+    `${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())} ` +
+    `${sign}${p(Math.floor(abs / 60))}:${p(abs % 60)}`
   );
 }
 
+// Compact relative time ("now", "5m", "3h", "2d", "3mo", "1y"), a port of
+// glauca_core::time::humanize_secs (same buckets, negative clamps to "now").
+function relativeTime(rfc3339, nowMs = Date.now()) {
+  const t = Date.parse(rfc3339);
+  if (Number.isNaN(t)) return rfc3339;
+  const secs = Math.floor((nowMs - t) / 1000);
+  const MIN = 60;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  const MONTH = 30 * DAY;
+  const YEAR = 365 * DAY;
+  if (secs < MIN) return "now";
+  if (secs < HOUR) return `${Math.floor(secs / MIN)}m`;
+  if (secs < DAY) return `${Math.floor(secs / HOUR)}h`;
+  if (secs < MONTH) return `${Math.floor(secs / DAY)}d`;
+  if (secs < YEAR) return `${Math.floor(secs / MONTH)}mo`;
+  return `${Math.floor(secs / YEAR)}y`;
+}
+
+// Build one item row, mirroring the GUI's render_item_row: (1) state octicon
+// beside a wrapping bold title, (2) participants — author → assignees left,
+// reviewers + comment count right, (3) meta — lock, owner/name#num · labels,
+// relative update time. Unread rows get a faint background tint (is_new);
+// selection takes precedence.
 function renderItemList() {
   const list = $("item-list");
   list.replaceChildren();
   const e = state.entries[state.selectedEntry];
   $("items-title").textContent = e ? e.label : "Items";
-  for (const it of state.visibleItems) {
+  const now = Date.now(); // sample the clock once for all rows
+  state.visibleItems.forEach((it, idx) => {
     const key = itemKey(it);
-    const meta = el("div", { class: "it-meta" }, [
-      it.repo_private ? el("span", { class: "lock", text: "🔒" }) : null,
-      el("span", { class: stateClass(it.state), text: it.state }),
-      el("span", { text: `${it.repo_owner}/${it.repo_name} #${it.number}` }),
-      it.author ? avatarEl(it.author, "avatar sm") : null,
-      it.author ? el("span", { text: `@${it.author.login}` }) : null,
-      it.is_new ? el("span", { class: "tag new", text: "NEW" }) : null,
-      it.is_draft ? el("span", { class: "tag draft", text: "draft" }) : null,
-      reviewerCluster(it),
-    ]);
+    const selected = key === state.selectedItemKey;
+
+    const icon = itemStateIcon(it);
+    const rows = [
+      el("div", { class: "it-title-row" }, [
+        octicon(icon.name, `it-state ${icon.cls}`, 16),
+        renderHighlightedTitle(it.title, state.visibleTitleSegments[idx]),
+      ]),
+    ];
+
+    const assignees = it.assignees || [];
+    const overlays = reviewerOverlays(it);
+    const hasParticipants = it.author || assignees.length || overlays.length || it.comment_count > 0;
+    if (hasParticipants) {
+      const left = el("div", { class: "it-people-side" });
+      if (it.author) left.appendChild(avatarEl(it.author));
+      // Arrow reads "author → assignee(s)" when both sides exist.
+      if (it.author && assignees.length) left.appendChild(el("span", { class: "people-extra", text: "→" }));
+      for (const u of assignees.slice(0, AVATAR_LIMIT)) left.appendChild(avatarEl(u));
+      if (assignees.length > AVATAR_LIMIT)
+        left.appendChild(el("span", { class: "people-extra", text: `+${assignees.length - AVATAR_LIMIT}` }));
+
+      const right = el("div", { class: "it-people-side" });
+      for (const o of overlays.slice(0, AVATAR_LIMIT)) right.appendChild(reviewerAvatar(o.user, o.state));
+      if (overlays.length > AVATAR_LIMIT)
+        right.appendChild(el("span", { class: "people-extra", text: `+${overlays.length - AVATAR_LIMIT}` }));
+      if (it.comment_count > 0) {
+        right.appendChild(
+          el("span", { class: "comment-count" }, [octicon("comment", "muted", 12), el("span", { text: String(it.comment_count) })])
+        );
+      }
+      rows.push(el("div", { class: "it-people" }, [left, right]));
+    }
+
+    let metaText = `${it.repo_owner}/${it.repo_name}#${it.number}`;
+    if ((it.labels || []).length) metaText += ` · ${it.labels.join(", ")}`;
+    rows.push(
+      el("div", { class: "it-meta" }, [
+        it.repo_private ? octicon("lock", "muted", 12) : null,
+        el("span", { class: "meta-text", text: metaText }),
+        el("span", { class: "meta-time", text: relativeTime(it.updated_at, now) }),
+      ])
+    );
+
     const li = el(
       "li",
       {
-        class: [!isUnread(it) ? "read" : "", key === state.selectedItemKey ? "selected" : ""].filter(Boolean).join(" "),
-        onclick: () => selectItem(it),
+        class: [selected ? "selected" : "", !selected && it.is_new ? "unread" : ""].filter(Boolean).join(" "),
+        // Shift+click also opens the row in the browser (mouse-only equivalent
+        // of the `o` key), like the GUI.
+        onclick: (ev) => {
+          selectItem(it);
+          if (ev.shiftKey) call("open_browser", { item: it });
+        },
       },
-      [el("span", { class: "it-title", text: it.title }), meta]
+      rows
     );
     li.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
@@ -449,62 +874,90 @@ function renderItemList() {
       showItemActionMenu(it, ev.clientX, ev.clientY);
     });
     list.appendChild(li);
-  }
+  });
 }
 
+// Reset the detail pane to its "nothing selected" state. The emptied header
+// hides itself via the #detail-header:empty CSS rule.
+function clearDetail() {
+  $("detail-header").replaceChildren();
+  const scroll = $("detail-scroll");
+  scroll.className = "";
+  scroll.replaceChildren(el("div", { class: "detail-empty", text: "Select an item" }));
+}
+
+// Octicon name, color class, and tooltip label for a PR's reviewDecision
+// (mirrors the GUI's review_decision_icon).
+function reviewDecisionInfo(decision) {
+  if (decision === "APPROVED") return ["check-circle-fill", "state-open", "Approved"];
+  if (decision === "CHANGES_REQUESTED") return ["x-circle-fill", "state-closed", "Changes requested"];
+  if (decision === "REVIEW_REQUIRED") return ["clock", "state-pending", "Review required"];
+  return ["comment", "muted", "Review"];
+}
+
+// Review-decision octicon for the detail header; the wrapping span carries
+// the tooltip.
+function reviewDecisionIcon(decision) {
+  const [name, cls, label] = reviewDecisionInfo(decision);
+  const span = el("span", { class: "decision-icon" }, [octicon(name, cls, 20)]);
+  span.title = label;
+  return span;
+}
+
+// Detail pane, mirroring the GUI's render_detail: a pinned header (title line
+// with state pill, then `label: value` field rows, then the action buttons)
+// above a scrollable plain-text body. Markdown rendering is a separate task.
 function renderDetail(it) {
-  const body = $("detail-body");
-  body.classList.remove("empty");
-  body.replaceChildren();
-  body.scrollTop = 0; // new item shown → back to the top, mirroring the TUI/GUI
+  const header = $("detail-header");
+  const scroll = $("detail-scroll");
+  header.replaceChildren();
+  scroll.scrollTop = 0; // new item shown → back to the top, mirroring the TUI/GUI
 
-  body.appendChild(el("h2", { text: it.title }));
-  const metaBits = [
-    it.repo_private ? el("span", { class: "lock", text: "🔒" }) : null,
-    el("span", { class: stateClass(it.state), text: it.state }),
-    el("span", { text: `${it.repo_owner}/${it.repo_name} #${it.number}` }),
-  ].filter(Boolean);
-  if (it.author) metaBits.push(el("span", {}, [avatarEl(it.author, "avatar sm"), el("span", { text: ` @${it.author.login}` })]));
-  if (it.review_decision) metaBits.push(el("span", { class: `decision ${reviewStateClass(it.review_decision)}`, text: it.review_decision }));
-  if (it.milestone) metaBits.push(el("span", { text: `🎯 ${it.milestone}` }));
-  body.appendChild(el("div", { class: "meta" }, metaBits.flatMap((b) => [b, document.createTextNode(" · ")]).slice(0, -1)));
+  // Title line: author avatar + state pill + (PR) review-decision icon + the
+  // wrapping bold title.
+  const icon = itemStateIcon(it);
+  const pill = el("span", { class: `state-pill ${icon.cls}` }, [
+    octicon(icon.name, "", 12),
+    el("span", { text: stateLabel(it) }),
+  ]);
+  header.appendChild(
+    el("div", { class: "detail-title-row" }, [
+      el("span", { class: "detail-lead" }, [
+        it.author ? avatarEl(it.author) : null,
+        pill,
+        it.review_decision ? reviewDecisionIcon(it.review_decision) : null,
+      ]),
+      el("span", { class: "detail-title", text: it.title }),
+    ])
+  );
 
-  if (it.kind === "pull_request" && (it.base_ref || it.head_ref)) {
-    body.appendChild(el("div", { class: "meta", text: `${it.head_ref || "?"} → ${it.base_ref || "?"}` }));
-  }
+  // `label: value` field rows (the GUI's detail_field / detail_people_field).
+  const field = (label, value) =>
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: label }), value]);
+  const textField = (label, text) => field(label, el("span", { class: "field-value", text }));
+  const userChip = (u) => el("span", { class: "chip" }, [avatarEl(u), el("span", { text: u.login })]);
+  const reviewerChip = (o) => el("span", { class: "chip" }, [reviewerAvatar(o.user, o.state), el("span", { text: o.user.login })]);
 
-  if (it.labels && it.labels.length) {
-    body.appendChild(el("div", { class: "labels" }, it.labels.map((l) => el("span", { class: "tag", text: l }))));
-  }
-
-  // People: assignees and reviewers (with review state) as avatar chips.
-  if (it.assignees && it.assignees.length) {
-    body.appendChild(
-      el("div", { class: "people" }, [
-        el("span", { class: "people-label", text: "Assignees:" }),
-        ...it.assignees.map((u) => el("span", { class: "chip" }, [avatarEl(u, "avatar sm"), el("span", { text: u.login })])),
-      ])
-    );
-  }
+  if ((it.labels || []).length) header.appendChild(textField("labels", it.labels.join(", ")));
+  if (it.base_ref && it.head_ref) header.appendChild(textField("branch", `${it.head_ref} → ${it.base_ref}`));
+  const assignees = it.assignees || [];
+  if (assignees.length)
+    header.appendChild(field("assignees", el("span", { class: "field-chips" }, assignees.map(userChip))));
   const overlays = reviewerOverlays(it);
-  if (overlays.length) {
-    body.appendChild(
-      el("div", { class: "people" }, [
-        el("span", { class: "people-label", text: "Reviewers:" }),
-        ...overlays.map((o) =>
-          el("span", { class: `chip ${reviewStateClass(o.state)}` }, [avatarEl(o.user, "avatar sm"), el("span", { text: o.user.login })])
-        ),
-      ])
-    );
-  }
+  if (overlays.length)
+    header.appendChild(field("reviewers", el("span", { class: "field-chips" }, overlays.map(reviewerChip))));
+  if (it.milestone) header.appendChild(textField("milestone", it.milestone));
+  if (it.created_at_item) header.appendChild(textField("created", localDatetime(it.created_at_item)));
+  header.appendChild(textField("updated", localDatetime(it.updated_at)));
 
   // Actions. The engine performs the external work (gh CLI / browser); the
-  // front-end only sends the command.
+  // front-end only sends the command. The GUI drives these solely from the
+  // item menu; the buttons stay here as a mouse convenience.
   const actions = el("div", { class: "actions" });
   for (const a of itemActions(it)) {
     actions.appendChild(el("button", { text: a.label, onclick: a.run }));
   }
-  body.appendChild(actions);
+  header.appendChild(actions);
 
   // Custom actions (actions.toml): appended asynchronously and only when at
   // least one action applies to this kind, mirroring the GUI's conditional
@@ -522,7 +975,12 @@ function renderDetail(it) {
     })
     .catch((e) => setStatus(`custom actions: ${e}`, true));
 
-  body.appendChild(el("div", { class: "body", text: it.body && it.body.length ? it.body : "(no description)" }));
+  scroll.className = "with-header";
+  scroll.replaceChildren(
+    it.body && it.body.trim().length
+      ? el("div", { class: "body", text: it.body })
+      : el("div", { class: "body-empty", text: "(no description)" })
+  );
 }
 
 // The actions applicable to `it`, shared by the detail-pane buttons and the
@@ -696,8 +1154,7 @@ function previewEntry(idx) {
   renderSidebar();
   refreshVisible();
   updateBanner();
-  $("detail-body").className = "empty";
-  $("detail-body").textContent = "Select an item.";
+  clearDetail();
 }
 
 // Commit to an entry (click / Enter): preview plus a sync of the backing root
@@ -851,10 +1308,7 @@ function entryMenu(ev, idx) {
   items.push(null);
   items.push({ label: "Mark all read", onClick: () => markAllRead(e) });
   if (!e.isFilterStream) {
-    items.push({
-      label: "Full resync",
-      onClick: () => call("full_resync", { queryId: e.rootQueryId, queryStr: e.queryStr }),
-    });
+    items.push({ label: "Full resync", onClick: () => fullResyncEntry(e) });
   }
   showContextMenu(ev.clientX, ev.clientY, items);
 }
@@ -878,7 +1332,7 @@ const DETAIL_SCROLL_STEP = 60;
 // Scroll the detail body when the detail pane is focused. The browser clamps
 // scrollTop to [0, scrollHeight - clientHeight], so no bounds math is needed.
 function scrollDetail(dy) {
-  $("detail-body").scrollTop += dy;
+  $("detail-scroll").scrollTop += dy;
 }
 
 // Which key context the event belongs to. Modals and menus own their keys;
@@ -928,6 +1382,19 @@ function rootQueryStr(e) {
   if (!e.isFilterStream) return e.queryStr;
   const root = state.entries.find((x) => !x.isFilterStream && x.id === e.rootQueryId);
   return root ? root.queryStr : null;
+}
+
+// Sync / full-resync the entry's backing root query — the single dispatch
+// point shared by the Glauca menu, the r/S keys, and the entry context menu.
+// No-ops when there is no entry or its root query can't be resolved.
+function syncEntry(e) {
+  const q = e && rootQueryStr(e);
+  if (q) call("sync", { queryId: e.rootQueryId, queryStr: q });
+}
+
+function fullResyncEntry(e) {
+  const q = e && rootQueryStr(e);
+  if (q) call("full_resync", { queryId: e.rootQueryId, queryStr: q });
 }
 
 // Comments-modal keyboard controller, installed by openCommentsModal while the
@@ -1061,17 +1528,14 @@ function handleNavKey(ev) {
       // Context-dependent like the TUI: entries → re-sync the selected entry's
       // root query, items → re-fetch the selected item.
       if (state.focus === "entries") {
-        const q = e && rootQueryStr(e);
-        if (e && q) call("sync", { queryId: e.rootQueryId, queryStr: q });
+        syncEntry(e);
       } else if (it && e) {
         call("refresh_item", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
       }
       return handled();
-    case "S": {
-      const q = e && rootQueryStr(e);
-      if (e && q) call("full_resync", { queryId: e.rootQueryId, queryStr: q });
+    case "S":
+      fullResyncEntry(e);
       return handled();
-    }
     case "u":
       if (e) applyPending(e.rootQueryId);
       return handled();
@@ -1124,30 +1588,10 @@ const KEY_HELP = [
 ];
 
 function openHelpModal() {
-  document.querySelectorAll(".modal-overlay").forEach((m) => m.remove());
-  const overlay = el("div", { class: "modal-overlay" });
-  const close = () => {
-    overlay.remove();
-    document.removeEventListener("keydown", onKey, true);
-  };
-  const onKey = (ev) => {
-    if (ev.key === "Escape" || ev.key === "q" || ev.key === "?") {
-      ev.preventDefault();
-      close();
-    }
-  };
-  document.addEventListener("keydown", onKey, true);
   const rows = KEY_HELP.map(([keys, desc]) =>
     el("div", { class: "help-row" }, [el("span", { class: "help-keys", text: keys }), el("span", { text: desc })])
   );
-  overlay.appendChild(
-    el("div", { class: "modal-box help-box" }, [
-      el("div", { class: "modal-title", text: "Keyboard shortcuts" }),
-      ...rows,
-      el("div", { class: "modal-actions" }, [el("button", { text: "Close", onclick: close })]),
-    ])
-  );
-  document.body.appendChild(overlay);
+  infoModal("Keyboard shortcuts", rows, { closeKeys: ["Escape", "q", "?"], boxClass: "help-box" });
 }
 
 // ── engine messages ────────────────────────────────────────────────────────--
@@ -1192,13 +1636,26 @@ function handleMessage(msg) {
       setStatus(d, true);
       break;
     case "SyncStarted":
+      state.syncingCount += 1;
       setStatus(`syncing #${d.query_id}…`);
       break;
     case "SyncDone":
+      state.syncingCount = Math.max(0, state.syncingCount - 1);
       setStatus(`synced ${d.count} item(s)`);
       break;
     case "SyncError":
+      state.syncingCount = Math.max(0, state.syncingCount - 1);
       setStatus(`sync error: ${d.error}`, true);
+      break;
+    // Background-sync queue depth, shown as "N bg" in the sidebar footer (the
+    // GUI's bg_sync_pending counter).
+    case "BgSyncQueued":
+      state.bgSyncPending += d;
+      renderFooter();
+      break;
+    case "BgSyncJobDone":
+      state.bgSyncPending = Math.max(0, state.bgSyncPending - 1);
+      renderFooter();
       break;
     // Structural changes: the engine confirms with these; rebuild the left pane
     // from the DB (list_entries) rather than reordering in JS.
@@ -1212,7 +1669,6 @@ function handleMessage(msg) {
     case "FilterStreamsSwapped":
       refreshEntries();
       break;
-    // Remaining variants (BgSync*) aren't surfaced here; ignore.
     default:
       break;
   }
@@ -1231,88 +1687,34 @@ function applyTheme(theme) {
   }
 }
 
-function openSettingsModal() {
+// Persist the full settings object (the TOML holds all fields, so partial
+// updates spread over the current state) and adopt it locally on success. The
+// object passes through to Rust's TauriSettings as-is — no per-field mapping
+// to keep in sync when settings grow.
+function persistSettings(next) {
+  return invoke("save_settings", { settings: next })
+    .then(() => {
+      state.settings = next;
+    })
+    .catch((e) => setStatus(`settings: ${e}`, true));
+}
+
+function setTheme(theme) {
+  applyTheme(theme);
+  persistSettings({ ...state.settings, theme });
+}
+
+// Settings modal (Glauca > Settings…). Theme and notifications moved to the
+// View menu, matching the GUI; only the sync interval — which the GUI has no
+// menu equivalent for — remains here, so the generic form modal covers it.
+async function openSettingsModal() {
   const s = state.settings;
-  const overlay = el("div", { class: "modal-overlay" });
-  const finish = () => {
-    overlay.remove();
-    document.removeEventListener("keydown", onKey, true);
-  };
-  // Escape cancels the modal (matching the other modals), reverting the live theme
-  // preview to the saved value.
-  const onKey = (ev) => {
-    if (ev.key === "Escape") {
-      ev.preventDefault();
-      applyTheme(s.theme);
-      finish();
-    }
-  };
-  document.addEventListener("keydown", onKey, true);
-
-  const themeSel = document.createElement("select");
-  themeSel.className = "modal-input";
-  for (const t of ["system", "light", "dark"]) {
-    const opt = document.createElement("option");
-    opt.value = t;
-    opt.textContent = t;
-    if (t === s.theme) opt.selected = true;
-    themeSel.appendChild(opt);
-  }
-  // Live theme preview as the user changes the select.
-  themeSel.addEventListener("change", () => applyTheme(themeSel.value));
-
-  const notif = el("input");
-  notif.type = "checkbox";
-  notif.checked = !!s.notifications_enabled;
-
-  const interval = el("input", { class: "modal-input" });
-  interval.type = "number";
-  interval.min = "10";
-  interval.value = String(s.sync_interval_secs);
-
-  const save = el("button", {
-    text: "Save",
-    onclick: async () => {
-      const next = {
-        theme: themeSel.value,
-        notifications_enabled: notif.checked,
-        sync_interval_secs: Math.max(10, parseInt(interval.value, 10) || 60),
-      };
-      try {
-        await invoke("save_settings", {
-          theme: next.theme,
-          notificationsEnabled: next.notifications_enabled,
-          syncIntervalSecs: next.sync_interval_secs,
-        });
-        state.settings = next;
-        applyTheme(next.theme);
-        setStatus("settings saved (sync interval applies on restart)");
-      } catch (e) {
-        setStatus(`settings: ${e}`, true);
-      }
-      finish();
-    },
-  });
-  const cancel = el("button", {
-    text: "Cancel",
-    onclick: () => {
-      applyTheme(s.theme); // revert live preview
-      finish();
-    },
-  });
-
-  overlay.appendChild(
-    el("div", { class: "modal-box" }, [
-      el("div", { class: "modal-title", text: "Settings" }),
-      el("div", { class: "modal-label", text: "Theme" }),
-      themeSel,
-      el("label", { class: "modal-check" }, [notif, el("span", { text: " Desktop notifications" })]),
-      el("div", { class: "modal-label", text: "Sync interval (seconds)" }),
-      interval,
-      el("div", { class: "modal-actions" }, [cancel, save]),
-    ])
-  );
-  document.body.appendChild(overlay);
+  const out = await formModal("Settings", [
+    { key: "secs", label: "Sync interval (seconds)", value: String(s.sync_interval_secs) },
+  ]);
+  if (!out) return;
+  await persistSettings({ ...s, sync_interval_secs: Math.max(10, parseInt(out.secs, 10) || 60) });
+  setStatus("settings saved (sync interval applies on restart)");
 }
 
 // ── bootstrap ──────────────────────────────────────────────────────────────--
@@ -1342,19 +1744,36 @@ async function main() {
   setFocus("entries");
 
   // Safety net: anything that still slips through as an unhandled rejection
-  // (e.g. a future missed await) lands on the status bar, not the void.
+  // (e.g. a future missed await) lands on the sidebar footer, not the void.
   window.addEventListener("unhandledrejection", (ev) => setStatus(String(ev.reason), true));
 
-  $("new-query").addEventListener("click", newQuery);
-  $("settings-btn").addEventListener("click", openSettingsModal);
+  wireMenuButton("menu-glauca", glaucaMenuItems);
+  wireMenuButton("menu-view", viewMenuItems);
+  wireMenuButton("menu-help", helpMenuItems);
 
-  // Load + apply persisted settings (theme) before anything renders.
+  // Right-click on the entry list's empty space → New query (the GUI's
+  // NewQueryOnly menu). Rows handle their own context menu (entryMenu).
+  $("entries").addEventListener("contextmenu", (ev) => {
+    if (ev.target.closest("li")) return;
+    ev.preventDefault();
+    showContextMenu(ev.clientX, ev.clientY, [{ label: "New query", onClick: newQuery }]);
+  });
+  // Right-click anywhere in the detail pane → the selected item's action menu.
+  $("detail").addEventListener("contextmenu", (ev) => {
+    ev.preventDefault();
+    const it = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
+    if (it) showItemActionMenu(it, ev.clientX, ev.clientY);
+  });
+
+  // Load + apply persisted settings (theme, pane widths) before anything renders.
   try {
     state.settings = await invoke("get_settings");
   } catch {
     /* defaults */
   }
   applyTheme(state.settings.theme);
+  applyPaneSizes(state.settings.pane_sizes);
+  setupPaneResize();
   if (window.matchMedia) {
     window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
       if (state.settings.theme === "system") applyTheme("system");
@@ -1369,14 +1788,19 @@ async function main() {
   state.entries = init.entries.map(normalize);
   renderSidebar();
 
-  // Signed-in user chip (avatar + display name), like the GUI's sidebar header.
+  // Sidebar header: signed-in user (36px avatar + login + display name),
+  // mirroring the GUI's left-pane header.
+  const header = $("sidebar-header");
   if (init.current_user) {
-    $("whoami").replaceChildren(
-      avatarEl({ login: init.current_user, avatar_url: init.current_user_avatar_url }, "avatar sm"),
-      el("span", {
-        text: init.current_user_name ? `${init.current_user_name} (@${init.current_user})` : `@${init.current_user}`,
-      })
+    header.replaceChildren(
+      avatarEl({ login: init.current_user, avatar_url: init.current_user_avatar_url }, "avatar lg", 36),
+      el("div", { class: "who" }, [
+        el("div", { class: "login", text: `@${init.current_user}` }),
+        init.current_user_name ? el("div", { class: "name", text: init.current_user_name }) : null,
+      ])
     );
+  } else {
+    header.replaceChildren(el("div", { class: "who" }, [el("div", { class: "name", text: "not authenticated" })]));
   }
 
   // Prime cached items (and thus unread badges) for every root query, mirroring
@@ -1391,7 +1815,9 @@ async function main() {
     call("load_cached", { queryId: e.rootQueryId });
   }
 
-  setStatus(state.currentUser ? `Signed in as @${state.currentUser}` : "Not authenticated (set GH_TOKEN)");
+  // The signed-in user is shown in the sidebar header; only the unauthenticated
+  // case warrants a status message.
+  if (!state.currentUser) setStatus("Not authenticated (set GH_TOKEN)");
   if (state.entries.length) {
     // Startup selection mirrors the GUI: sync only if the cache is stale, then
     // let the engine background-sync the remaining stale queries.
