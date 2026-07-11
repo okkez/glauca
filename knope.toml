@@ -14,13 +14,15 @@
 [package]
 # The shared workspace version lives in the root Cargo.toml's
 # [workspace.package]; knope detects and bumps it there. Cargo.lock carries the
-# version of each member crate, so keep all three in sync (release-binaries.yml
-# builds with --locked).
+# version of each member crate, so every workspace member needs an entry here
+# (release-binaries.yml builds with --locked). Adding a crate to the workspace
+# without listing it below leaves Cargo.lock stale and breaks the release CI.
 versioned_files = [
   "Cargo.toml",
   { path = "Cargo.lock", dependency = "glauca-core" },
   { path = "Cargo.lock", dependency = "glauca-tui" },
   { path = "Cargo.lock", dependency = "glauca-gui" },
+  { path = "Cargo.lock", dependency = "glauca-tauri" },
 ]
 changelog = "CHANGELOG.md"
 # No `assets`: binary upload is handled by release-binaries.yml on the
