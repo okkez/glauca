@@ -76,9 +76,9 @@ function renderFooter() {
   footer.hidden = rows.length === 0;
 }
 
-// invoke() for fire-and-forget commands: report failures on the status bar
-// instead of losing them as unhandled rejections. Use plain invoke() (with
-// await / .catch) when the result matters.
+// invoke() for fire-and-forget commands: report failures on the sidebar
+// footer instead of losing them as unhandled rejections. Use plain invoke()
+// (with await / .catch) when the result matters.
 function call(cmd, args) {
   return invoke(cmd, args).catch((e) => setStatus(`${cmd}: ${e}`, true));
 }
@@ -178,6 +178,11 @@ async function updateBanner() {
   } catch {
     n = fresh.length; // banner is display-only; fall back to a coarse count
   }
+  // The selection may have moved while the count was in flight; a stale
+  // resolution must not repaint the banner for a query no longer shown
+  // (previewEntry already re-ran updateBanner for the new one).
+  const cur = state.entries[state.selectedEntry];
+  if (!cur || cur.rootQueryId !== e.rootQueryId) return;
   if (n === 0) {
     // Nothing user-visible changed; drop the held-back items instead of
     // showing a "0 updated" banner (the GUI clears pending the same way).
@@ -364,10 +369,15 @@ function confirmModal(message) {
 let ctxMenuClose = null;
 
 // The mousedown that dismissed the last menu, so a menu-bar button can tell
-// "clicked while my menu was open" (a toggle-close: the capture-phase mousedown
-// dismissed it, and the button's click must not immediately reopen it) from a
-// fresh open.
-let lastMenuDismiss = { target: null, at: 0 };
+// "clicked while my own menu was open" (a toggle-close: the capture-phase
+// mousedown dismissed it, and the button's click must not immediately reopen
+// it) from a fresh open or a switch to another menu. `owner` is the menu-bar
+// button id whose dropdown was open, null for ordinary context menus.
+let lastMenuDismiss = { target: null, at: 0, owner: null };
+
+// Menu-bar button id whose dropdown is currently open (null for ordinary
+// context menus); captured into lastMenuDismiss when the menu closes.
+let menuBarOwner = null;
 
 // Remove any open context menu AND its document-level close listeners.
 function dismissContextMenu() {
@@ -381,6 +391,7 @@ function dismissContextMenu() {
 
 function showContextMenu(x, y, items) {
   dismissContextMenu(); // clear any prior menu and its listeners first
+  menuBarOwner = null; // ordinary context menu unless menuButton claims it
   const menu = el("div", { class: "ctx-menu" });
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
@@ -402,7 +413,10 @@ function showContextMenu(x, y, items) {
   }
   const close = (ev) => {
     if (ev.type === "keydown" && ev.key !== "Escape") return;
-    if (ev.type === "mousedown") lastMenuDismiss = { target: ev.target, at: Date.now() };
+    // Clicks inside the menu are the items' own onclick business; closing (and
+    // detaching the node) on the capture-phase mousedown would race the click.
+    if (ev.type === "mousedown" && ev.target.closest(".ctx-menu")) return;
+    if (ev.type === "mousedown") lastMenuDismiss = { target: ev.target, at: Date.now(), owner: menuBarOwner };
     dismissContextMenu();
   };
   ctxMenuClose = close;
@@ -525,15 +539,23 @@ function openAboutModal() {
 }
 
 // Wire a menu-bar button: click opens the dropdown under the button. Clicking
-// the button while its own menu is open must close it, not reopen it — the
+// the button while its *own* menu is open must close it, not reopen it — the
 // capture-phase mousedown already dismissed the menu, so the click is
-// suppressed when that dismissal just came from this button (lastMenuDismiss).
+// suppressed when that dismissal was this button toggling its own dropdown.
+// A click on a different menu button switches menus in one click (its own
+// dropdown wasn't the one dismissed, so the guard doesn't fire).
 function menuButton(id, buildItems) {
   const btn = $(id);
   btn.addEventListener("click", () => {
-    if (Date.now() - lastMenuDismiss.at < 300 && btn.contains(lastMenuDismiss.target)) return;
+    if (
+      lastMenuDismiss.owner === id &&
+      Date.now() - lastMenuDismiss.at < 300 &&
+      btn.contains(lastMenuDismiss.target)
+    )
+      return;
     const r = btn.getBoundingClientRect();
     showContextMenu(Math.round(r.left), Math.round(r.bottom + 2), buildItems());
+    menuBarOwner = id;
   });
 }
 
@@ -549,11 +571,21 @@ const SIDEBAR_MAX = 560;
 const DETAIL_MIN = 300;
 const CENTER_MIN = 250;
 
+// Restore persisted widths, re-clamped: the file may have been written on a
+// larger window (or edited by hand), and unclamped values would overflow the
+// flexible center below its minimum.
 function applyPaneSizes(sizes) {
   if (!sizes) return;
-  const [sidebar, detail] = sizes;
-  if (sidebar > 0) $("sidebar").style.width = `${sidebar}px`;
-  if (detail > 0) $("detail").style.width = `${detail}px`;
+  let [sidebar, detail] = sizes;
+  if (sidebar > 0) {
+    sidebar = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, sidebar));
+    $("sidebar").style.width = `${sidebar}px`;
+  }
+  if (detail > 0) {
+    const max = Math.max(DETAIL_MIN, window.innerWidth - paneWidth("sidebar") - CENTER_MIN);
+    detail = Math.max(DETAIL_MIN, Math.min(max, detail));
+    $("detail").style.width = `${detail}px`;
+  }
 }
 
 function paneWidth(id) {
