@@ -10,12 +10,15 @@ pull requests into a local SQLite cache in the background, tracks what you've re
 unread counts, and can notify you when new items arrive — so you can triage everything that
 needs your attention without juggling browser tabs.
 
-It ships as two frontends sharing the same core: a terminal UI and a desktop GUI.
+It ships as three frontends sharing the same core: a terminal UI, a native desktop GUI,
+and a web-tech desktop app (Tauri).
 
 ## Features
 
 - **Saved queries & filter streams** — store GitHub search queries and split them into
   sub-filters for finer organization.
+- **Local filtering** — narrow cached items with an inline filter, including `-` prefix
+  negation (e.g. `-is:draft`, `-label:bug`); see [Filtering](#filtering-queries-vs-filter-streams).
 - **Local cache** — items are stored in SQLite, so browsing stays fast and works offline.
 - **Background auto-sync** — configurable interval (default 60s) with automatic backoff on
   rate limits.
@@ -48,6 +51,8 @@ The GitHub client uses `octocrab` plus GraphQL search; the cache uses `sqlx` wit
 - **Rust** (edition 2024). Building the GUI requires **rustc ≥ 1.95** (a dependency of `gpui`).
 - A **GitHub token** (see [Configuration](#configuration)).
 - For the **GUI on Linux**: X11 or Wayland and a working GPU.
+- For the **Tauri app**: the Tauri CLI (`cargo install tauri-cli`) and a system WebView
+  (WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows). No Node toolchain is needed.
 
 > Note: the GUI depends on `gpui` crates pulled directly from git, so the first build downloads
 > and compiles them.
