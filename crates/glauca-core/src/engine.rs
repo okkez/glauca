@@ -619,15 +619,6 @@ pub struct MaintenanceConfig {
     pub max_items_per_query: u64,
 }
 
-impl Default for MaintenanceConfig {
-    fn default() -> Self {
-        Self {
-            retention_days: DEFAULT_RETENTION_DAYS,
-            max_items_per_query: DEFAULT_MAX_ITEMS_PER_QUERY,
-        }
-    }
-}
-
 /// Clamp a configured interval to at least `MIN_SYNC_INTERVAL_SECS`.
 pub fn effective_interval(secs: u64) -> u64 {
     secs.max(MIN_SYNC_INTERVAL_SECS)

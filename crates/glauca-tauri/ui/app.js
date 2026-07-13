@@ -650,6 +650,16 @@ async function refreshVisible() {
     state.visibleTitleSegments = [];
   }
   renderItemList();
+  // Also refresh the open detail pane from the reloaded items. renderDetail is
+  // imperative and otherwise keeps showing the object captured at selectItem
+  // time, so without this an updated body (e.g. a transparently re-fetched
+  // maintenance-cleared body) or an applied background update would not appear
+  // until reselect. No-op when nothing is selected or the selected item fell
+  // out of the current view.
+  if (state.selectedItemKey) {
+    const sel = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
+    if (sel) renderDetail(sel);
+  }
 }
 
 // Octicon name + color class encoding an item's state: the shape says
@@ -1625,14 +1635,9 @@ function handleMessage(msg) {
       state.itemsByQuery.set(d.query_id, d.items);
       state.pending.delete(d.query_id); // a fresh foreground load supersedes any held-back items
       if (isCurrent) {
-        // refreshVisible re-renders only the list, not the open detail pane. When
-        // this reload carries a transparently re-fetched body (see selectItem),
-        // re-render the selected item's detail so the body appears.
-        refreshVisible().then(() => {
-          if (!state.selectedItemKey) return;
-          const sel = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
-          if (sel) renderDetail(sel);
-        });
+        // refreshVisible also re-renders the open detail from the reloaded items,
+        // so a transparently re-fetched body (see selectItem) becomes visible.
+        refreshVisible();
         updateBanner();
       }
       refreshUnread(d.query_id);
