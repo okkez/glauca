@@ -796,19 +796,19 @@ async fn run_maintenance(pool: &SqlitePool, cfg: MaintenanceConfig) {
         Ok(n) => info!(cleared = n, "maintenance: cleared stale item bodies"),
         Err(e) => warn!(error = %e, "maintenance: clear_stale_bodies failed"),
     }
-    match db::list_queries(pool).await {
-        Ok(queries) => {
-            for q in queries {
-                match db::prune_query_overflow(pool, q.id, max_items).await {
-                    Ok(n) if n > 0 => {
-                        info!(query_id = q.id, deleted = n, "maintenance: pruned overflow")
-                    }
-                    Ok(_) => {}
-                    Err(e) => warn!(query_id = q.id, error = %e, "maintenance: prune failed"),
-                }
-            }
+    let queries = match db::list_queries(pool).await {
+        Ok(queries) => queries,
+        Err(e) => {
+            warn!(error = %e, "maintenance: list_queries failed");
+            Vec::new()
         }
-        Err(e) => warn!(error = %e, "maintenance: list_queries failed"),
+    };
+    for q in queries {
+        match db::prune_query_overflow(pool, q.id, max_items).await {
+            Ok(n) if n > 0 => info!(query_id = q.id, deleted = n, "maintenance: pruned overflow"),
+            Ok(_) => {}
+            Err(e) => warn!(query_id = q.id, error = %e, "maintenance: prune failed"),
+        }
     }
     match db::vacuum(pool).await {
         Ok(true) => info!("maintenance: vacuumed"),

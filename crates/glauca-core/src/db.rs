@@ -7,9 +7,9 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
-        // Wait, rather than fail, when the DB is briefly locked — chiefly so a
-        // concurrent write during the maintenance pass's VACUUM (which needs
-        // exclusive access) queues instead of erroring out its sync cycle.
+        // Block briefly on a locked DB instead of failing immediately — chiefly so
+        // a concurrent write during the maintenance pass's VACUUM (which needs
+        // exclusive access) waits its turn instead of erroring out its sync cycle.
         .busy_timeout(Duration::from_secs(30));
     let pool = SqlitePool::connect_with(options).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;

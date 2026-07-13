@@ -657,8 +657,8 @@ async function refreshVisible() {
   // until reselect. No-op when nothing is selected or the selected item fell
   // out of the current view.
   if (state.selectedItemKey) {
-    const sel = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
-    if (sel) renderDetail(sel);
+    const selectedItem = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
+    if (selectedItem) renderDetail(selectedItem);
   }
 }
 
