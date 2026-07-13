@@ -1,11 +1,16 @@
 use anyhow::Result;
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(db_path)
-        .create_if_missing(true);
+        .create_if_missing(true)
+        // Wait, rather than fail, when the DB is briefly locked — chiefly so a
+        // concurrent write during the maintenance pass's VACUUM (which needs
+        // exclusive access) queues instead of erroring out its sync cycle.
+        .busy_timeout(Duration::from_secs(30));
     let pool = SqlitePool::connect_with(options).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(pool)
@@ -343,10 +348,17 @@ pub async fn clear_stale_bodies(pool: &SqlitePool, retention_days: i64) -> Resul
 
 /// Bound per-query row growth: keep the newest `max_rows` items (by `updated_at`)
 /// for `query_id` and delete the older overflow — but only rows that are already
-/// read, so an unread item is never dropped (deleting an unread item would lose an
-/// unseen notification, and re-deleting a still-matching read item would resurface
-/// it as unread on the next sync). The "read" predicate mirrors the negation of
-/// `logic::is_item_unread`. Returns the number of rows deleted.
+/// read, so an unread item is never dropped. The "read" predicate mirrors the
+/// negation of `logic::is_item_unread`. Returns the number of rows deleted.
+///
+/// Deleting a read row that *still matched* the query would resurface it as unread
+/// on the next sync (re-inserted with `last_read_updated_at = NULL`). That does not
+/// happen here because overflow only exists once a query has accumulated more than
+/// `max_rows` rows, the newest `max_rows` by `updated_at` are protected, and GitHub
+/// search caps a query's live result set (~1000, `SEARCH_RESULT_CAP`) — so with a
+/// `max_rows` comfortably above that cap the pruned old-`updated_at` rows are
+/// effectively never re-returned by a sync. The `id` tiebreaker keeps the boundary
+/// deterministic when `updated_at` values collide.
 pub async fn prune_query_overflow(pool: &SqlitePool, query_id: i64, max_rows: i64) -> Result<u64> {
     let res = sqlx::query!(
         r#"
@@ -357,7 +369,7 @@ pub async fn prune_query_overflow(pool: &SqlitePool, query_id: i64, max_rows: i6
           AND id NOT IN (
               SELECT id FROM items
               WHERE query_id = ?
-              ORDER BY updated_at DESC
+              ORDER BY updated_at DESC, id DESC
               LIMIT ?
           )
         "#,
@@ -370,12 +382,25 @@ pub async fn prune_query_overflow(pool: &SqlitePool, query_id: i64, max_rows: i6
     Ok(res.rows_affected())
 }
 
-/// Reclaim disk space freed by `clear_stale_bodies`/prunes. SQLite keeps freed
-/// pages in the file (default `auto_vacuum=0`) until `VACUUM` rewrites it, so the
-/// maintenance pass runs this last. May briefly lock the database.
-pub async fn vacuum(pool: &SqlitePool) -> Result<()> {
+/// Minimum freelist pages before a `VACUUM` is worth its full-file rewrite
+/// (~1 MiB at the 4 KiB default page size). Below this the maintenance pass skips
+/// it, so a 6-hourly sweep with nothing to reclaim doesn't needlessly rewrite the
+/// whole DB (and briefly lock it).
+const VACUUM_MIN_FREELIST_PAGES: i64 = 256;
+
+/// Reclaim disk space freed by `clear_stale_bodies`/prunes, but only when enough
+/// pages are actually free (see `VACUUM_MIN_FREELIST_PAGES`). SQLite keeps freed
+/// pages in the file (default `auto_vacuum=0`) until `VACUUM` rewrites it. Returns
+/// `true` if a VACUUM ran. Takes an exclusive lock while running.
+pub async fn vacuum(pool: &SqlitePool) -> Result<bool> {
+    let freelist: i64 = sqlx::query_scalar("PRAGMA freelist_count")
+        .fetch_one(pool)
+        .await?;
+    if freelist < VACUUM_MIN_FREELIST_PAGES {
+        return Ok(false);
+    }
     sqlx::query("VACUUM").execute(pool).await?;
-    Ok(())
+    Ok(true)
 }
 
 pub struct CachedItem {

@@ -14,7 +14,7 @@ use sqlx::SqlitePool;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, info, instrument, warn};
 
 // ── Background messages ──────────────────────────────────────────────────────
@@ -599,6 +599,13 @@ pub const DEFAULT_MAX_ITEMS_PER_QUERY: u64 = 1500;
 /// so it doesn't consume quota; it also runs once shortly after startup so short
 /// sessions still get maintained.
 pub const MAINTENANCE_INTERVAL_SECS: u64 = 6 * 60 * 60;
+/// Delay before the first maintenance sweep, so the startup burst of syncs settles
+/// before the sweep's `VACUUM` takes an exclusive lock.
+pub const MAINTENANCE_STARTUP_DELAY_SECS: u64 = 60;
+/// Max concurrent single-item re-fetches (`RefreshItem`). Bounds the burst of
+/// GitHub requests when a front-end auto-re-fetches maintenance-cleared bodies
+/// while the user scrolls through cleared items.
+pub const MAX_CONCURRENT_ITEM_REFRESH: usize = 4;
 
 /// Tunables for the background cache-maintenance pass. Sized generously by default
 /// because clearing `body` is non-destructive (re-fetched on open) and overflow
@@ -789,14 +796,19 @@ pub async fn refresh_timer_task(
 /// (no GitHub API). Errors are logged and skipped so one failing step can't abort
 /// the rest or crash the task.
 async fn run_maintenance(pool: &SqlitePool, cfg: MaintenanceConfig) {
-    match db::clear_stale_bodies(pool, cfg.retention_days as i64).await {
+    // Clamp to sane floors: `retention_days = 0` would clear essentially every
+    // body, and `max_items_per_query = 0` would make the overflow subquery
+    // `LIMIT 0` and delete *all* read rows. Mirrors `effective_interval`.
+    let retention_days = cfg.retention_days.max(1) as i64;
+    let max_items = cfg.max_items_per_query.max(1) as i64;
+    match db::clear_stale_bodies(pool, retention_days).await {
         Ok(n) => info!(cleared = n, "maintenance: cleared stale item bodies"),
         Err(e) => warn!(error = %e, "maintenance: clear_stale_bodies failed"),
     }
     match db::list_queries(pool).await {
         Ok(queries) => {
             for q in queries {
-                match db::prune_query_overflow(pool, q.id, cfg.max_items_per_query as i64).await {
+                match db::prune_query_overflow(pool, q.id, max_items).await {
                     Ok(n) if n > 0 => {
                         info!(query_id = q.id, deleted = n, "maintenance: pruned overflow")
                     }
@@ -807,19 +819,26 @@ async fn run_maintenance(pool: &SqlitePool, cfg: MaintenanceConfig) {
         }
         Err(e) => warn!(error = %e, "maintenance: list_queries failed"),
     }
-    if let Err(e) = db::vacuum(pool).await {
-        warn!(error = %e, "maintenance: vacuum failed");
+    match db::vacuum(pool).await {
+        Ok(true) => info!("maintenance: vacuumed"),
+        Ok(false) => {}
+        Err(e) => warn!(error = %e, "maintenance: vacuum failed"),
     }
 }
 
-/// Runs `run_maintenance` once shortly after startup, then every
-/// `MAINTENANCE_INTERVAL_SECS`. The immediate first tick means short sessions still
-/// get a sweep.
+/// Runs `run_maintenance` shortly after startup, then every
+/// `MAINTENANCE_INTERVAL_SECS`. The startup delay lets the initial burst of syncs
+/// settle before the first sweep, so its `VACUUM` (which needs exclusive access)
+/// doesn't contend with the initial `upsert_item` writes.
 pub async fn maintenance_task(pool: SqlitePool, cfg: MaintenanceConfig) {
+    tokio::time::sleep(tokio::time::Duration::from_secs(
+        MAINTENANCE_STARTUP_DELAY_SECS,
+    ))
+    .await;
     let mut interval =
         tokio::time::interval(tokio::time::Duration::from_secs(MAINTENANCE_INTERVAL_SECS));
     loop {
-        interval.tick().await; // first tick fires immediately: sweep at startup
+        interval.tick().await; // first tick fires immediately (post-delay)
         run_maintenance(&pool, cfg).await;
     }
 }
@@ -1109,6 +1128,9 @@ async fn command_loop(
     stale_secs: i64,
     gate: RateLimitGate,
 ) {
+    // Bounds concurrent single-item re-fetches (see the RefreshItem arm). Shared
+    // across all spawned RefreshItem tasks for the loop's lifetime.
+    let item_refresh_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_ITEM_REFRESH));
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             EngineCommand::LoadCached { query_id } => {
@@ -1197,7 +1219,14 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let gh2 = gh.clone();
                 let tx2 = msg_tx.clone();
+                // Cap concurrency: front-ends fire this automatically to re-fetch a
+                // maintenance-cleared body when an item is viewed, so scrolling
+                // quickly through a backlog of cleared items could otherwise spawn a
+                // burst of concurrent GitHub requests and trip a secondary rate
+                // limit. The permit is held for the whole fetch.
+                let sem = item_refresh_sem.clone();
                 tokio::spawn(async move {
+                    let _permit = sem.acquire_owned().await.ok();
                     match github::fetch_item(&gh2, query_id, &repo_owner, &repo_name, number).await
                     {
                         Ok(Some(item)) => {
