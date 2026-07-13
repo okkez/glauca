@@ -1,3 +1,41 @@
+## 0.1.9 (2026-07-12)
+
+### Features
+
+- add Tauri desktop frontend reusing glauca-core ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- expand glauca-tauri toward glauca-gui feature parity ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- run custom user-defined actions from the detail pane ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- keyboard navigation matching the TUI/GUI keymap ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- show the signed-in user in the status bar ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- scroll the detail body with j/k when the detail pane is focused ([#34](https://github.com/okkez/glauca/pull/34) by @okkez)
+- surface engine errors as notification toasts ([#34](https://github.com/okkez/glauca/pull/34) by @okkez)
+- focus the detail pane and scroll its body with j/k ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- support --version and --help flags ([#41](https://github.com/okkez/glauca/pull/41) by @okkez)
+- restructure the layout around a GUI-style menu bar and sidebar ([#45](https://github.com/okkez/glauca/pull/45) by @okkez)
+- inline GitHub Octicons and the GUI's state-icon mapping ([#45](https://github.com/okkez/glauca/pull/45) by @okkez)
+- rebuild item rows on the GUI's three-line layout ([#45](https://github.com/okkez/glauca/pull/45) by @okkez)
+- highlight inline-filter matches in item titles ([#45](https://github.com/okkez/glauca/pull/45) by @okkez)
+- rebuild the detail pane on the GUI's pinned-header layout ([#45](https://github.com/okkez/glauca/pull/45) by @okkez)
+- drag-to-resize panes with persisted widths ([#45](https://github.com/okkez/glauca/pull/45) by @okkez)
+- support `-` prefix negation in local filter queries ([#46](https://github.com/okkez/glauca/pull/46) by @okkez)
+
+### Fixes
+
+- port front-end bridge to the Jasper unread model ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- adopt the per-item Jasper unread model in the web UI ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- surface IPC errors, set a CSP, harden the message loop ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- address code-review findings before merge ([#34](https://github.com/okkez/glauca/pull/34) by @okkez)
+- write settings atomically to avoid losing them on a torn write ([#35](https://github.com/okkez/glauca/pull/35) by @okkez)
+- gate entry CRUD keys to the entries pane ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- guard refreshVisible against a stale filter result ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- address minor code-review findings (atomic save, save order, menu leak, modal Escape) ([#36](https://github.com/okkez/glauca/pull/36) by @okkez)
+- create the log directory before pruning old files ([#42](https://github.com/okkez/glauca/pull/42) by @okkez)
+- deliver engine messages push-based instead of polling ([#43](https://github.com/okkez/glauca/pull/43) by @okkez)
+- repaint immediately on j/k moves in the item list ([#43](https://github.com/okkez/glauca/pull/43) by @okkez)
+- drop pending background items instead of showing a 0-updated banner ([#45](https://github.com/okkez/glauca/pull/45) by @okkez)
+- address code-review findings in the GUI-alignment work ([#45](https://github.com/okkez/glauca/pull/45) by @okkez)
+- bump glauca-tauri in Cargo.lock via knope versioned_files ([#47](https://github.com/okkez/glauca/pull/47) by @okkez)
+
 ## 0.1.8 (2026-07-03)
 
 ### Features
