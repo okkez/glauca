@@ -317,6 +317,67 @@ pub async fn prune_query_items(
     Ok(deleted)
 }
 
+/// Free cache space by clearing the (re-fetchable) `body` of items unlikely to be
+/// read soon: those in a terminal state (`closed`/`merged`) or whose last activity
+/// (`updated_at`) is older than `retention_days`. The row itself — title, state,
+/// and the `last_read_updated_at` unread marker — is kept, so this never affects
+/// unread state (`logic::is_item_unread`); the body is re-fetched on demand when
+/// the item is opened. `body` is by far the largest column, so this reclaims most
+/// of the cache size without the churn hazards of deleting rows. Returns the
+/// number of rows whose body was cleared.
+pub async fn clear_stale_bodies(pool: &SqlitePool, retention_days: i64) -> Result<u64> {
+    let modifier = format!("-{retention_days} days");
+    let res = sqlx::query!(
+        r#"
+        UPDATE items SET body = NULL
+        WHERE body IS NOT NULL
+          AND ( state IN ('closed', 'merged')
+                OR updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?) )
+        "#,
+        modifier,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Bound per-query row growth: keep the newest `max_rows` items (by `updated_at`)
+/// for `query_id` and delete the older overflow — but only rows that are already
+/// read, so an unread item is never dropped (deleting an unread item would lose an
+/// unseen notification, and re-deleting a still-matching read item would resurface
+/// it as unread on the next sync). The "read" predicate mirrors the negation of
+/// `logic::is_item_unread`. Returns the number of rows deleted.
+pub async fn prune_query_overflow(pool: &SqlitePool, query_id: i64, max_rows: i64) -> Result<u64> {
+    let res = sqlx::query!(
+        r#"
+        DELETE FROM items
+        WHERE query_id = ?
+          AND last_read_updated_at IS NOT NULL
+          AND updated_at <= last_read_updated_at
+          AND id NOT IN (
+              SELECT id FROM items
+              WHERE query_id = ?
+              ORDER BY updated_at DESC
+              LIMIT ?
+          )
+        "#,
+        query_id,
+        query_id,
+        max_rows,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Reclaim disk space freed by `clear_stale_bodies`/prunes. SQLite keeps freed
+/// pages in the file (default `auto_vacuum=0`) until `VACUUM` rewrites it, so the
+/// maintenance pass runs this last. May briefly lock the database.
+pub async fn vacuum(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("VACUUM").execute(pool).await?;
+    Ok(())
+}
+
 pub struct CachedItem {
     pub query_id: i64,
     pub kind: String,
@@ -976,5 +1037,88 @@ mod tests {
         assert_eq!(items[0].number, 3); // newest
         assert_eq!(items[1].number, 2);
         assert_eq!(items[2].number, 1); // oldest
+    }
+
+    #[tokio::test]
+    async fn clear_stale_bodies_clears_terminal_and_old_but_keeps_recent_and_unread_state() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        // Recent open item: body kept. Far-future date is always within retention.
+        let mut recent = make_item(qid, 1, "Recent open");
+        recent.updated_at = "2999-01-01T00:00:00Z".into();
+        recent.body = Some("recent body".into());
+        // Old open item: body cleared by age.
+        let mut old = make_item(qid, 2, "Old open");
+        old.updated_at = "2000-01-01T00:00:00Z".into();
+        old.body = Some("old body".into());
+        // Recent but terminal item: body cleared by state.
+        let mut closed = make_item(qid, 3, "Recent closed");
+        closed.updated_at = "2999-01-01T00:00:00Z".into();
+        closed.state = "closed".into();
+        closed.body = Some("closed body".into());
+
+        for it in [&recent, &old, &closed] {
+            upsert_item(&pool, it).await.expect("upsert");
+        }
+        // Read state on the recent item, to prove it survives the body clear.
+        mark_item_read(&pool, qid, "owner", "repo", 1)
+            .await
+            .expect("mark read");
+
+        let cleared = clear_stale_bodies(&pool, 90).await.expect("clear");
+        assert_eq!(cleared, 2, "old-open and closed bodies cleared");
+
+        let by_num: std::collections::HashMap<i64, CachedItem> = fetch_items(&pool, qid)
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|i| (i.number, i))
+            .collect();
+        assert_eq!(by_num[&1].body.as_deref(), Some("recent body"));
+        assert_eq!(by_num[&2].body, None);
+        assert_eq!(by_num[&3].body, None);
+        // Unread marker untouched by the body clear.
+        assert_eq!(
+            by_num[&1].last_read_updated_at.as_deref(),
+            Some("2999-01-01T00:00:00Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_query_overflow_deletes_read_overflow_only() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        // Five items, ascending updated_at so #5 is newest, #1 oldest.
+        for n in 1..=5 {
+            let mut it = make_item(qid, n, &format!("PR {n}"));
+            it.updated_at = format!("2026-0{n}-01T00:00:00Z");
+            upsert_item(&pool, &it).await.expect("upsert");
+        }
+        // Overflow beyond newest 2 is {1,2,3}. Mark 1 and 2 read; leave 3 unread.
+        mark_item_read(&pool, qid, "owner", "repo", 1)
+            .await
+            .expect("read 1");
+        mark_item_read(&pool, qid, "owner", "repo", 2)
+            .await
+            .expect("read 2");
+
+        let deleted = prune_query_overflow(&pool, qid, 2).await.expect("prune");
+        assert_eq!(deleted, 2, "only the two read overflow rows are deleted");
+
+        let mut nums: Vec<i64> = fetch_items(&pool, qid)
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|i| i.number)
+            .collect();
+        nums.sort();
+        // #3 survives despite being overflow, because it is unread.
+        assert_eq!(nums, vec![3, 4, 5]);
     }
 }

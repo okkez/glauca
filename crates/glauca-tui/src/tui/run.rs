@@ -36,7 +36,16 @@ where
     // Start the async engine: builds the left-pane entries, resolves the current
     // user, and spawns the background worker / refresh timer / command loop.
     let tui_settings = TuiSettings::load();
-    let (mut engine, init) = Engine::start(pool, gh, tui_settings.sync_interval_secs).await?;
+    let (mut engine, init) = Engine::start(
+        pool,
+        gh,
+        tui_settings.sync_interval_secs,
+        glauca_core::engine::MaintenanceConfig {
+            retention_days: tui_settings.retention_days,
+            max_items_per_query: tui_settings.max_items_per_query,
+        },
+    )
+    .await?;
 
     // Build App from the engine's initial entries (filter streams interleaved).
     let queries: Vec<QueryEntry> = init

@@ -588,6 +588,39 @@ pub const MIN_SYNC_INTERVAL_SECS: u64 = 10;
 /// (e.g. a secondary/abuse limit, where `/rate_limit` still shows remaining>0).
 pub const DEFAULT_RATELIMIT_BACKOFF_SECS: i64 = 60;
 
+/// Default age (days) past which a cached item's re-fetchable `body` is cleared to
+/// reclaim space; also clears terminal-state items regardless of age. Used when the
+/// front-end's settings file doesn't specify one. See `db::clear_stale_bodies`.
+pub const DEFAULT_RETENTION_DAYS: u64 = 90;
+/// Default per-query cap on cached rows; read overflow beyond this (oldest first)
+/// is pruned to bound row growth. See `db::prune_query_overflow`.
+pub const DEFAULT_MAX_ITEMS_PER_QUERY: u64 = 1500;
+/// How often the local cache-maintenance pass runs. Purely local (no GitHub API),
+/// so it doesn't consume quota; it also runs once shortly after startup so short
+/// sessions still get maintained.
+pub const MAINTENANCE_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+/// Tunables for the background cache-maintenance pass. Sized generously by default
+/// because clearing `body` is non-destructive (re-fetched on open) and overflow
+/// pruning never touches unread rows.
+#[derive(Debug, Clone, Copy)]
+pub struct MaintenanceConfig {
+    /// Age (days) past which an item's `body` is cleared. Terminal-state items are
+    /// cleared regardless of age.
+    pub retention_days: u64,
+    /// Per-query cap on cached rows; read overflow beyond it is pruned.
+    pub max_items_per_query: u64,
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: DEFAULT_RETENTION_DAYS,
+            max_items_per_query: DEFAULT_MAX_ITEMS_PER_QUERY,
+        }
+    }
+}
+
 /// Clamp a configured interval to at least `MIN_SYNC_INTERVAL_SECS`.
 pub fn effective_interval(secs: u64) -> u64 {
     secs.max(MIN_SYNC_INTERVAL_SECS)
@@ -748,6 +781,46 @@ pub async fn refresh_timer_task(
     loop {
         interval.tick().await;
         enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, interval_secs as i64, &gate).await;
+    }
+}
+
+/// One local cache-maintenance sweep: clear stale `body` blobs, prune each query's
+/// read overflow, then `VACUUM` to return the freed pages to the OS. All local
+/// (no GitHub API). Errors are logged and skipped so one failing step can't abort
+/// the rest or crash the task.
+async fn run_maintenance(pool: &SqlitePool, cfg: MaintenanceConfig) {
+    match db::clear_stale_bodies(pool, cfg.retention_days as i64).await {
+        Ok(n) => info!(cleared = n, "maintenance: cleared stale item bodies"),
+        Err(e) => warn!(error = %e, "maintenance: clear_stale_bodies failed"),
+    }
+    match db::list_queries(pool).await {
+        Ok(queries) => {
+            for q in queries {
+                match db::prune_query_overflow(pool, q.id, cfg.max_items_per_query as i64).await {
+                    Ok(n) if n > 0 => {
+                        info!(query_id = q.id, deleted = n, "maintenance: pruned overflow")
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(query_id = q.id, error = %e, "maintenance: prune failed"),
+                }
+            }
+        }
+        Err(e) => warn!(error = %e, "maintenance: list_queries failed"),
+    }
+    if let Err(e) = db::vacuum(pool).await {
+        warn!(error = %e, "maintenance: vacuum failed");
+    }
+}
+
+/// Runs `run_maintenance` once shortly after startup, then every
+/// `MAINTENANCE_INTERVAL_SECS`. The immediate first tick means short sessions still
+/// get a sweep.
+pub async fn maintenance_task(pool: SqlitePool, cfg: MaintenanceConfig) {
+    let mut interval =
+        tokio::time::interval(tokio::time::Duration::from_secs(MAINTENANCE_INTERVAL_SECS));
+    loop {
+        interval.tick().await; // first tick fires immediately: sweep at startup
+        run_maintenance(&pool, cfg).await;
     }
 }
 
@@ -938,6 +1011,7 @@ impl Engine {
         pool: SqlitePool,
         gh: Octocrab,
         sync_interval_secs: u64,
+        maintenance: MaintenanceConfig,
     ) -> anyhow::Result<(Engine, EngineInit)> {
         let entries = load_left_pane_entries(&pool).await?;
 
@@ -975,6 +1049,9 @@ impl Engine {
             interval,
             gate.clone(),
         ));
+        // Spawn the periodic local cache-maintenance sweep (body clears, overflow
+        // prune, VACUUM). Purely local, so it ignores the rate-limit gate.
+        tokio::spawn(maintenance_task(pool.clone(), maintenance));
         // Spawn the command-handling loop.
         tokio::spawn(command_loop(
             pool,

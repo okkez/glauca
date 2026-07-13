@@ -14,6 +14,18 @@ fn default_sync_interval_secs() -> u64 {
     glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
 }
 
+/// Default when the settings file omits `retention_days`. Shares the core
+/// constant with the other front-ends. See `db::clear_stale_bodies`.
+fn default_retention_days() -> u64 {
+    glauca_core::engine::DEFAULT_RETENTION_DAYS
+}
+
+/// Default when the settings file omits `max_items_per_query`. See
+/// `db::prune_query_overflow`.
+fn default_max_items_per_query() -> u64 {
+    glauca_core::engine::DEFAULT_MAX_ITEMS_PER_QUERY
+}
+
 // `Default` is implemented manually rather than derived: a derived default would
 // give `sync_interval_secs = 0` (an invalid interval), so it must fall back to
 // the same value as the serde default.
@@ -38,6 +50,15 @@ pub struct TauriSettings {
     /// `pane_sizes`. `None` until the user first drags a divider.
     #[serde(default)]
     pub pane_sizes: Option<(f64, f64)>,
+    /// Age (days) past which a cached item's re-fetchable `body` is cleared to
+    /// reclaim cache space (terminal-state items are cleared regardless of age).
+    /// Defaults to `DEFAULT_RETENTION_DAYS`.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u64,
+    /// Per-query cap on cached rows; read overflow beyond it is pruned. Defaults
+    /// to `DEFAULT_MAX_ITEMS_PER_QUERY`.
+    #[serde(default = "default_max_items_per_query")]
+    pub max_items_per_query: u64,
 }
 
 impl Default for TauriSettings {
@@ -47,6 +68,8 @@ impl Default for TauriSettings {
             theme: default_theme(),
             notifications_enabled: false,
             pane_sizes: None,
+            retention_days: default_retention_days(),
+            max_items_per_query: default_max_items_per_query(),
         }
     }
 }
