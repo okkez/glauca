@@ -35,6 +35,8 @@ const state = {
                           // filter_items result overwriting a newer entry's items
   syncingCount: 0,         // in-flight foreground syncs (SyncStarted − SyncDone/Error)
   bgSyncPending: 0,        // queued background-sync jobs (BgSyncQueued − BgSyncJobDone)
+  bodyRefreshRequested: new Set(), // itemKey()s whose cleared body we've already
+                          // asked to re-fetch this session (dedup for selectItem)
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1181,6 +1183,16 @@ function selectItem(it) {
     it.is_new = false;
     refreshUnread(e.rootQueryId); // recompute badges (also re-renders the sidebar)
   }
+  // Cache maintenance clears the re-fetchable `body` of old items to save space;
+  // a null/undefined body means "cleared" (a genuinely empty description is "").
+  // Re-fetch it once on open — the resulting ItemsLoaded re-renders the detail.
+  if (it.body == null && !state.bodyRefreshRequested.has(state.selectedItemKey)) {
+    const e = state.entries[state.selectedEntry];
+    if (e) {
+      state.bodyRefreshRequested.add(state.selectedItemKey);
+      call("refresh_item", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
+    }
+  }
   renderItemList(); // selection/read changed; the filtered set is unchanged
   renderDetail(it);
 }
@@ -1613,7 +1625,14 @@ function handleMessage(msg) {
       state.itemsByQuery.set(d.query_id, d.items);
       state.pending.delete(d.query_id); // a fresh foreground load supersedes any held-back items
       if (isCurrent) {
-        refreshVisible();
+        // refreshVisible re-renders only the list, not the open detail pane. When
+        // this reload carries a transparently re-fetched body (see selectItem),
+        // re-render the selected item's detail so the body appears.
+        refreshVisible().then(() => {
+          if (!state.selectedItemKey) return;
+          const sel = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
+          if (sel) renderDetail(sel);
+        });
         updateBanner();
       }
       refreshUnread(d.query_id);

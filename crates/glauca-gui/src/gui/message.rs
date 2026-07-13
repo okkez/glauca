@@ -95,6 +95,39 @@ impl GlaucaApp {
         cx.notify();
     }
 
+    /// Transparently re-fetch the body of the viewed item when it is missing.
+    ///
+    /// Cache maintenance clears the re-fetchable `body` of old items to save space
+    /// (`glauca_core::db::clear_stale_bodies`); a `None` body means "cleared", not
+    /// "no description" (an empty description is stored as `Some("")`). Fetch it
+    /// once via `RefreshItem`; the reload repopulates the detail pane.
+    /// `body_refresh_requested` dedups repeat selection of the same item.
+    pub(crate) fn refetch_current_body_if_missing(&mut self) {
+        let Some(&idx) = self.filtered.get(self.item_cursor) else {
+            return;
+        };
+        let Some(row) = self.items.get(idx) else {
+            return;
+        };
+        if row.body.is_some() {
+            return;
+        }
+        let key = (row.repo_owner.clone(), row.repo_name.clone(), row.number);
+        if self.body_refresh_requested.contains(&key) {
+            return;
+        }
+        let Some(query_id) = self.selected_root_query_id() else {
+            return;
+        };
+        self.body_refresh_requested.insert(key.clone());
+        self.send(EngineCommand::RefreshItem {
+            query_id,
+            repo_owner: key.0,
+            repo_name: key.1,
+            number: key.2,
+        });
+    }
+
     /// Apply a single engine message to GUI state. Mirrors the TUI's `run_app`
     /// message handling (crates/glauca-tui/src/tui/mod.rs). `window` is used to
     /// surface error messages as notification toasts (the status footer is

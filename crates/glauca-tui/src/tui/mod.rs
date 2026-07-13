@@ -7,7 +7,7 @@ use ratatui::backend::CrosstermBackend;
 use sqlx::SqlitePool;
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -34,8 +34,8 @@ pub(crate) use process::{
 };
 pub(crate) use run::run;
 use select::{
-    full_resync_selected, mark_selected_item_read, refresh_selected_item, refresh_selected_list,
-    reorder_command, select_current_entry,
+    full_resync_selected, mark_selected_item_read, refetch_selected_body_if_missing,
+    refresh_selected_item, refresh_selected_list, reorder_command, select_current_entry,
 };
 use single_line_input::SingleLineInput;
 pub(crate) use state::{
@@ -180,6 +180,11 @@ pub struct App {
     /// Selection cursor within the custom-action picker (indexes the list
     /// returned by `custom_actions_for_selected`).
     pub custom_action_cursor: usize,
+    /// Item keys `(repo_owner, repo_name, number)` for which a body re-fetch has
+    /// already been requested this session. Cache maintenance clears the
+    /// re-fetchable `body` of old items; when such an item is viewed we fetch it
+    /// once on demand, and this set prevents re-dispatching on every keypress.
+    pub body_refresh_requested: HashSet<(String, String, i64)>,
 }
 
 // `AppMessage` / `SyncJob` は glauca_core::engine へ移設（A6）。

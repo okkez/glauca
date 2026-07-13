@@ -212,6 +212,39 @@ pub(crate) async fn refresh_selected_item(app: &mut App, engine: &Engine) {
     app.status = Some(format!("Refreshing #{}…", item.number));
 }
 
+/// Transparently re-fetch the body of the viewed item when it is missing.
+///
+/// Cache maintenance clears the re-fetchable `body` of old items to save space
+/// (see `glauca_core::db::clear_stale_bodies`); a `None` body therefore means
+/// "cleared", not "no description" (an empty description is stored as `Some("")`).
+/// When such an item is viewed we fetch it once via `RefreshItem`; the reload
+/// repopulates the detail pane. `body_refresh_requested` dedups repeat calls
+/// because the caller runs on every keypress.
+pub(crate) async fn refetch_selected_body_if_missing(app: &mut App, engine: &Engine) {
+    let Some(item) = app.selected_item() else {
+        return;
+    };
+    if item.body.is_some() {
+        return;
+    }
+    let key = (item.repo_owner.clone(), item.repo_name.clone(), item.number);
+    if app.body_refresh_requested.contains(&key) {
+        return;
+    }
+    let Some(query_id) = app.selected_root_query_id() else {
+        return;
+    };
+    app.body_refresh_requested.insert(key.clone());
+    engine
+        .send(EngineCommand::RefreshItem {
+            query_id,
+            repo_owner: key.0,
+            repo_name: key.1,
+            number: key.2,
+        })
+        .await;
+}
+
 /// Mark the item under the cursor read (it is shown in the detail pane): record the
 /// `updated_at` it was read at, clear its in-memory `is_new`, recompute the current
 /// query's unread badges, and persist via the engine (fire-and-forget). No-op if

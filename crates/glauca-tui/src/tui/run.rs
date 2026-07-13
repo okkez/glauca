@@ -463,6 +463,7 @@ where
                         && matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
                     {
                         mark_selected_item_read(&mut app, &engine).await;
+                        refetch_selected_body_if_missing(&mut app, &engine).await;
                     }
                 }
             }
