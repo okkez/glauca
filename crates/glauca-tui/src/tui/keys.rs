@@ -371,7 +371,9 @@ fn handle_key_comments_popup(app: &mut App, key: KeyEvent) -> Action {
 
 fn handle_key_filter(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
-        KeyCode::Esc => {
+        // Esc or Tab leaves the filter field. The filter text is kept, so the
+        // item list stays filtered and focus remains on the item list.
+        KeyCode::Esc | KeyCode::Tab => {
             app.input_mode = InputMode::Normal;
         }
         // Clear the whole filter (matches the "C-u:clear" hint). TextArea's own
@@ -380,8 +382,8 @@ fn handle_key_filter(app: &mut App, key: KeyEvent) -> Action {
             app.filter = SingleLineInput::new();
             app.item_cursor = 0;
         }
-        // Single-line field: never insert a newline or a tab.
-        KeyCode::Enter | KeyCode::Tab => {}
+        // Single-line field: never insert a newline.
+        KeyCode::Enter => {}
         // Everything else (text, Backspace/Delete, cursor moves, Emacs keys) is
         // handled by the TextArea widget's own key bindings. Only reset the item
         // selection when the filter text actually changed — a pure cursor move
@@ -602,6 +604,17 @@ mod tests {
         app.input_mode = InputMode::Filter;
         handle_key_filter(&mut app, make_key(KeyCode::Esc));
         assert!(matches!(app.input_mode, InputMode::Normal));
+    }
+
+    #[test]
+    fn filter_tab_exits_mode_keeping_filter() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::Filter;
+        app.filter = ta("fix");
+        handle_key_filter(&mut app, make_key(KeyCode::Tab));
+        assert!(matches!(app.input_mode, InputMode::Normal));
+        // Tab leaves the field but keeps the filter text applied.
+        assert_eq!(app.filter.value(), "fix");
     }
 
     #[test]

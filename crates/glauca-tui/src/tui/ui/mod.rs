@@ -116,7 +116,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Focus::ItemList => format!("ITEMS    h/l:pane  j/k:move  /:filter{enter_actions_hint}{refresh_hint}{review_hint}{custom_hint}  ?:help  q:quit"),
             Focus::ItemDetail => format!("DETAIL   h/l:pane  j/k:scroll{enter_actions_hint}{refresh_hint}{review_hint}{custom_hint}  ?:help  q:quit"),
         },
-        InputMode::Filter => "FILTER   Esc:exit  C-u:clear  is:pr  state:open  author:name  label:bug  repo:owner/name".to_string(),
+        InputMode::Filter => "FILTER   Esc/Tab:exit  C-u:clear  is:pr  state:open  author:name  label:bug  repo:owner/name".to_string(),
         InputMode::NewQuery => "NEW QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
         InputMode::NewFilterStream => "NEW STREAM  Tab:switch field  Enter:save  Esc:cancel".to_string(),
         InputMode::EditQuery => "EDIT QUERY  Tab:switch field  Enter:save  Esc:cancel".to_string(),
