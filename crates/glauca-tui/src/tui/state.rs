@@ -105,6 +105,7 @@ impl App {
             icons: Icons::default(),
             custom_actions: CustomActions::default(),
             custom_action_cursor: 0,
+            body_refresh_requested: HashSet::new(),
         }
     }
 

@@ -35,6 +35,8 @@ const state = {
                           // filter_items result overwriting a newer entry's items
   syncingCount: 0,         // in-flight foreground syncs (SyncStarted − SyncDone/Error)
   bgSyncPending: 0,        // queued background-sync jobs (BgSyncQueued − BgSyncJobDone)
+  bodyRefreshRequested: new Set(), // itemKey()s whose cleared body we've already
+                          // asked to re-fetch this session (dedup for selectItem)
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -648,6 +650,16 @@ async function refreshVisible() {
     state.visibleTitleSegments = [];
   }
   renderItemList();
+  // Also refresh the open detail pane from the reloaded items. renderDetail is
+  // imperative and otherwise keeps showing the object captured at selectItem
+  // time, so without this an updated body (e.g. a transparently re-fetched
+  // maintenance-cleared body) or an applied background update would not appear
+  // until reselect. No-op when nothing is selected or the selected item fell
+  // out of the current view.
+  if (state.selectedItemKey) {
+    const selectedItem = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
+    if (selectedItem) renderDetail(selectedItem);
+  }
 }
 
 // Octicon name + color class encoding an item's state: the shape says
@@ -1181,6 +1193,16 @@ function selectItem(it) {
     it.is_new = false;
     refreshUnread(e.rootQueryId); // recompute badges (also re-renders the sidebar)
   }
+  // Cache maintenance clears the re-fetchable `body` of old items to save space;
+  // a null/undefined body means "cleared" (a genuinely empty description is "").
+  // Re-fetch it once on open — the resulting ItemsLoaded re-renders the detail.
+  if (it.body == null && !state.bodyRefreshRequested.has(state.selectedItemKey)) {
+    const e = state.entries[state.selectedEntry];
+    if (e) {
+      state.bodyRefreshRequested.add(state.selectedItemKey);
+      call("refresh_item", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
+    }
+  }
   renderItemList(); // selection/read changed; the filtered set is unchanged
   renderDetail(it);
 }
@@ -1613,6 +1635,8 @@ function handleMessage(msg) {
       state.itemsByQuery.set(d.query_id, d.items);
       state.pending.delete(d.query_id); // a fresh foreground load supersedes any held-back items
       if (isCurrent) {
+        // refreshVisible also re-renders the open detail from the reloaded items,
+        // so a transparently re-fetched body (see selectItem) becomes visible.
         refreshVisible();
         updateBanner();
       }

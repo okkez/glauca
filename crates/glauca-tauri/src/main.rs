@@ -40,6 +40,10 @@ fn main() -> anyhow::Result<()> {
     // glauca-tui / glauca-gui), falling back to the shared core defaults.
     let settings = settings::TauriSettings::load();
     let sync_interval_secs = settings.sync_interval_secs;
+    let maintenance = glauca_core::engine::MaintenanceConfig {
+        retention_days: settings.retention_days,
+        max_items_per_query: settings.max_items_per_query,
+    };
 
     // Bring up DB + GitHub client + engine on the Tauri-managed tokio runtime, so
     // the engine's internal `tokio::spawn` tasks share that runtime with the async
@@ -55,7 +59,8 @@ fn main() -> anyhow::Result<()> {
             // Keep a clone for AppState (rebuilding the left pane via list_entries);
             // the engine takes ownership of the original.
             let pool_for_state = pool.clone();
-            let (engine, init) = Engine::start(pool, gh_client, sync_interval_secs).await?;
+            let (engine, init) =
+                Engine::start(pool, gh_client, sync_interval_secs, maintenance).await?;
             let current_user = init.current_user.clone();
             let query_names = commands::query_name_map(&init.entries);
             let init_json = serde_json::to_value(&init)?;

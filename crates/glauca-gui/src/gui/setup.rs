@@ -106,6 +106,7 @@ impl GlaucaApp {
             filter: String::new(),
             unread_counts: HashMap::new(),
             stream_filter: None,
+            body_refresh_requested: HashSet::new(),
             pending_items: None,
             pending_count: 0,
             syncing: false,

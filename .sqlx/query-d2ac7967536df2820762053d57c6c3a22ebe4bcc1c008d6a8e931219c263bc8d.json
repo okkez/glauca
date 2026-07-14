@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        DELETE FROM items\n        WHERE query_id = ?\n          AND last_read_updated_at IS NOT NULL\n          AND updated_at <= last_read_updated_at\n          AND id NOT IN (\n              SELECT id FROM items\n              WHERE query_id = ?\n              ORDER BY updated_at DESC, id DESC\n              LIMIT ?\n          )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "d2ac7967536df2820762053d57c6c3a22ebe4bcc1c008d6a8e931219c263bc8d"
+}

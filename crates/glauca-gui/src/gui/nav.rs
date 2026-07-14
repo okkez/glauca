@@ -108,6 +108,7 @@ impl GlaucaApp {
         self.items_list.scroll_to_reveal_item(cursor);
         self.reset_detail_scroll();
         self.mark_current_item_read(cx);
+        self.refetch_current_body_if_missing();
         cx.notify();
         tracing::debug!(
             handler_us = t.elapsed().as_micros() as u64,

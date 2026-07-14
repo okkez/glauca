@@ -361,6 +361,7 @@ impl GlaucaApp {
                         this.focus = Focus::ItemList;
                         this.item_cursor = ix;
                         this.mark_current_item_read(cx);
+                        this.refetch_current_body_if_missing();
                         if shift && let Some(item) = this.selected_item() {
                             this.send(EngineCommand::OpenBrowser {
                                 item: Box::new(item),

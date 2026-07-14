@@ -12,7 +12,7 @@
 //! scrolling. Selecting an entry mirrors the TUI `select_current_entry` flow:
 //! load cached items, mark the entry viewed, and (for root queries) sync.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use glauca_core::actions::{CustomAction, CustomActions};
@@ -182,6 +182,11 @@ pub(crate) struct GlaucaApp {
     unread_counts: HashMap<(bool, i64), usize>,
     /// Filter stream filter applied to the item list (None for root queries).
     stream_filter: Option<String>,
+    /// Item keys `(repo_owner, repo_name, number)` whose body re-fetch was already
+    /// requested this session. Cache maintenance clears the re-fetchable `body` of
+    /// old items; when such an item is viewed we fetch it once on demand, and this
+    /// set prevents re-dispatching on repeated selection.
+    body_refresh_requested: HashSet<(String, String, i64)>,
 
     /// Freshly-synced items for the currently-viewed query, held back from the
     /// list because they arrived from a background sync. Applied on explicit
