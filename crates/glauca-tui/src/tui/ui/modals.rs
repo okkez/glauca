@@ -216,6 +216,7 @@ pub(super) fn draw_help_popup(f: &mut Frame, area: Rect) {
         entry("?", "this help"),
         entry("q", "quit"),
         entry("h l ← →", "move focus"),
+        entry("Tab S-Tab", "cycle panes"),
         entry("S", "full resync (+prune)"),
         entry("u", "apply pending updates"),
         entry("N", "toggle desktop notifications"),

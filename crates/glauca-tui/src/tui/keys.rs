@@ -43,15 +43,15 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             app.input_mode = InputMode::Help;
         }
 
-        // Focus cycling — h/l or left/right arrows
-        KeyCode::Char('l') | KeyCode::Right => {
+        // Focus cycling — h/l, left/right arrows, or Tab/Shift+Tab
+        KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
             app.focus = match app.focus {
                 Focus::QueryList => Focus::ItemList,
                 Focus::ItemList => Focus::ItemDetail,
                 Focus::ItemDetail => Focus::QueryList,
             };
         }
-        KeyCode::Char('h') | KeyCode::Left => {
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => {
             app.focus = match app.focus {
                 Focus::QueryList => Focus::ItemDetail,
                 Focus::ItemList => Focus::QueryList,
@@ -512,6 +512,30 @@ fn handle_key_edit_filter_stream(app: &mut App, key: KeyEvent) -> Action {
 mod tests {
     use super::*;
     use crate::tui::test_support::*;
+
+    #[test]
+    fn tab_cycles_focus_forward() {
+        let mut app = App::new(vec![]);
+        assert!(matches!(app.focus, Focus::QueryList));
+        handle_key_normal(&mut app, make_key(KeyCode::Tab));
+        assert!(matches!(app.focus, Focus::ItemList));
+        handle_key_normal(&mut app, make_key(KeyCode::Tab));
+        assert!(matches!(app.focus, Focus::ItemDetail));
+        handle_key_normal(&mut app, make_key(KeyCode::Tab));
+        assert!(matches!(app.focus, Focus::QueryList));
+    }
+
+    #[test]
+    fn back_tab_cycles_focus_backward() {
+        let mut app = App::new(vec![]);
+        assert!(matches!(app.focus, Focus::QueryList));
+        handle_key_normal(&mut app, make_key(KeyCode::BackTab));
+        assert!(matches!(app.focus, Focus::ItemDetail));
+        handle_key_normal(&mut app, make_key(KeyCode::BackTab));
+        assert!(matches!(app.focus, Focus::ItemList));
+        handle_key_normal(&mut app, make_key(KeyCode::BackTab));
+        assert!(matches!(app.focus, Focus::QueryList));
+    }
 
     #[test]
     fn question_mark_opens_help_overlay() {
