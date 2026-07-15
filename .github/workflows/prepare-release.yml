@@ -11,6 +11,12 @@ permissions:
   contents: write
   pull-requests: write
 
+# Serialize with override-release-bump.yml: both force-push the shared `release`
+# branch, so they must not run concurrently. Queue rather than cancel.
+concurrency:
+  group: release-branch
+  cancel-in-progress: false
+
 jobs:
   prepare-release:
     # Skip the push that knope itself makes for the release branch/PR.
