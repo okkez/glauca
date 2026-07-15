@@ -1,3 +1,22 @@
+## 0.2.0 (2026-07-15)
+
+### Breaking Changes
+
+- Forced major bump via the bump:major label.
+
+### Features
+
+- add background cache maintenance to bound cache.db growth ([#49](https://github.com/okkez/glauca/pull/49) by @okkez)
+- re-fetch cleared item bodies transparently on open ([#49](https://github.com/okkez/glauca/pull/49) by @okkez)
+- cycle TUI panes with Tab and Shift+Tab ([#50](https://github.com/okkez/glauca/pull/50) by @okkez)
+- exit filter input with Tab ([#52](https://github.com/okkez/glauca/pull/52) by @okkez)
+- exit filter input with Enter ([#52](https://github.com/okkez/glauca/pull/52) by @okkez)
+- add label-driven version override for the release PR ([#53](https://github.com/okkez/glauca/pull/53) by @okkez)
+
+### Fixes
+
+- harden cache maintenance per code review ([#49](https://github.com/okkez/glauca/pull/49) by @okkez)
+
 ## 0.1.9 (2026-07-12)
 
 ### Features
