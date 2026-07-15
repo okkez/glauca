@@ -1,0 +1,123 @@
+name: Override Release Bump
+
+# Force the version of an ALREADY-OPEN release PR. Two paths, both reuse knope's
+# existing `prepare-release` workflow (see knope.toml) so the version files, the
+# CHANGELOG entry, and the PR title/body are all refreshed consistently:
+#
+#   1. Label path: a maintainer applies a "bump:major" / "bump:minor" label to
+#      the release PR. A `default: <level>` changeset is dropped so PrepareRelease
+#      bumps at least that level. NOTE: while the crate is 0.x, knope's pre-1.0
+#      semantics shift these down one level (0.1.9 -> major=0.2.0, minor=0.1.10).
+#   2. Exact-version path: run manually via "Run workflow" with a version input
+#      (e.g. 1.0.0) -> `prepare-release --override-version` sets that exact
+#      version regardless of the pre-1.0 shift. Use this to cut 1.0.0.
+#
+# PRECONDITION: an open release PR (head "release" -> base "main") must already
+# exist. The "Require an open release PR" guard fails fast otherwise. knope's
+# CreatePullRequest step would happily *create* one, but we intentionally only
+# ever *update* an existing PR; to open the first release PR, push a conventional
+# commit to main and let prepare-release.yml do it, then re-run this.
+#
+# Rebuilding from main's base version (not the already-bumped release branch)
+# keeps a bump from double-counting. Because we reuse `prepare-release`, its
+# CreatePullRequest updates the existing PR's title/body to match the new
+# version, so nothing goes stale.
+on:
+  pull_request:
+    types: [labeled]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact version to release (e.g. 1.0.0). Requires an open release PR."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Serialize every writer of the shared `release` branch so concurrent runs (two
+# labels in a row, or an overlap with prepare-release.yml) can't force-push over
+# each other. prepare-release.yml uses the same group. Queue rather than cancel:
+# a half-finished push should complete before the next run starts.
+concurrency:
+  group: release-branch
+  cancel-in-progress: false
+
+jobs:
+  override-bump:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.head_ref == 'release' &&
+       (github.event.label.name == 'bump:major' || github.event.label.name == 'bump:minor'))
+    runs-on: ubuntu-latest
+    steps:
+      # A GitHub App token (not GITHUB_TOKEN) so the force-pushed release branch
+      # can trigger downstream workflows. App needs Contents: write + Pull requests: write.
+      - name: Generate a GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_PLZ_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      # Check out main (the base version) rather than the PR merge ref, so the
+      # bump is applied on top of the released version and never double-counts.
+      - name: Checkout main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      # Precondition guard: this workflow only UPDATES an existing release PR.
+      # Bail out clearly if there is nothing to update (knope would otherwise
+      # open a brand-new release PR, which is not what this workflow is for).
+      - name: Require an open release PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          if [ -z "$(gh pr list --head release --base main --state open --json number --jq '.[].number')" ]; then
+            echo "::error::No open release PR (head 'release' -> base 'main'). This workflow only updates an existing release PR; it does not open one. Push a conventional commit to main to let prepare-release.yml open the release PR, then re-run." >&2
+            exit 1
+          fi
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install knope
+        uses: taiki-e/install-action@8b3c737da4b541bf0fb5a3e0488ff20535badac9 # v2.82.1
+        with:
+          tool: knope@0.23.0
+
+      # Force the version, then let knope's prepare-release workflow rebuild the
+      # release branch, regenerate the CHANGELOG, and update the existing PR.
+      # PrepareRelease always writes a CHANGELOG entry from the commits since the
+      # last tag (the guard above guarantees such commits exist), so there is no
+      # empty-commit case here.
+      - name: Force version and update release PR
+        env:
+          EVENT: ${{ github.event_name }}
+          LABEL: ${{ github.event.label.name }}
+          VERSION: ${{ inputs.version }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Invalid version '$VERSION' (expected MAJOR.MINOR.PATCH)" >&2
+              exit 1
+            fi
+            knope prepare-release --override-version "$VERSION" --verbose
+          else
+            level="${LABEL#bump:}"
+            # A changeset forces PrepareRelease to bump at least this level while
+            # still generating a CHANGELOG entry. prepare-release consumes it.
+            mkdir -p .changeset
+            printf -- '---\ndefault: %s\n---\n\nForced %s bump via the %s label.\n' \
+              "$level" "$level" "$LABEL" > .changeset/force-bump.md
+            knope prepare-release --verbose
+          fi
