@@ -156,6 +156,20 @@ pub(crate) struct FilterStreamFormParams {
     init_filter: String,
 }
 
+/// Live state of the open filter-stream create/edit dialog. The dialog content
+/// closure reads this each render (so add/remove-box mutations re-render), and
+/// the input `Entity`s persist across renders so their text survives. `filters`
+/// holds one OR-group box each; the boxes are ORed (see
+/// `glauca_core::filter::StreamFilter`). Cleared to `None` when the dialog closes.
+#[derive(Clone)]
+pub(crate) struct FilterStreamForm {
+    edit: Option<i64>,
+    parent_id: i64,
+    kind: String,
+    name: Entity<InputState>,
+    filters: Vec<Entity<InputState>>,
+}
+
 pub(crate) struct GlaucaApp {
     /// Cloneable command sender, used from non-async click handlers. The
     /// engine itself (with the message receiver) is moved into the push-based
@@ -262,6 +276,10 @@ pub(crate) struct GlaucaApp {
     /// Selected event for the open review dialog (Comment / Approve / Request
     /// Changes); reset to `Approve` each time the dialog opens.
     review_action: ReviewEvent,
+
+    /// Live state of the open filter-stream create/edit dialog (name + N OR-group
+    /// boxes), or `None` when that dialog is closed. See [`FilterStreamForm`].
+    filter_stream_form: Option<FilterStreamForm>,
 
     /// Inline filter input. Its `Change` events update `filter` (see `new`).
     filter_input: Entity<InputState>,
