@@ -365,12 +365,18 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    groups
-        .into_iter()
-        .map(|g| g.as_ref().trim().to_string())
-        .filter(|g| !g.is_empty())
-        .collect::<Vec<_>>()
-        .join(&FILTER_GROUP_SEP.to_string())
+    let mut out = String::new();
+    for group in groups {
+        let group = group.as_ref().trim();
+        if group.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(FILTER_GROUP_SEP);
+        }
+        out.push_str(group);
+    }
+    out
 }
 
 /// A filter-stream filter: an OR of AND-groups ([`FilterQuery`]).

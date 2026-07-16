@@ -237,8 +237,17 @@ impl GlaucaApp {
         let this = cx.weak_entity();
         window.open_dialog(cx, move |dlg, _w, _cx| {
             let this = this.clone();
+            let this_close = this.clone();
             dlg.title(title)
                 .w(px(560.))
+                // Drop the form state on any dismissal (Cancel/OK already clear it,
+                // but this also covers the close icon / Esc / backdrop) so the
+                // input entities don't linger after the dialog closes.
+                .on_close(move |_, _w, cx| {
+                    if let Some(app) = this_close.upgrade() {
+                        app.update(cx, |app, _| app.filter_stream_form = None);
+                    }
+                })
                 .content(move |content, _w, cx| {
                     let Some(app) = this.upgrade() else {
                         return content;
