@@ -343,10 +343,15 @@ async function promptModal(label, def = "") {
   return out ? out.value : null;
 }
 
-// Split a stored filter-stream filter into its OR-group boxes (newline per
-// group; see glauca_core::filter::StreamFilter). Always yields at least one box.
+// Group separator inside a stored filter-stream filter. Mirrors the Rust
+// `glauca_core::filter::FILTER_GROUP_SEP` — this is a cross-language contract
+// (the backend splits/joins on the same char), so keep the two in sync.
+const FILTER_GROUP_SEP = "\n";
+
+// Split a stored filter-stream filter into its OR-group boxes (one group per
+// separator; see glauca_core::filter::StreamFilter). Always yields at least one box.
 function splitFilterGroups(s) {
-  return (s || "").split("\n");
+  return (s || "").split(FILTER_GROUP_SEP);
 }
 
 // Filter-stream create/edit modal: a name field plus one or more OR-group boxes
@@ -391,12 +396,11 @@ function filterStreamModal(title, initName, initFilters) {
         const remove = el("button", {
           class: "filter-remove",
           text: "✕",
+          // Disabled when it's the only box, so the click can't drop below one.
           onclick: () => {
-            if (boxes.length > 1) {
-              boxes.splice(i, 1);
-              rebuild();
-              boxes[Math.min(i, boxes.length - 1)].focus();
-            }
+            boxes.splice(i, 1);
+            rebuild();
+            boxes[Math.min(i, boxes.length - 1)].focus();
           },
         });
         remove.type = "button";
@@ -423,7 +427,7 @@ function filterStreamModal(title, initName, initFilters) {
         boxes[0].focus();
         return;
       }
-      finish({ name, filter: groups.join("\n") });
+      finish({ name, filter: groups.join(FILTER_GROUP_SEP) });
     };
 
     const addBtn = el("button", { class: "filter-add", text: "+ Add OR box", onclick: addBox });

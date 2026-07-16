@@ -39,7 +39,8 @@ use select::{
 };
 use single_line_input::SingleLineInput;
 pub(crate) use state::{
-    clear_active_modal_field, modal_fields, modal_fields_ref, sync_modal_cursors,
+    active_filter_stream_field_mut, clear_active_modal_field, modal_fields, modal_fields_ref,
+    sync_modal_cursors,
 };
 
 use glauca_core::actions::{CustomAction, CustomActions};

@@ -556,11 +556,8 @@ fn handle_key_filter_stream_modal(app: &mut App, key: KeyEvent, save: Action) ->
         }
         // Text/edit keys go to the active field; SingleLineInput drops newlines.
         _ => {
-            let field = app.modal_field;
-            if field == 0 {
-                app.filter_stream_name.input(key);
-            } else if let Some(b) = app.filter_stream_filters.get_mut(field - 1) {
-                b.input(key);
+            if let Some(field) = active_filter_stream_field_mut(app) {
+                field.input(key);
             }
         }
     }

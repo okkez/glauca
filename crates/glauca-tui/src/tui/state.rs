@@ -57,19 +57,28 @@ pub(crate) fn sync_modal_cursors(app: &mut App) {
     f1.set_active(field == 1);
 }
 
+/// The active field of a filter-stream modal: `modal_field` 0 = name, `i>=1` =
+/// box `i-1`. Single source of the index→field mapping used by the clear and
+/// text-input paths (`sync_modal_cursors` touches every box, so it keeps its
+/// own loop). Returns `None` for an out-of-range box index.
+pub(crate) fn active_filter_stream_field_mut(app: &mut App) -> Option<&mut SingleLineInput> {
+    match app.modal_field {
+        0 => Some(&mut app.filter_stream_name),
+        i => app.filter_stream_filters.get_mut(i - 1),
+    }
+}
+
 /// Clear the active field of a two-field modal. Keeps Ctrl+U consistent with
 /// the filter bar's "C-u:clear" (TextArea's own Ctrl+U is undo). No-op outside
 /// the input modals.
 pub(crate) fn clear_active_modal_field(app: &mut App) {
-    let field = app.modal_field;
     if is_filter_stream_modal(&app.input_mode) {
-        if field == 0 {
-            app.filter_stream_name.clear();
-        } else if let Some(b) = app.filter_stream_filters.get_mut(field - 1) {
-            b.clear();
+        if let Some(field) = active_filter_stream_field_mut(app) {
+            field.clear();
         }
         return;
     }
+    let field = app.modal_field;
     if let Some((f0, f1)) = modal_fields(app) {
         if field == 0 {
             f0.clear();

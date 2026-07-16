@@ -406,11 +406,9 @@ impl StreamFilter {
     /// already expanded (e.g. the persisted filter carried on a mark-read
     /// request), so it must not be expanded a second time.
     pub fn parse_expanded(input: &str) -> Self {
-        Self::from_groups(
-            split_filter_groups(input)
-                .into_iter()
-                .map(FilterQuery::parse),
-        )
+        // With no `current_user`, `parse` expands nothing (`expand_me(None, _)`
+        // is a no-op), so this is exactly "split and parse each group".
+        Self::parse(input, None)
     }
 
     fn from_groups(groups: impl Iterator<Item = FilterQuery>) -> Self {
