@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use crate::db::CachedItem;
-use crate::filter::FilterQuery;
+use crate::filter::{FilterQuery, StreamFilter};
 use crate::types::{ItemEntry, LeftPaneEntry, UserRef};
 
 /// An item is unread iff its current `updated_at` is newer than the `updated_at`
@@ -205,7 +205,7 @@ pub fn filter_item_indices(
     inline_filter: &str,
     current_user: Option<&str>,
 ) -> Vec<usize> {
-    let stream_q = stream_filter.map(|s| FilterQuery::parse(&expand_me(current_user, s)));
+    let stream_q = stream_filter.map(|s| StreamFilter::parse(s, current_user));
     let inline_q = FilterQuery::parse(&expand_me(current_user, inline_filter));
 
     items
@@ -240,7 +240,7 @@ pub fn compute_unread_counts(
                 })
                 .count(),
             LeftPaneEntry::FilterStream(fs) => {
-                let filter = FilterQuery::parse(&expand_me(current_user, &fs.filter));
+                let filter = StreamFilter::parse(&fs.filter, current_user);
                 items
                     .iter()
                     .filter(|item| {

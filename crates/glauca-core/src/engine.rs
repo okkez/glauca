@@ -2,7 +2,7 @@
 // TUI/GUI 双方から利用する。$EDITOR 起動・端末制御などフロントエンド固有の処理は呼び出し側に残し、
 // ここには pool/gh/mpsc チャネルだけで完結するタスクと、それらが受け渡すメッセージ型を集約する。
 
-use crate::filter::FilterQuery;
+use crate::filter::StreamFilter;
 use crate::logic::{cached_item_to_item_entry, is_item_unread};
 use crate::types::{
     CommentEntry, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
@@ -1512,14 +1512,15 @@ async fn command_loop(
 }
 
 /// Mark every cached item of `query_id` whose fields match `expanded_filter` read.
-/// The filter is parsed application-side (`FilterQuery`) since it is not expressible
-/// in SQL; already-read items are skipped.
+/// The filter is parsed application-side (`StreamFilter`) since it is not expressible
+/// in SQL; already-read items are skipped. `expanded_filter` already has `@me`
+/// substituted, so it is parsed without a second expansion.
 async fn mark_filtered_items_read(
     pool: &SqlitePool,
     query_id: i64,
     expanded_filter: &str,
 ) -> anyhow::Result<()> {
-    let fq = FilterQuery::parse(expanded_filter);
+    let fq = StreamFilter::parse_expanded(expanded_filter);
     for c in db::fetch_items(pool, query_id).await? {
         let item = cached_item_to_item_entry(c);
         if is_item_unread(&item.updated_at, item.last_read_updated_at.as_deref())

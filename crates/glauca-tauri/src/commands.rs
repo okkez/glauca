@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use glauca_core::actions::CustomActions;
 use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
-use glauca_core::filter::FilterQuery;
+use glauca_core::filter::{FilterQuery, StreamFilter};
 use glauca_core::logic::{compute_unread_counts, count_changed, expand_me};
 use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
 use serde::Serialize;
@@ -224,9 +224,7 @@ pub async fn filter_items(
     inline_filter: String,
 ) -> Result<Vec<FilteredItem>, String> {
     let su = state.current_user.as_deref();
-    let stream_q = stream_filter
-        .as_deref()
-        .map(|s| FilterQuery::parse(&expand_me(su, s)));
+    let stream_q = stream_filter.as_deref().map(|s| StreamFilter::parse(s, su));
     let inline_q = FilterQuery::parse(&expand_me(su, &inline_filter));
     Ok(items
         .iter()

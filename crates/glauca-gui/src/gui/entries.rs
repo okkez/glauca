@@ -4,7 +4,7 @@
 use gpui::*;
 
 use glauca_core::engine::EngineCommand;
-use glauca_core::filter::FilterQuery;
+use glauca_core::filter::{FilterQuery, StreamFilter};
 use glauca_core::logic::*;
 use glauca_core::types::*;
 
@@ -160,7 +160,7 @@ impl GlaucaApp {
         let stream_q = self
             .stream_filter
             .as_deref()
-            .map(|s| FilterQuery::parse(&expand_me(self.current_user.as_deref(), s)));
+            .map(|s| StreamFilter::parse(s, self.current_user.as_deref()));
         let inline_q = FilterQuery::parse(&expand_me(self.current_user.as_deref(), &self.filter));
         self.filtered = self
             .items
