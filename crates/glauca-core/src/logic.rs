@@ -159,27 +159,37 @@ pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
 /// Replace `@me` with the authenticated user's login (case-insensitive).
 /// Falls back to `@me` unchanged if the user is not known yet.
 pub fn expand_me<'a>(current_user: Option<&str>, s: &'a str) -> Cow<'a, str> {
-    if let Some(login) = current_user {
-        // Only replace the token `@me` (whole word match within tokens).
-        if s.contains("@me") {
-            return Cow::Owned(
-                s.split_whitespace()
-                    .map(|tok| {
-                        if tok.to_lowercase().ends_with(":@me") {
-                            let prefix = &tok[..tok.len() - 3]; // strip "@me"
-                            format!("{}{}", prefix, login)
-                        } else if tok == "@me" {
-                            login.to_string()
-                        } else {
-                            tok.to_string()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
-        }
+    match current_user {
+        // Only rewrite when `@me` actually appears; otherwise borrow unchanged.
+        Some(login) if s.contains("@me") => Cow::Owned(
+            // Expand per line so newline group separators survive: a filter
+            // stream's `filter` holds one OR-group per line (see
+            // `filter::StreamFilter`), and collapsing `\n` into a space here
+            // would merge the groups into a single AND-group.
+            s.split('\n')
+                .map(|line| expand_me_line(line, login))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => Cow::Borrowed(s),
     }
-    Cow::Borrowed(s)
+}
+
+/// Replace `@me` / `:@me` tokens on a single (newline-free) line with `login`.
+fn expand_me_line(line: &str, login: &str) -> String {
+    line.split_whitespace()
+        .map(|tok| {
+            if tok.to_lowercase().ends_with(":@me") {
+                let prefix = &tok[..tok.len() - 3]; // strip "@me"
+                format!("{prefix}{login}")
+            } else if tok == "@me" {
+                login.to_string()
+            } else {
+                tok.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Filter `items` by an optional stream filter ANDed with the inline filter.
@@ -298,6 +308,21 @@ pub fn move_group_down(entries: &mut Vec<LeftPaneEntry>, query_idx: usize) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_me_preserves_newline_group_separators() {
+        // Filter-stream OR-groups are newline-separated; expanding `@me` must
+        // keep them as separate lines, not merge them into one space-joined line.
+        assert_eq!(
+            expand_me(Some("alice"), "author:@me\nstate:closed"),
+            "author:alice\nstate:closed"
+        );
+        // Multiple lines, mixed tokens.
+        assert_eq!(
+            expand_me(Some("bob"), "assignee:@me label:bug\n@me"),
+            "assignee:bob label:bug\nbob"
+        );
+    }
 
     #[test]
     fn decode_users_parses_new_object_array() {

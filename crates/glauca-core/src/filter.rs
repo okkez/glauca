@@ -558,6 +558,42 @@ mod tests {
     }
 
     #[test]
+    fn mark_read_pipeline_preserves_or_groups_with_at_me() {
+        // Reproduces the mark-all-read pipeline. The callers (TUI run.rs, GUI
+        // entries.rs, Tauri commands.rs) expand `@me` on the WHOLE stored filter
+        // string before sending MarkAllRead; the engine then parses it with
+        // `parse_expanded`. Because `expand_me` collapses whitespace (including
+        // the '\n' group separators), a multi-group filter that mentions `@me`
+        // loses its group boundaries, so the marked set becomes the intersection
+        // instead of the union the list displays.
+        let raw = "author:@me\nstate:closed";
+        let user = Some("alice");
+
+        // What the item list / unread counts use: OR of per-group parses.
+        let shown = StreamFilter::parse(raw, user);
+        // What mark-all-read uses: expand_me on the whole string, then parse_expanded.
+        let expanded = crate::logic::expand_me(user, raw).into_owned();
+        let marked = StreamFilter::parse_expanded(&expanded);
+
+        let alice_open = item("PR", "alice", "open", &[], "o/r");
+        let bob_closed = item("PR", "bob", "closed", &[], "o/r");
+
+        // The list shows both (union of the two OR-groups).
+        assert!(shown.matches(&alice_open));
+        assert!(shown.matches(&bob_closed));
+
+        // Mark-all-read must mark the same set the list shows.
+        assert!(
+            marked.matches(&alice_open),
+            "alice's open PR is shown but would not be marked read"
+        );
+        assert!(
+            marked.matches(&bob_closed),
+            "bob's closed PR is shown but would not be marked read"
+        );
+    }
+
+    #[test]
     fn filter_group_round_trip() {
         assert_eq!(split_filter_groups("a\nb"), vec!["a", "b"]);
         assert_eq!(split_filter_groups(""), vec![""]); // one empty box
