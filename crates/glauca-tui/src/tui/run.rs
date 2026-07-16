@@ -197,12 +197,14 @@ where
                                 .await;
                         }
                         Action::SaveNewFilterStream => {
-                            let name = app.new_filter_stream_name.value().trim().to_string();
-                            let filter =
-                                app.new_filter_stream_filter.value().trim().to_string();
+                            let name = app.filter_stream_name.value().trim().to_string();
+                            // Join the OR-group boxes into the stored newline-separated
+                            // string (blank boxes dropped); see StreamFilter.
+                            let filter = glauca_core::filter::join_filter_groups(
+                                app.filter_stream_filters.iter().map(|b| b.value()),
+                            );
                             app.input_mode = InputMode::Normal;
-                            app.new_filter_stream_name = SingleLineInput::new();
-                            app.new_filter_stream_filter = SingleLineInput::new();
+                            keys::reset_filter_stream_modal(&mut app);
 
                             // Determine parent: root_query_id of the currently selected entry
                             if let Some(entry) = app.entries.get(app.entry_cursor) {
@@ -219,11 +221,12 @@ where
                             }
                         }
                         Action::SaveEditFilterStream => {
-                            let name = app.edit_input.value().trim().to_string();
-                            let filter = app.edit_input2.value().trim().to_string();
+                            let name = app.filter_stream_name.value().trim().to_string();
+                            let filter = glauca_core::filter::join_filter_groups(
+                                app.filter_stream_filters.iter().map(|b| b.value()),
+                            );
                             app.input_mode = InputMode::Normal;
-                            app.edit_input = SingleLineInput::new();
-                            app.edit_input2 = SingleLineInput::new();
+                            keys::reset_filter_stream_modal(&mut app);
 
                             if let Some(LeftPaneEntry::FilterStream(fs)) =
                                 app.entries.get(app.entry_cursor)

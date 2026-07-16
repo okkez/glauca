@@ -11,13 +11,9 @@ use super::*;
 pub(crate) fn modal_fields(app: &mut App) -> Option<(&mut SingleLineInput, &mut SingleLineInput)> {
     match app.input_mode {
         InputMode::NewQuery => Some((&mut app.new_query_name, &mut app.new_query_input)),
-        InputMode::NewFilterStream => Some((
-            &mut app.new_filter_stream_name,
-            &mut app.new_filter_stream_filter,
-        )),
-        InputMode::EditQuery | InputMode::EditFilterStream => {
-            Some((&mut app.edit_input, &mut app.edit_input2))
-        }
+        InputMode::EditQuery => Some((&mut app.edit_input, &mut app.edit_input2)),
+        // Filter-stream modals have a variable field count (name + N boxes) and
+        // are handled by the filter-stream-specific helpers, not this pair.
         _ => None,
     }
 }
@@ -27,20 +23,33 @@ pub(crate) fn modal_fields(app: &mut App) -> Option<(&mut SingleLineInput, &mut 
 pub(crate) fn modal_fields_ref(app: &App) -> Option<(&SingleLineInput, &SingleLineInput)> {
     match app.input_mode {
         InputMode::NewQuery => Some((&app.new_query_name, &app.new_query_input)),
-        InputMode::NewFilterStream => {
-            Some((&app.new_filter_stream_name, &app.new_filter_stream_filter))
-        }
-        InputMode::EditQuery | InputMode::EditFilterStream => {
-            Some((&app.edit_input, &app.edit_input2))
-        }
+        InputMode::EditQuery => Some((&app.edit_input, &app.edit_input2)),
         _ => None,
     }
+}
+
+/// Whether `mode` is a filter-stream create/edit modal (name + N OR-group
+/// boxes). These use `App::filter_stream_name` / `filter_stream_filters` with a
+/// variable field count, distinct from the fixed 2-field query modals.
+pub(crate) fn is_filter_stream_modal(mode: &InputMode) -> bool {
+    matches!(
+        mode,
+        InputMode::NewFilterStream | InputMode::EditFilterStream
+    )
 }
 
 /// Show the blinking text cursor only on the active field of a two-field modal
 /// (the inactive field's cursor is hidden). No-op outside the input modals.
 pub(crate) fn sync_modal_cursors(app: &mut App) {
     let field = app.modal_field;
+    if is_filter_stream_modal(&app.input_mode) {
+        // field 0 = name; field i>=1 = box i-1.
+        app.filter_stream_name.set_active(field == 0);
+        for (i, b) in app.filter_stream_filters.iter_mut().enumerate() {
+            b.set_active(field == i + 1);
+        }
+        return;
+    }
     let Some((f0, f1)) = modal_fields(app) else {
         return;
     };
@@ -53,6 +62,14 @@ pub(crate) fn sync_modal_cursors(app: &mut App) {
 /// the input modals.
 pub(crate) fn clear_active_modal_field(app: &mut App) {
     let field = app.modal_field;
+    if is_filter_stream_modal(&app.input_mode) {
+        if field == 0 {
+            app.filter_stream_name.clear();
+        } else if let Some(b) = app.filter_stream_filters.get_mut(field - 1) {
+            b.clear();
+        }
+        return;
+    }
     if let Some((f0, f1)) = modal_fields(app) {
         if field == 0 {
             f0.clear();
@@ -81,8 +98,8 @@ impl App {
             stream_filter: None,
             new_query_input: SingleLineInput::new(),
             new_query_name: SingleLineInput::new(),
-            new_filter_stream_name: SingleLineInput::new(),
-            new_filter_stream_filter: SingleLineInput::new(),
+            filter_stream_name: SingleLineInput::new(),
+            filter_stream_filters: vec![SingleLineInput::new()],
             edit_input: SingleLineInput::new(),
             edit_input2: SingleLineInput::new(),
             modal_field: 0,
@@ -527,7 +544,7 @@ mod tests {
     #[test]
     fn sync_modal_cursors_shows_only_active_field() {
         let mut app = App::new(vec![]);
-        app.input_mode = InputMode::EditFilterStream;
+        app.input_mode = InputMode::EditQuery;
         app.modal_field = 1;
         sync_modal_cursors(&mut app);
         assert!(!app.edit_input.is_active());
@@ -537,6 +554,26 @@ mod tests {
         sync_modal_cursors(&mut app);
         assert!(app.edit_input.is_active());
         assert!(!app.edit_input2.is_active());
+    }
+
+    #[test]
+    fn sync_modal_cursors_tracks_active_filter_stream_box() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewFilterStream;
+        app.filter_stream_filters = vec![SingleLineInput::new(), SingleLineInput::new()];
+
+        // field 0 = name
+        app.modal_field = 0;
+        sync_modal_cursors(&mut app);
+        assert!(app.filter_stream_name.is_active());
+        assert!(!app.filter_stream_filters[0].is_active());
+
+        // field 2 = second box
+        app.modal_field = 2;
+        sync_modal_cursors(&mut app);
+        assert!(!app.filter_stream_name.is_active());
+        assert!(!app.filter_stream_filters[0].is_active());
+        assert!(app.filter_stream_filters[1].is_active());
     }
 
     #[test]
