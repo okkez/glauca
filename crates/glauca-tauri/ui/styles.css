@@ -437,3 +437,39 @@ ul { list-style: none; margin: 0; padding: 0; }
   cursor: pointer;
 }
 .modal-actions button:hover { border-color: var(--link); }
+
+/* Filter-stream OR-group boxes (multiple filters ORed together). */
+.filter-boxes { display: flex; flex-direction: column; gap: 4px; }
+.filter-row { display: flex; align-items: center; gap: 6px; }
+.filter-row .modal-input { flex: 1; }
+.filter-or {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding-left: 2px;
+}
+.filter-remove {
+  flex: 0 0 auto;
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  line-height: 1;
+}
+.filter-remove:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+.filter-remove:disabled { opacity: 0.4; cursor: default; }
+.filter-add {
+  align-self: flex-start;
+  margin-top: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.filter-add:hover { border-color: var(--link); }
