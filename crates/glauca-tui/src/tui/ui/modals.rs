@@ -54,6 +54,19 @@ fn draw_two_field_modal(
 /// title, border color and field labels are selected per `input_mode`; the two
 /// `TextArea` fields come from `modal_fields_ref`. No-op outside those modals.
 pub(super) fn draw_modal(f: &mut Frame, app: &App, area: Rect) {
+    // Filter-stream modals have a variable field count (name + N OR-group
+    // boxes) and get their own renderer.
+    match app.input_mode {
+        InputMode::NewFilterStream => {
+            draw_filter_stream_modal(f, app, area, " New Filter Stream ", Color::Magenta);
+            return;
+        }
+        InputMode::EditFilterStream => {
+            draw_filter_stream_modal(f, app, area, " Edit Filter Stream ", Color::Cyan);
+            return;
+        }
+        _ => {}
+    }
     let (title, color, labels): (&str, Color, [&str; 2]) = match app.input_mode {
         InputMode::NewQuery => (
             " New Query ",
@@ -63,28 +76,12 @@ pub(super) fn draw_modal(f: &mut Frame, app: &App, area: Rect) {
                 "GitHub search query (e.g. repo:owner/name is:pr is:open):",
             ],
         ),
-        InputMode::NewFilterStream => (
-            " New Filter Stream ",
-            Color::Magenta,
-            [
-                "Display name:",
-                "Filter (e.g. is:pr is:draft assignee:name label:bug):",
-            ],
-        ),
         InputMode::EditQuery => (
             " Edit Query ",
             Color::Cyan,
             [
                 "Display name (empty = use query string as label):",
                 "GitHub search query:",
-            ],
-        ),
-        InputMode::EditFilterStream => (
-            " Edit Filter Stream ",
-            Color::Cyan,
-            [
-                "Display name:",
-                "Filter (e.g. is:pr assignee:name milestone:v2 repo:owner/name):",
             ],
         ),
         _ => return,
@@ -99,6 +96,64 @@ pub(super) fn draw_modal(f: &mut Frame, app: &App, area: Rect) {
         color,
         [(labels[0], f0), (labels[1], f1)],
         app.modal_field,
+    );
+}
+
+/// Draw the filter-stream create/edit modal: a name field plus one or more
+/// OR-group filter boxes. Each box is one AND-group; an item matches when it
+/// matches any box (see `glauca_core::filter::StreamFilter`). The active field
+/// (`app.modal_field`: 0 = name, i>=1 = box i-1) is tinted and shows the cursor.
+fn draw_filter_stream_modal(f: &mut Frame, app: &App, area: Rect, title: &str, color: Color) {
+    let boxes = &app.filter_stream_filters;
+    // Rows: name label + name input + (label + input) per box + one hint row.
+    let content_lines = 2 + boxes.len() * 2 + 1;
+    let popup_area = centered_rect(60, content_lines as u16 + 2, area);
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color));
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(1); content_lines])
+        .split(inner);
+
+    let active = app.modal_field;
+    let style_for = |is_active: bool| {
+        if is_active {
+            Style::default().fg(color)
+        } else {
+            Style::default().fg(Color::Gray)
+        }
+    };
+
+    // Name field (field 0).
+    let name_style = style_for(active == 0);
+    f.render_widget(Paragraph::new("Display name:").style(name_style), split[0]);
+    draw_prompted_field(f, split[1], "> ", name_style, &app.filter_stream_name);
+
+    // OR-group boxes (fields 1..=N).
+    let mut row = 2;
+    for (i, b) in boxes.iter().enumerate() {
+        let s = style_for(active == i + 1);
+        let label = if i == 0 {
+            "Filter (item matches ANY box below):"
+        } else {
+            "OR:"
+        };
+        f.render_widget(Paragraph::new(label).style(s), split[row]);
+        draw_prompted_field(f, split[row + 1], "> ", s, b);
+        row += 2;
+    }
+
+    f.render_widget(
+        Paragraph::new("Tab:switch  C-n:add box  C-x:del box  C-u:clear  Enter:save  Esc:cancel")
+            .style(Style::default().fg(Color::Gray)),
+        split[row],
     );
 }
 

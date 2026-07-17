@@ -133,6 +133,7 @@ impl GlaucaApp {
             menu_pos: point(px(0.), px(0.)),
             last_pointer: point(px(0.), px(0.)),
             review_action: ReviewEvent::Approve,
+            filter_stream_form: None,
             filter_input,
             filter_task: None,
             notif_tracker: ItemTracker::new(),

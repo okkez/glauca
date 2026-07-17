@@ -343,6 +343,115 @@ async function promptModal(label, def = "") {
   return out ? out.value : null;
 }
 
+// Group separator inside a stored filter-stream filter. Mirrors the Rust
+// `glauca_core::filter::FILTER_GROUP_SEP` — this is a cross-language contract
+// (the backend splits/joins on the same char), so keep the two in sync.
+const FILTER_GROUP_SEP = "\n";
+
+// Split a stored filter-stream filter into its OR-group boxes (one group per
+// separator; see glauca_core::filter::StreamFilter). Always yields at least one box.
+function splitFilterGroups(s) {
+  return (s || "").split(FILTER_GROUP_SEP);
+}
+
+// Filter-stream create/edit modal: a name field plus one or more OR-group boxes
+// (each box is one AND-group; the boxes are ORed, mirroring the TUI). Add/remove
+// boxes with the buttons. Resolves { name, filter } with `filter` as the
+// newline-joined non-blank groups, or null on cancel.
+function filterStreamModal(title, initName, initFilters) {
+  return new Promise((resolve) => {
+    const overlay = el("div", { class: "modal-overlay" });
+    const finish = (val) => {
+      overlay.remove();
+      resolve(val);
+    };
+
+    const onKey = (ev) => {
+      if (ev.key === "Enter") submit();
+      else if (ev.key === "Escape") finish(null);
+    };
+
+    const nameInput = el("input", { class: "modal-input" });
+    nameInput.type = "text";
+    nameInput.value = initName || "";
+    nameInput.placeholder = "Name";
+    nameInput.addEventListener("keydown", onKey);
+
+    // Live <input> elements, reused across rebuilds so their values survive.
+    const makeBox = (v) => {
+      const inp = el("input", { class: "modal-input" });
+      inp.type = "text";
+      inp.value = v || "";
+      inp.placeholder = "e.g. is:pr is:draft assignee:name";
+      inp.addEventListener("keydown", onKey);
+      return inp;
+    };
+    let boxes = (initFilters && initFilters.length ? initFilters : [""]).map(makeBox);
+
+    const filtersWrap = el("div", { class: "filter-boxes" });
+    const rebuild = () => {
+      filtersWrap.textContent = "";
+      boxes.forEach((box, i) => {
+        if (i > 0) filtersWrap.appendChild(el("div", { class: "filter-or", text: "OR" }));
+        const remove = el("button", {
+          class: "filter-remove",
+          text: "✕",
+          // Disabled when it's the only box, so the click can't drop below one.
+          onclick: () => {
+            boxes.splice(i, 1);
+            rebuild();
+            boxes[Math.min(i, boxes.length - 1)].focus();
+          },
+        });
+        remove.type = "button";
+        remove.disabled = boxes.length === 1;
+        filtersWrap.appendChild(el("div", { class: "filter-row" }, [box, remove]));
+      });
+    };
+
+    const addBox = () => {
+      const b = makeBox("");
+      boxes.push(b);
+      rebuild();
+      b.focus();
+    };
+
+    const submit = () => {
+      const name = nameInput.value.trim();
+      const groups = boxes.map((b) => b.value.trim()).filter((v) => v);
+      if (!name) {
+        nameInput.focus();
+        return;
+      }
+      if (!groups.length) {
+        boxes[0].focus();
+        return;
+      }
+      finish({ name, filter: groups.join(FILTER_GROUP_SEP) });
+    };
+
+    const addBtn = el("button", { class: "filter-add", text: "+ Add OR box", onclick: addBox });
+    addBtn.type = "button";
+    const ok = el("button", { text: "OK", onclick: submit });
+    const cancel = el("button", { text: "Cancel", onclick: () => finish(null) });
+
+    rebuild();
+    overlay.appendChild(
+      el("div", { class: "modal-box" }, [
+        el("div", { class: "modal-title", text: title }),
+        el("div", { class: "modal-label", text: "Name" }),
+        nameInput,
+        el("div", { class: "modal-label", text: "Filters (item matches ANY box)" }),
+        filtersWrap,
+        addBtn,
+        el("div", { class: "modal-actions" }, [cancel, ok]),
+      ])
+    );
+    document.body.appendChild(overlay);
+    nameInput.focus();
+  });
+}
+
 // Yes/No confirmation modal. Resolves true if confirmed, false otherwise.
 function confirmModal(message) {
   return new Promise((resolve) => {
@@ -1285,18 +1394,12 @@ async function editQuery(e) {
 }
 
 async function newFilterStream(parent) {
-  const out = await formModal(`New filter stream under "${parent.label}"`, [
-    { key: "name", label: "Name", required: true },
-    { key: "filter", label: "Filter (e.g. state:open label:bug)", required: true },
-  ]);
+  const out = await filterStreamModal(`New filter stream under "${parent.label}"`, "", [""]);
   if (out) call("add_filter_stream", { parentId: parent.rootQueryId, kind: parent.kind, name: out.name, filter: out.filter });
 }
 
 async function editFilterStream(e) {
-  const out = await formModal("Edit filter stream", [
-    { key: "name", label: "Name", value: e.label, required: true },
-    { key: "filter", label: "Filter", value: e.streamFilter, required: true },
-  ]);
+  const out = await filterStreamModal("Edit filter stream", e.label, splitFilterGroups(e.streamFilter));
   if (out) call("edit_filter_stream", { id: e.id, name: out.name, filter: out.filter });
 }
 

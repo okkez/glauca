@@ -39,7 +39,8 @@ use select::{
 };
 use single_line_input::SingleLineInput;
 pub(crate) use state::{
-    clear_active_modal_field, modal_fields, modal_fields_ref, sync_modal_cursors,
+    active_filter_stream_field_mut, clear_active_modal_field, modal_fields, modal_fields_ref,
+    sync_modal_cursors,
 };
 
 use glauca_core::actions::{CustomAction, CustomActions};
@@ -131,13 +132,19 @@ pub struct App {
 
     pub new_query_input: SingleLineInput,
     pub new_query_name: SingleLineInput,
-    pub new_filter_stream_name: SingleLineInput,
-    pub new_filter_stream_filter: SingleLineInput,
-    /// Input buffer reused for edit modals (display name or step-1 field).
+    /// Name field of the filter-stream create/edit modal (shared by new & edit).
+    pub filter_stream_name: SingleLineInput,
+    /// Filter-stream OR-group boxes: each box is one AND-group, the boxes are
+    /// ORed (see `glauca_core::filter::StreamFilter`). Always at least one box.
+    /// Shared by the new & edit filter-stream modals.
+    pub filter_stream_filters: Vec<SingleLineInput>,
+    /// Display-name buffer for the Edit Query modal (field 0).
     pub edit_input: SingleLineInput,
-    /// Second input buffer for edit modals (query string or filter string).
+    /// Search-query buffer for the Edit Query modal (field 1).
     pub edit_input2: SingleLineInput,
-    /// Which field (0 or 1) is active in a 2-field modal.
+    /// Active field in a modal. For the 2-field query modals: 0 or 1. For the
+    /// filter-stream modals: 0 = name, 1..=N = the N-th `filter_stream_filters`
+    /// box (index `modal_field - 1`).
     pub modal_field: usize,
     pub action_cursor: usize,
     pub merge_strategy_cursor: usize,

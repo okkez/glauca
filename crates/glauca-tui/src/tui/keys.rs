@@ -10,9 +10,13 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     match app.input_mode {
         InputMode::Filter => handle_key_filter(app, key),
         InputMode::NewQuery => handle_key_new_query(app, key),
-        InputMode::NewFilterStream => handle_key_new_filter_stream(app, key),
+        InputMode::NewFilterStream => {
+            handle_key_filter_stream_modal(app, key, Action::SaveNewFilterStream)
+        }
         InputMode::EditQuery => handle_key_edit_query(app, key),
-        InputMode::EditFilterStream => handle_key_edit_filter_stream(app, key),
+        InputMode::EditFilterStream => {
+            handle_key_filter_stream_modal(app, key, Action::SaveEditFilterStream)
+        }
         InputMode::ActionMenu => handle_key_action_menu(app, key),
         InputMode::CustomActionMenu => handle_key_custom_action_menu(app, key),
         InputMode::MergeMenu => handle_key_merge_menu(app, key),
@@ -107,8 +111,7 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char('f') if app.focus == Focus::QueryList && !app.entries.is_empty() => {
             app.input_mode = InputMode::NewFilterStream;
             app.modal_field = 0;
-            app.new_filter_stream_name = SingleLineInput::new();
-            app.new_filter_stream_filter = SingleLineInput::new();
+            reset_filter_stream_modal(app);
         }
         // Edit selected entry (left pane)
         KeyCode::Char('e') if app.focus == Focus::QueryList => {
@@ -121,8 +124,17 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                         app.input_mode = InputMode::EditQuery;
                     }
                     LeftPaneEntry::FilterStream(fs) => {
-                        app.edit_input = SingleLineInput::from_text(fs.name.clone());
-                        app.edit_input2 = SingleLineInput::from_text(fs.filter.clone());
+                        app.filter_stream_name = SingleLineInput::from_text(fs.name.clone());
+                        // One box per stored OR-group (newline-separated); always
+                        // at least one, so an empty filter still shows one box.
+                        app.filter_stream_filters =
+                            glauca_core::filter::split_filter_groups(&fs.filter)
+                                .into_iter()
+                                .map(|g| SingleLineInput::from_text(g.to_string()))
+                                .collect();
+                        if app.filter_stream_filters.is_empty() {
+                            app.filter_stream_filters.push(SingleLineInput::new());
+                        }
                         app.modal_field = 0;
                         app.input_mode = InputMode::EditFilterStream;
                     }
@@ -459,19 +471,6 @@ fn handle_two_field_modal(
     Action::None
 }
 
-/// Enter policy for the filter-stream modals: save when both fields are
-/// non-empty, otherwise focus the empty one.
-fn both_required(name: &str, filter: &str, save: Action) -> EnterOutcome {
-    let name_present = !name.trim().is_empty();
-    let filter_present = !filter.trim().is_empty();
-    if name_present && filter_present {
-        EnterOutcome::Save(save)
-    } else {
-        // Focus the first empty field.
-        EnterOutcome::Focus(if name_present { 1 } else { 0 })
-    }
-}
-
 fn handle_key_new_query(app: &mut App, key: KeyEvent) -> Action {
     // field 0 = display name (optional), field 1 = GitHub search query
     handle_two_field_modal(app, key, |_name, query, field| {
@@ -496,18 +495,73 @@ fn handle_key_edit_query(app: &mut App, key: KeyEvent) -> Action {
     })
 }
 
-fn handle_key_new_filter_stream(app: &mut App, key: KeyEvent) -> Action {
-    // field 0 = name, field 1 = filter (both required)
-    handle_two_field_modal(app, key, |name, filter, _field| {
-        both_required(name, filter, Action::SaveNewFilterStream)
-    })
+/// Reset the filter-stream modal buffers to a single empty box. Used on Esc and
+/// after a successful save.
+pub(crate) fn reset_filter_stream_modal(app: &mut App) {
+    app.filter_stream_name = SingleLineInput::new();
+    app.filter_stream_filters = vec![SingleLineInput::new()];
 }
 
-fn handle_key_edit_filter_stream(app: &mut App, key: KeyEvent) -> Action {
-    // field 0 = name, field 1 = filter (both required)
-    handle_two_field_modal(app, key, |name, filter, _field| {
-        both_required(name, filter, Action::SaveEditFilterStream)
-    })
+/// Key handling for the filter-stream create/edit modals: a name field (field 0)
+/// plus one or more OR-group filter boxes (fields 1..=N). Tab cycles through
+/// name → each box → name; Ctrl+N inserts an empty box after the active one (or
+/// after the last box when on the name field) and focuses it; Ctrl+X removes the
+/// active box (keeping at least one); Ctrl+U clears the active field. Enter saves
+/// when the name and at least one box are non-empty, otherwise focuses the first
+/// field that still needs input. `save` is the action returned on save.
+fn handle_key_filter_stream_modal(app: &mut App, key: KeyEvent, save: Action) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            reset_filter_stream_modal(app);
+            app.input_mode = InputMode::Normal;
+            app.modal_field = 0;
+        }
+        KeyCode::Tab => {
+            let field_count = 1 + app.filter_stream_filters.len();
+            app.modal_field = (app.modal_field + 1) % field_count;
+        }
+        // Clear the active field (TextArea's own Ctrl+U is undo).
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            clear_active_modal_field(app);
+        }
+        // Add an OR-group box after the active one and focus it.
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let at = if app.modal_field == 0 {
+                app.filter_stream_filters.len()
+            } else {
+                app.modal_field
+            };
+            app.filter_stream_filters.insert(at, SingleLineInput::new());
+            app.modal_field = at + 1;
+        }
+        // Remove the active OR-group box; keep at least one, no-op on the name field.
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.modal_field >= 1 && app.filter_stream_filters.len() > 1 {
+                app.filter_stream_filters.remove(app.modal_field - 1);
+                // Clamp focus onto a box that still exists.
+                app.modal_field = app.modal_field.min(app.filter_stream_filters.len());
+            }
+        }
+        KeyCode::Enter => {
+            let name_present = !app.filter_stream_name.value().trim().is_empty();
+            let has_nonempty_box = app
+                .filter_stream_filters
+                .iter()
+                .any(|b| !b.value().trim().is_empty());
+            match (name_present, has_nonempty_box) {
+                (true, true) => return save,
+                (false, _) => app.modal_field = 0,    // focus name
+                (true, false) => app.modal_field = 1, // focus first box
+            }
+        }
+        // Text/edit keys go to the active field; SingleLineInput drops newlines.
+        _ => {
+            if let Some(field) = active_filter_stream_field_mut(app) {
+                field.input(key);
+            }
+        }
+    }
+    Action::None
 }
 
 #[cfg(test)]
@@ -788,32 +842,132 @@ mod tests {
     fn new_filter_stream_enter_saves_when_both_filled() {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::NewFilterStream;
-        app.new_filter_stream_name = ta("Drafts");
-        app.new_filter_stream_filter = ta("is:draft");
-        let action = handle_key_new_filter_stream(&mut app, make_key(KeyCode::Enter));
+        app.filter_stream_name = ta("Drafts");
+        app.filter_stream_filters = vec![ta("is:draft")];
+        let action = handle_key_filter_stream_modal(
+            &mut app,
+            make_key(KeyCode::Enter),
+            Action::SaveNewFilterStream,
+        );
         assert!(matches!(action, Action::SaveNewFilterStream));
     }
 
     #[test]
-    fn new_filter_stream_enter_focuses_empty_field() {
+    fn new_filter_stream_enter_focuses_empty_name() {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::NewFilterStream;
         app.modal_field = 1;
-        app.new_filter_stream_name = SingleLineInput::new(); // name empty
-        app.new_filter_stream_filter = ta("is:draft");
-        let action = handle_key_new_filter_stream(&mut app, make_key(KeyCode::Enter));
+        app.filter_stream_name = SingleLineInput::new(); // name empty
+        app.filter_stream_filters = vec![ta("is:draft")];
+        let action = handle_key_filter_stream_modal(
+            &mut app,
+            make_key(KeyCode::Enter),
+            Action::SaveNewFilterStream,
+        );
         assert!(matches!(action, Action::None));
         assert_eq!(app.modal_field, 0); // jumps to the empty name field
+    }
+
+    #[test]
+    fn filter_stream_enter_focuses_first_box_when_all_boxes_empty() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewFilterStream;
+        app.modal_field = 0;
+        app.filter_stream_name = ta("Drafts");
+        app.filter_stream_filters = vec![SingleLineInput::new(), SingleLineInput::new()];
+        let action = handle_key_filter_stream_modal(
+            &mut app,
+            make_key(KeyCode::Enter),
+            Action::SaveNewFilterStream,
+        );
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.modal_field, 1); // jumps to the first box
     }
 
     #[test]
     fn edit_filter_stream_enter_saves_when_both_filled() {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::EditFilterStream;
-        app.edit_input = ta("Drafts");
-        app.edit_input2 = ta("is:draft");
-        let action = handle_key_edit_filter_stream(&mut app, make_key(KeyCode::Enter));
+        app.filter_stream_name = ta("Drafts");
+        app.filter_stream_filters = vec![ta("is:draft")];
+        let action = handle_key_filter_stream_modal(
+            &mut app,
+            make_key(KeyCode::Enter),
+            Action::SaveEditFilterStream,
+        );
         assert!(matches!(action, Action::SaveEditFilterStream));
+    }
+
+    #[test]
+    fn filter_stream_ctrl_n_adds_box_after_active_and_focuses_it() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewFilterStream;
+        app.filter_stream_name = ta("Name");
+        app.filter_stream_filters = vec![ta("a"), ta("b")];
+        app.modal_field = 1; // on the first box
+        handle_key_filter_stream_modal(
+            &mut app,
+            make_ctrl_key(KeyCode::Char('n')),
+            Action::SaveNewFilterStream,
+        );
+        // New empty box inserted right after box 0, and focused.
+        assert_eq!(app.filter_stream_filters.len(), 3);
+        assert_eq!(app.modal_field, 2);
+        assert!(app.filter_stream_filters[1].is_empty());
+        assert_eq!(app.filter_stream_filters[2].value(), "b");
+    }
+
+    #[test]
+    fn filter_stream_ctrl_n_on_name_appends_box() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewFilterStream;
+        app.filter_stream_filters = vec![ta("a")];
+        app.modal_field = 0; // on the name field
+        handle_key_filter_stream_modal(
+            &mut app,
+            make_ctrl_key(KeyCode::Char('n')),
+            Action::SaveNewFilterStream,
+        );
+        assert_eq!(app.filter_stream_filters.len(), 2);
+        assert_eq!(app.modal_field, 2); // focus the appended box
+    }
+
+    #[test]
+    fn filter_stream_ctrl_x_removes_active_box_but_keeps_one() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewFilterStream;
+        app.filter_stream_filters = vec![ta("a"), ta("b")];
+        app.modal_field = 1; // remove box 0
+        handle_key_filter_stream_modal(
+            &mut app,
+            make_ctrl_key(KeyCode::Char('x')),
+            Action::SaveNewFilterStream,
+        );
+        assert_eq!(app.filter_stream_filters.len(), 1);
+        assert_eq!(app.filter_stream_filters[0].value(), "b");
+        // With a single box left, Ctrl+X is a no-op.
+        handle_key_filter_stream_modal(
+            &mut app,
+            make_ctrl_key(KeyCode::Char('x')),
+            Action::SaveNewFilterStream,
+        );
+        assert_eq!(app.filter_stream_filters.len(), 1);
+    }
+
+    #[test]
+    fn filter_stream_tab_cycles_name_and_boxes() {
+        let mut app = App::new(vec![]);
+        app.input_mode = InputMode::NewFilterStream;
+        app.filter_stream_filters = vec![ta("a"), ta("b")]; // fields 1, 2 (+ name 0)
+        app.modal_field = 0;
+        for expected in [1, 2, 0] {
+            handle_key_filter_stream_modal(
+                &mut app,
+                make_key(KeyCode::Tab),
+                Action::SaveNewFilterStream,
+            );
+            assert_eq!(app.modal_field, expected);
+        }
     }
 
     #[test]
@@ -829,15 +983,50 @@ mod tests {
     }
 
     #[test]
-    fn edit_filter_stream_forwards_edit_to_active_field() {
+    fn edit_filter_stream_loads_groups_into_boxes_and_round_trips() {
+        use glauca_core::types::FilterStreamEntry;
+        let mut app = App::new(vec![]);
+        app.entries = vec![LeftPaneEntry::FilterStream(FilterStreamEntry {
+            id: 1,
+            parent_id: 1,
+            name: "Mine".into(),
+            filter: "is:pr label:bug\nis:issue author:me".into(),
+            kind: "pull_request".into(),
+        })];
+        app.entry_cursor = 0;
+        app.focus = Focus::QueryList;
+
+        handle_key(&mut app, make_key(KeyCode::Char('e')));
+        assert_eq!(app.input_mode, InputMode::EditFilterStream);
+        assert_eq!(app.filter_stream_name.value(), "Mine");
+        let vals: Vec<&str> = app
+            .filter_stream_filters
+            .iter()
+            .map(|b| b.value())
+            .collect();
+        assert_eq!(vals, vec!["is:pr label:bug", "is:issue author:me"]);
+
+        // Joining the boxes back reproduces the stored newline-separated string.
+        let joined = glauca_core::filter::join_filter_groups(
+            app.filter_stream_filters.iter().map(|b| b.value()),
+        );
+        assert_eq!(joined, "is:pr label:bug\nis:issue author:me");
+    }
+
+    #[test]
+    fn filter_stream_forwards_edit_to_active_box() {
         let mut app = App::new(vec![]);
         app.input_mode = InputMode::EditFilterStream;
         app.modal_field = 1;
-        app.edit_input = ta("name");
-        app.edit_input2 = ta("is:pr");
-        handle_key_edit_filter_stream(&mut app, make_key(KeyCode::Char('x')));
-        assert_eq!(app.edit_input2.value(), "is:prx");
-        assert_eq!(app.edit_input.value(), "name"); // other field untouched
+        app.filter_stream_name = ta("name");
+        app.filter_stream_filters = vec![ta("is:pr")];
+        handle_key_filter_stream_modal(
+            &mut app,
+            make_key(KeyCode::Char('x')),
+            Action::SaveEditFilterStream,
+        );
+        assert_eq!(app.filter_stream_filters[0].value(), "is:prx");
+        assert_eq!(app.filter_stream_name.value(), "name"); // name untouched
     }
 
     #[test]

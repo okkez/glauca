@@ -341,6 +341,93 @@ impl FilterQuery {
     }
 }
 
+/// Separator between OR-groups within a single stored filter-stream string.
+///
+/// A filter stream's `filter` is one AND-group per line; the groups are ORed
+/// (see [`StreamFilter`]). A newline can never appear inside a single group —
+/// every frontend's filter input is single-line — so legacy single-group
+/// filters (no newline) read back as exactly one group with no migration.
+pub const FILTER_GROUP_SEP: char = '\n';
+
+/// Split a stored filter-stream string into its raw OR-group segments,
+/// preserving empty segments. The form layer uses this to map the stored
+/// string back onto one input box per group (an empty string yields one empty
+/// box). Matching drops empty groups; see [`StreamFilter::parse`].
+pub fn split_filter_groups(s: &str) -> Vec<&str> {
+    s.split(FILTER_GROUP_SEP).collect()
+}
+
+/// Join box values into a stored filter-stream string, dropping blank groups
+/// and trimming each. The inverse of [`split_filter_groups`] for the round trip
+/// through the create/edit form.
+pub fn join_filter_groups<I, S>(groups: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = String::new();
+    for group in groups {
+        let group = group.as_ref().trim();
+        if group.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(FILTER_GROUP_SEP);
+        }
+        out.push_str(group);
+    }
+    out
+}
+
+/// A filter-stream filter: an OR of AND-groups ([`FilterQuery`]).
+///
+/// The stored string holds one group per line (see [`FILTER_GROUP_SEP`]); an
+/// item matches when it matches **any** group. Blank groups are dropped, and a
+/// filter with no non-blank group matches everything (same as an empty
+/// [`FilterQuery`] on the stream side previously).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct StreamFilter {
+    groups: Vec<FilterQuery>,
+}
+
+impl StreamFilter {
+    /// Parse a stored filter into its OR-groups, expanding `@me` (against
+    /// `current_user`) within each group. Splitting into groups first keeps each
+    /// group an independent AND-group; blank groups are dropped by `from_groups`.
+    pub fn parse(input: &str, current_user: Option<&str>) -> Self {
+        Self::from_groups(
+            split_filter_groups(input)
+                .into_iter()
+                .map(|g| FilterQuery::parse(&crate::logic::expand_me(current_user, g))),
+        )
+    }
+
+    /// Like [`StreamFilter::parse`], but for a string whose `@me` tokens are
+    /// already expanded (e.g. the persisted filter carried on a mark-read
+    /// request), so it must not be expanded a second time.
+    pub fn parse_expanded(input: &str) -> Self {
+        // With no `current_user`, `parse` expands nothing (`expand_me(None, _)`
+        // is a no-op), so this is exactly "split and parse each group".
+        Self::parse(input, None)
+    }
+
+    fn from_groups(groups: impl Iterator<Item = FilterQuery>) -> Self {
+        StreamFilter {
+            groups: groups.filter(|q| !q.is_empty()).collect(),
+        }
+    }
+
+    /// `true` when there is no constraining group (matches everything).
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    /// `true` when `item` matches any group (OR), or there is no group.
+    pub fn matches(&self, item: &ItemEntry) -> bool {
+        self.groups.is_empty() || self.groups.iter().any(|g| g.matches(item))
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -425,6 +512,105 @@ mod tests {
         assert!(q.matches(&item("Fix crash", "a", "open", &["bug"], "o/r")));
         assert!(!q.matches(&item("Fix crash", "a", "closed", &["bug"], "o/r")));
         assert!(!q.matches(&item("Fix crash", "a", "open", &["enhancement"], "o/r")));
+    }
+
+    #[test]
+    fn stream_filter_single_group_is_legacy_and() {
+        // A filter with no newline is one AND-group — same as FilterQuery.
+        let sf = StreamFilter::parse("state:open label:bug", None);
+        assert!(sf.matches(&item("PR", "a", "open", &["bug"], "o/r")));
+        assert!(!sf.matches(&item("PR", "a", "open", &["enhancement"], "o/r")));
+        assert!(!sf.matches(&item("PR", "a", "closed", &["bug"], "o/r")));
+    }
+
+    #[test]
+    fn stream_filter_groups_are_ored() {
+        // Each line is AND-internal; lines are ORed.
+        let sf = StreamFilter::parse("label:bug\nstate:closed", None);
+        assert!(sf.matches(&item("PR", "a", "open", &["bug"], "o/r"))); // 1st group
+        assert!(sf.matches(&item("PR", "a", "closed", &["enhancement"], "o/r"))); // 2nd group
+        assert!(!sf.matches(&item("PR", "a", "open", &["enhancement"], "o/r"))); // neither
+    }
+
+    #[test]
+    fn stream_filter_drops_blank_groups() {
+        let sf = StreamFilter::parse("label:bug\n\n   \n", None);
+        assert!(sf.matches(&item("PR", "a", "open", &["bug"], "o/r")));
+        assert!(!sf.matches(&item("PR", "a", "open", &["enhancement"], "o/r")));
+    }
+
+    #[test]
+    fn stream_filter_all_blank_matches_everything() {
+        let sf = StreamFilter::parse("  \n\n", None);
+        assert!(sf.is_empty());
+        assert!(sf.matches(&item("anything", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn stream_filter_expands_me_per_group() {
+        let sf = StreamFilter::parse("author:@me\nstate:closed", Some("alice"));
+        assert!(sf.matches(&item("PR", "alice", "open", &[], "o/r"))); // @me → alice
+        assert!(!sf.matches(&item("PR", "bob", "open", &[], "o/r")));
+        assert!(sf.matches(&item("PR", "bob", "closed", &[], "o/r"))); // 2nd group
+    }
+
+    #[test]
+    fn stream_filter_parse_expanded_skips_me_expansion() {
+        // parse_expanded must leave `@me` literal (the string is already expanded
+        // upstream), so it matches an author whose login is literally "@me" and
+        // NOT some other user.
+        let sf = StreamFilter::parse_expanded("author:@me");
+        assert!(sf.matches(&item("PR", "@me", "open", &[], "o/r")));
+        assert!(!sf.matches(&item("PR", "alice", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn mark_read_pipeline_preserves_or_groups_with_at_me() {
+        // Regression guard for the mark-all-read pipeline: the callers (TUI
+        // run.rs, GUI entries.rs, Tauri commands.rs) expand `@me` on the WHOLE
+        // stored filter string before sending MarkAllRead, and the engine parses
+        // it with `parse_expanded`. `expand_me` USED TO collapse whitespace
+        // (including the '\n' group separators), which merged a multi-group
+        // `@me` filter into one AND-group so mark-all-read marked the
+        // intersection. It now preserves the separators; assert the marked set
+        // equals the union the list shows.
+        let raw = "author:@me\nstate:closed";
+        let user = Some("alice");
+
+        // What the item list / unread counts use: OR of per-group parses.
+        let shown = StreamFilter::parse(raw, user);
+        // What mark-all-read uses: expand_me on the whole string, then parse_expanded.
+        let expanded = crate::logic::expand_me(user, raw).into_owned();
+        let marked = StreamFilter::parse_expanded(&expanded);
+
+        let alice_open = item("PR", "alice", "open", &[], "o/r");
+        let bob_closed = item("PR", "bob", "closed", &[], "o/r");
+
+        // The list shows both (union of the two OR-groups).
+        assert!(shown.matches(&alice_open));
+        assert!(shown.matches(&bob_closed));
+
+        // Mark-all-read must mark the same set the list shows.
+        assert!(
+            marked.matches(&alice_open),
+            "alice's open PR is shown but would not be marked read"
+        );
+        assert!(
+            marked.matches(&bob_closed),
+            "bob's closed PR is shown but would not be marked read"
+        );
+    }
+
+    #[test]
+    fn split_filter_groups_keeps_empty_boxes() {
+        assert_eq!(split_filter_groups("a\nb"), vec!["a", "b"]);
+        assert_eq!(split_filter_groups(""), vec![""]); // one empty box
+    }
+
+    #[test]
+    fn join_filter_groups_drops_blank_and_trims() {
+        assert_eq!(join_filter_groups(["a", "", "  ", "b"]), "a\nb");
+        assert_eq!(join_filter_groups([" x ", "y"]), "x\ny");
     }
 
     fn issue(title: &str, author: &str, state: &str) -> ItemEntry {
