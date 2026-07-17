@@ -262,7 +262,7 @@ impl GlaucaApp {
                         .child(Input::new(&form.name))
                         .child(div().text_sm().child("Filters (item matches ANY box)"));
 
-                    let single = form.filters.len() == 1;
+                    let is_single = form.filters.len() == 1;
                     for (i, box_input) in form.filters.iter().enumerate() {
                         if i > 0 {
                             col = col.child(div().text_xs().child("OR"));
@@ -272,21 +272,20 @@ impl GlaucaApp {
                             .gap_2()
                             .child(div().flex_1().child(Input::new(box_input)));
                         // Keep at least one box: no remove button when only one remains.
-                        if !single {
+                        if !is_single {
                             let this_rm = this.clone();
                             row = row.child(
                                 Button::new(("fs-remove", i)).ghost().label("✕").on_click(
                                     move |_, _w, cx| {
-                                        if let Some(app) = this_rm.upgrade() {
-                                            app.update(cx, |app, cx| {
-                                                if let Some(f) = &mut app.filter_stream_form
-                                                    && f.filters.len() > 1
-                                                {
-                                                    f.filters.remove(i);
-                                                }
-                                                cx.notify();
-                                            });
-                                        }
+                                        let Some(app) = this_rm.upgrade() else { return };
+                                        app.update(cx, |app, cx| {
+                                            if let Some(f) = &mut app.filter_stream_form
+                                                && f.filters.len() > 1
+                                            {
+                                                f.filters.remove(i);
+                                            }
+                                            cx.notify();
+                                        });
                                     },
                                 ),
                             );
@@ -300,20 +299,21 @@ impl GlaucaApp {
                             .ghost()
                             .label("+ Add OR box")
                             .on_click(move |_, window, cx| {
-                                if let Some(app) = this_add.upgrade() {
-                                    app.update(cx, |app, cx| {
-                                        let inp = cx.new(|cx| {
-                                            InputState::new(window, cx).placeholder(
-                                                "filter (e.g. is:pr is:draft assignee:name)",
-                                            )
-                                        });
-                                        if let Some(f) = &mut app.filter_stream_form {
-                                            f.filters.push(inp.clone());
-                                        }
-                                        inp.focus_handle(cx).focus(window, cx);
-                                        cx.notify();
+                                let Some(app) = this_add.upgrade() else {
+                                    return;
+                                };
+                                app.update(cx, |app, cx| {
+                                    let inp = cx.new(|cx| {
+                                        InputState::new(window, cx).placeholder(
+                                            "filter (e.g. is:pr is:draft assignee:name)",
+                                        )
                                     });
-                                }
+                                    if let Some(f) = &mut app.filter_stream_form {
+                                        f.filters.push(inp.clone());
+                                    }
+                                    inp.focus_handle(cx).focus(window, cx);
+                                    cx.notify();
+                                });
                             }),
                     );
 
@@ -326,53 +326,19 @@ impl GlaucaApp {
                         .child(Button::new("fs-cancel").ghost().label("Cancel").on_click(
                             move |_, window, cx| {
                                 window.close_dialog(cx);
-                                if let Some(app) = this_cancel.upgrade() {
-                                    app.update(cx, |app, _| app.filter_stream_form = None);
-                                }
+                                let Some(app) = this_cancel.upgrade() else {
+                                    return;
+                                };
+                                app.update(cx, |app, _| app.filter_stream_form = None);
                             },
                         ))
                         .child(Button::new("fs-ok").primary().label("OK").on_click(
                             move |_, window, cx| {
-                                let Some(app) = this_ok.upgrade() else {
-                                    return;
-                                };
-                                // Read + validate the current form; keep the dialog
-                                // open (return None) when name or all boxes are blank.
-                                let result = app.update(cx, |app, cx| {
-                                    let form = app.filter_stream_form.as_ref()?;
-                                    let name = form.name.read(cx).value().trim().to_string();
-                                    let filter = glauca_core::filter::join_filter_groups(
-                                        form.filters.iter().map(|b| b.read(cx).value().to_string()),
-                                    );
-                                    if name.is_empty() || filter.is_empty() {
-                                        return None;
-                                    }
-                                    Some((
-                                        form.edit,
-                                        form.parent_id,
-                                        form.kind.clone(),
-                                        name,
-                                        filter,
-                                    ))
-                                });
-                                if let Some((edit, parent_id, kind, name, filter)) = result {
+                                let Some(app) = this_ok.upgrade() else { return };
+                                // Close only when the save actually went through; an
+                                // invalid form (blank name / no boxes) keeps the dialog open.
+                                if app.update(cx, |app, cx| app.submit_filter_stream_form(cx)) {
                                     window.close_dialog(cx);
-                                    app.update(cx, |app, _| {
-                                        app.filter_stream_form = None;
-                                        match edit {
-                                            Some(id) => app.send(EngineCommand::EditFilterStream {
-                                                id,
-                                                name,
-                                                filter,
-                                            }),
-                                            None => app.send(EngineCommand::AddFilterStream {
-                                                parent_id,
-                                                kind,
-                                                name,
-                                                filter,
-                                            }),
-                                        }
-                                    });
                                 }
                             },
                         ));
@@ -380,5 +346,35 @@ impl GlaucaApp {
                     col.child(buttons)
                 })
         });
+    }
+
+    /// Validate and submit the open filter-stream form: read the name and join
+    /// the non-blank OR-group boxes, and if both are present, clear the form and
+    /// send the add/edit command. Returns `true` when the save went through
+    /// (caller closes the dialog) and `false` when the form is still incomplete
+    /// (name blank or every box blank), leaving the dialog open.
+    fn submit_filter_stream_form(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(form) = self.filter_stream_form.as_ref() else {
+            return false;
+        };
+        let name = form.name.read(cx).value().trim().to_string();
+        let filter = glauca_core::filter::join_filter_groups(
+            form.filters.iter().map(|b| b.read(cx).value().to_string()),
+        );
+        if name.is_empty() || filter.is_empty() {
+            return false;
+        }
+        let (edit, parent_id, kind) = (form.edit, form.parent_id, form.kind.clone());
+        self.filter_stream_form = None;
+        match edit {
+            Some(id) => self.send(EngineCommand::EditFilterStream { id, name, filter }),
+            None => self.send(EngineCommand::AddFilterStream {
+                parent_id,
+                kind,
+                name,
+                filter,
+            }),
+        }
+        true
     }
 }

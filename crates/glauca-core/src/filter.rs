@@ -391,9 +391,9 @@ pub struct StreamFilter {
 }
 
 impl StreamFilter {
-    /// Parse a stored string, expanding `@me` per group against `current_user`.
-    /// `@me` must be expanded per group, not on the whole string, because
-    /// `expand_me` collapses whitespace (including the newline separators).
+    /// Parse a stored filter into its OR-groups, expanding `@me` (against
+    /// `current_user`) within each group. Splitting into groups first keeps each
+    /// group an independent AND-group; blank groups are dropped by `from_groups`.
     pub fn parse(input: &str, current_user: Option<&str>) -> Self {
         Self::from_groups(
             split_filter_groups(input)
@@ -556,20 +556,24 @@ mod tests {
 
     #[test]
     fn stream_filter_parse_expanded_skips_me_expansion() {
-        // parse_expanded must not touch @me (already expanded upstream).
-        let sf = StreamFilter::parse_expanded("author:alice");
-        assert!(sf.matches(&item("PR", "alice", "open", &[], "o/r")));
+        // parse_expanded must leave `@me` literal (the string is already expanded
+        // upstream), so it matches an author whose login is literally "@me" and
+        // NOT some other user.
+        let sf = StreamFilter::parse_expanded("author:@me");
+        assert!(sf.matches(&item("PR", "@me", "open", &[], "o/r")));
+        assert!(!sf.matches(&item("PR", "alice", "open", &[], "o/r")));
     }
 
     #[test]
     fn mark_read_pipeline_preserves_or_groups_with_at_me() {
-        // Reproduces the mark-all-read pipeline. The callers (TUI run.rs, GUI
-        // entries.rs, Tauri commands.rs) expand `@me` on the WHOLE stored filter
-        // string before sending MarkAllRead; the engine then parses it with
-        // `parse_expanded`. Because `expand_me` collapses whitespace (including
-        // the '\n' group separators), a multi-group filter that mentions `@me`
-        // loses its group boundaries, so the marked set becomes the intersection
-        // instead of the union the list displays.
+        // Regression guard for the mark-all-read pipeline: the callers (TUI
+        // run.rs, GUI entries.rs, Tauri commands.rs) expand `@me` on the WHOLE
+        // stored filter string before sending MarkAllRead, and the engine parses
+        // it with `parse_expanded`. `expand_me` USED TO collapse whitespace
+        // (including the '\n' group separators), which merged a multi-group
+        // `@me` filter into one AND-group so mark-all-read marked the
+        // intersection. It now preserves the separators; assert the marked set
+        // equals the union the list shows.
         let raw = "author:@me\nstate:closed";
         let user = Some("alice");
 
@@ -598,9 +602,13 @@ mod tests {
     }
 
     #[test]
-    fn filter_group_round_trip() {
+    fn split_filter_groups_keeps_empty_boxes() {
         assert_eq!(split_filter_groups("a\nb"), vec!["a", "b"]);
         assert_eq!(split_filter_groups(""), vec![""]); // one empty box
+    }
+
+    #[test]
+    fn join_filter_groups_drops_blank_and_trims() {
         assert_eq!(join_filter_groups(["a", "", "  ", "b"]), "a\nb");
         assert_eq!(join_filter_groups([" x ", "y"]), "x\ny");
     }

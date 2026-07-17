@@ -138,9 +138,9 @@ pub struct App {
     /// ORed (see `glauca_core::filter::StreamFilter`). Always at least one box.
     /// Shared by the new & edit filter-stream modals.
     pub filter_stream_filters: Vec<SingleLineInput>,
-    /// Input buffer reused for edit modals (display name or step-1 field).
+    /// Display-name buffer for the Edit Query modal (field 0).
     pub edit_input: SingleLineInput,
-    /// Second input buffer for edit modals (query string or filter string).
+    /// Search-query buffer for the Edit Query modal (field 1).
     pub edit_input2: SingleLineInput,
     /// Active field in a modal. For the 2-field query modals: 0 or 1. For the
     /// filter-stream modals: 0 = name, 1..=N = the N-th `filter_stream_filters`
