@@ -148,7 +148,13 @@ fn on_left_down(app: &mut App, col: u16, row: u16) -> Action {
         MouseTarget::QueryEntry(i) => {
             app.focus = Focus::QueryList;
             app.entry_cursor = i;
-            Action::LoadEntry
+            // The first press already loaded (and force-synced) this entry; the
+            // second press of a double-click would only repeat that fetch.
+            if double {
+                Action::None
+            } else {
+                Action::LoadEntry
+            }
         }
         MouseTarget::QueryPane => {
             app.focus = Focus::QueryList;
@@ -342,6 +348,14 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_blank_area_below_last_item_is_pane() {
+        // Rows occupy y 1..9 (heights 3+3+2); a click on the blank y=9 inside the
+        // list interior falls through to ItemPane, not an item.
+        let r = regions();
+        assert_eq!(hit_test(&r, 25, 9), MouseTarget::ItemPane);
+    }
+
+    #[test]
     fn left_click_query_entry_selects_and_loads() {
         let mut app = App::new(two_queries());
         *app.mouse_regions.borrow_mut() = MouseRegions {
@@ -376,6 +390,24 @@ mod tests {
             Some(Action::OpenBrowser)
         ));
         // Third rapid click starts a fresh pair — it must NOT re-open the browser.
+        assert!(matches!(handle_mouse(&mut app, ev()), Some(Action::None)));
+    }
+
+    #[test]
+    fn double_click_query_entry_does_not_resync() {
+        let mut app = App::new(two_queries());
+        *app.mouse_regions.borrow_mut() = MouseRegions {
+            query_inner: Some(Rect::new(1, 1, 18, 9)),
+            query_len: 2,
+            ..Default::default()
+        };
+        let ev = || mouse(MouseEventKind::Down(MouseButton::Left), 5, 1);
+        // First press loads (force-sync); the double-click second press must not
+        // repeat the forced GitHub fetch.
+        assert!(matches!(
+            handle_mouse(&mut app, ev()),
+            Some(Action::LoadEntry)
+        ));
         assert!(matches!(handle_mouse(&mut app, ev()), Some(Action::None)));
     }
 

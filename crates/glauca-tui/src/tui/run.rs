@@ -113,6 +113,10 @@ where
                 if let Event::Key(key) = event {
                     // A key event may change any visible state; repaint after it.
                     needs_redraw = true;
+                    // Any keystroke breaks a pending double-click chain, so a
+                    // click that happens to follow (e.g. after closing a modal
+                    // opened with Enter) isn't mistaken for a double-click.
+                    app.last_mouse_click = None;
                     // Ignore key-release events. Terminals with the keyboard-
                     // enhancement protocol (or Windows) emit them, and acting on
                     // both press and release would double-fire actions like
