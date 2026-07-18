@@ -97,22 +97,22 @@ where
 
     let mut events = EventStream::new();
 
-    // Repaint only when something changed. Mouse capture reports motion/drag
-    // events (crossterm enables any-motion tracking), and redrawing the whole UI
-    // on every pointer move is wasted work; those events leave this flag false.
+    // Repaint only when something changed. Default to repainting after every
+    // handled event; the one exception is a mouse event we don't act on (motion/
+    // drag, which crossterm's any-motion tracking emits in bursts), which opts
+    // out below. Defaulting on means a future event arm can't silently freeze the
+    // UI by forgetting to request a redraw.
     let mut needs_redraw = true;
 
     loop {
         if needs_redraw {
             terminal.draw(|f| ui::draw(f, &app))?;
-            needs_redraw = false;
         }
+        needs_redraw = true;
 
         tokio::select! {
             Some(Ok(event)) = events.next() => {
                 if let Event::Key(key) = event {
-                    // A key event may change any visible state; repaint after it.
-                    needs_redraw = true;
                     // Any keystroke breaks a pending double-click chain, so a
                     // click that happens to follow (e.g. after closing a modal
                     // opened with Enter) isn't mistaken for a double-click.
@@ -467,25 +467,17 @@ where
                         }
                         Action::None => {}
                     }
-                    // Viewing an item (cursor on the item list or its detail pane)
-                    // marks it read and decrements the unread badge. Idempotent —
-                    // a no-op once the item is already read.
-                    if app.input_mode == InputMode::Normal
-                        && matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
-                    {
-                        mark_selected_item_read(&mut app, &engine).await;
-                        refetch_selected_body_if_missing(&mut app, &engine).await;
+                    // Viewing an item marks it read (and lazily fetches its body).
+                    if app.input_mode == InputMode::Normal {
+                        refresh_focused_item(&mut app, &engine).await;
                     }
                 } else if let Event::Mouse(mouse) = event {
                     // Mouse is only handled in Normal mode; while a modal/menu is
                     // open, clicks and wheel events are ignored. `handle_mouse`
-                    // returns None for events we don't act on (motion/drag/etc.),
-                    // in which case we skip the redraw entirely — mouse capture
-                    // reports motion, and repainting on every move would churn.
+                    // returns None for events we don't act on (motion/drag/etc.).
                     if app.input_mode == InputMode::Normal
                         && let Some(action) = handle_mouse(&mut app, mouse)
                     {
-                        needs_redraw = true;
                         match action {
                             Action::LoadEntry => {
                                 load_selected_entry(&mut app, &engine, true).await
@@ -498,21 +490,18 @@ where
                             }
                             _ => {}
                         }
-                        // Selecting an item (or its detail) marks it read and
-                        // lazily fetches its body, mirroring the post-key handling.
-                        if matches!(app.focus, Focus::ItemList | Focus::ItemDetail) {
-                            mark_selected_item_read(&mut app, &engine).await;
-                            refetch_selected_body_if_missing(&mut app, &engine).await;
-                        }
+                        // Mirror the post-key handling for the newly-selected item.
+                        refresh_focused_item(&mut app, &engine).await;
+                    } else {
+                        // Motion/drag, or a click while a modal is open: nothing
+                        // changed, so skip the repaint (motion arrives in bursts).
+                        needs_redraw = false;
                     }
-                } else {
-                    // Resize / focus / paste events: repaint to reflect the change.
-                    needs_redraw = true;
                 }
+                // Other events (resize/focus/paste) keep the default repaint.
             }
             Some(msg) = engine.recv() => {
                 handle_app_message(&mut app, &engine, msg).await;
-                needs_redraw = true;
             }
         }
     }
@@ -530,6 +519,16 @@ async fn load_selected_entry(app: &mut App, engine: &Engine, always_sync: bool) 
     app.detail_scroll = 0;
     app.clear_items();
     select_current_entry(app, engine, always_sync).await;
+}
+
+/// After a selection change, mark the focused item read and lazily fetch its
+/// body if missing — a no-op unless an item pane is focused. Single-sources the
+/// post-selection tail shared by the key and mouse paths.
+async fn refresh_focused_item(app: &mut App, engine: &Engine) {
+    if matches!(app.focus, Focus::ItemList | Focus::ItemDetail) {
+        mark_selected_item_read(app, engine).await;
+        refetch_selected_body_if_missing(app, engine).await;
+    }
 }
 
 /// Open the currently selected item in the browser. Shared by the `OpenBrowser`

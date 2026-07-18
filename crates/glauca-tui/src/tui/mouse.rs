@@ -93,21 +93,14 @@ pub(crate) fn hit_test(r: &MouseRegions, col: u16, row: u16) -> MouseTarget {
 
     // Pane-level fallbacks: a click inside a column but not on a row (filter bar,
     // banner, border) still focuses that pane.
-    if let Some(area) = r.item_col
-        && area.contains(pos)
-    {
+    let hits = |area: Option<Rect>| area.is_some_and(|a| a.contains(pos));
+    if hits(r.item_col) {
         return MouseTarget::ItemPane;
     }
-
-    if let Some(area) = r.query_col
-        && area.contains(pos)
-    {
+    if hits(r.query_col) {
         return MouseTarget::QueryPane;
     }
-
-    if let Some(area) = r.detail_area
-        && area.contains(pos)
-    {
+    if hits(r.detail_area) {
         return MouseTarget::Detail;
     }
 
