@@ -81,6 +81,10 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
+    // Record the detail column so mouse events can hit-test it (the left/middle
+    // panes record their own inner areas in the list draws below).
+    app.mouse_regions.borrow_mut().detail_area = Some(cols[2]);
+
     draw_query_list(f, app, cols[0]);
     draw_item_list(f, app, cols[1]);
     draw_item_detail(f, app, cols[2]);

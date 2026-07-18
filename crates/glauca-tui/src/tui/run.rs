@@ -9,7 +9,11 @@ pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
     // Set up terminal
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -19,6 +23,7 @@ pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
         crossterm::terminal::LeaveAlternateScreen
     )?;
 
@@ -170,13 +175,7 @@ where
                     sync_modal_cursors(&mut app);
                     match action {
                         Action::Quit => break,
-                        Action::LoadEntry => {
-                            app.filter = SingleLineInput::new();
-                            app.item_cursor = 0;
-                            app.detail_scroll = 0;
-                            app.clear_items();
-                            select_current_entry(&mut app, &engine, true).await;
-                        }
+                        Action::LoadEntry => load_selected_entry(&mut app, &engine).await,
                         Action::SaveNewQuery => {
                             let query_str = app.new_query_input.value().trim().to_string();
                             let name_str = app.new_query_name.value().trim().to_string();
@@ -406,15 +405,7 @@ where
                                 }
                             }
                         }
-                        Action::OpenBrowser => {
-                            if let Some(item) = app.selected_item().cloned() {
-                                engine
-                                    .send(EngineCommand::OpenBrowser {
-                                        item: Box::new(item),
-                                    })
-                                    .await;
-                            }
-                        }
+                        Action::OpenBrowser => open_selected_in_browser(&app, &engine).await,
                         Action::CopyUrl => {
                             if let Some(item) = app.selected_item().cloned() {
                                 app.status = Some(match copy_to_clipboard_osc52(&item.url) {
@@ -468,6 +459,24 @@ where
                         mark_selected_item_read(&mut app, &engine).await;
                         refetch_selected_body_if_missing(&mut app, &engine).await;
                     }
+                } else if let Event::Mouse(mouse) = event {
+                    // Mouse is only handled in Normal mode; while a modal/menu is
+                    // open, clicks and wheel events are ignored.
+                    if app.input_mode == InputMode::Normal {
+                        match handle_mouse(&mut app, mouse) {
+                            Action::LoadEntry => load_selected_entry(&mut app, &engine).await,
+                            Action::OpenBrowser => {
+                                open_selected_in_browser(&app, &engine).await
+                            }
+                            _ => {}
+                        }
+                        // Selecting an item (or its detail) marks it read and
+                        // lazily fetches its body, mirroring the post-key handling.
+                        if matches!(app.focus, Focus::ItemList | Focus::ItemDetail) {
+                            mark_selected_item_read(&mut app, &engine).await;
+                            refetch_selected_body_if_missing(&mut app, &engine).await;
+                        }
+                    }
                 }
             }
             Some(msg) = engine.recv() => {
@@ -477,4 +486,27 @@ where
     }
 
     Ok(())
+}
+
+/// Load the currently selected left-pane entry into the item list, resetting the
+/// filter and cursors. Shared by the `LoadEntry` key action and mouse clicks on
+/// a query entry.
+async fn load_selected_entry(app: &mut App, engine: &Engine) {
+    app.filter = SingleLineInput::new();
+    app.item_cursor = 0;
+    app.detail_scroll = 0;
+    app.clear_items();
+    select_current_entry(app, engine, true).await;
+}
+
+/// Open the currently selected item in the browser. Shared by the `OpenBrowser`
+/// key action and mouse double-clicks on an item.
+async fn open_selected_in_browser(app: &App, engine: &Engine) {
+    if let Some(item) = app.selected_item().cloned() {
+        engine
+            .send(EngineCommand::OpenBrowser {
+                item: Box::new(item),
+            })
+            .await;
+    }
 }

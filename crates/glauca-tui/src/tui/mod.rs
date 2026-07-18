@@ -9,12 +9,13 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     io,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub mod icons;
 mod keys;
 mod message;
+mod mouse;
 mod process;
 mod run;
 mod select;
@@ -29,6 +30,7 @@ mod test_support;
 use icons::Icons;
 use keys::handle_key;
 use message::handle_app_message;
+use mouse::{MouseRegions, MouseTarget, handle_mouse};
 pub(crate) use process::{
     copy_to_clipboard_osc52, item_actions, restore_tui, run_editor, run_octorus_review, suspend_tui,
 };
@@ -192,6 +194,12 @@ pub struct App {
     /// re-fetchable `body` of old items; when such an item is viewed we fetch it
     /// once on demand, and this set prevents re-dispatching on every keypress.
     pub body_refresh_requested: HashSet<(String, String, i64)>,
+    /// Last-rendered pane geometry, captured each frame by the `ui` draw
+    /// functions so mouse events can hit-test coordinates back to a pane/row.
+    /// Interior-mutable like `filtered_cache` so `draw` keeps its `&App`.
+    pub(crate) mouse_regions: RefCell<MouseRegions>,
+    /// Time and target of the last left-click, for double-click detection.
+    pub(crate) last_mouse_click: Option<(Instant, MouseTarget)>,
 }
 
 // `AppMessage` / `SyncJob` は glauca_core::engine へ移設（A6）。
