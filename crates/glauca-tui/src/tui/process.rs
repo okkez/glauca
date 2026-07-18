@@ -68,6 +68,7 @@ pub(crate) fn suspend_tui<B: ratatui::backend::Backend + io::Write>(
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
         crossterm::terminal::LeaveAlternateScreen
     )?;
     Ok(())
@@ -82,7 +83,8 @@ where
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
-        crossterm::terminal::EnterAlternateScreen
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
     )?;
     terminal.clear()?;
     Ok(())

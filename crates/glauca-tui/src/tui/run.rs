@@ -9,7 +9,11 @@ pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
     // Set up terminal
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -19,6 +23,7 @@ pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
         crossterm::terminal::LeaveAlternateScreen
     )?;
 
@@ -92,12 +97,26 @@ where
 
     let mut events = EventStream::new();
 
+    // Repaint only when something changed. Default to repainting after every
+    // handled event; the one exception is a mouse event we don't act on (motion/
+    // drag, which crossterm's any-motion tracking emits in bursts), which opts
+    // out below. Defaulting on means a future event arm can't silently freeze the
+    // UI by forgetting to request a redraw.
+    let mut needs_redraw = true;
+
     loop {
-        terminal.draw(|f| ui::draw(f, &app))?;
+        if needs_redraw {
+            terminal.draw(|f| ui::draw(f, &app))?;
+        }
+        needs_redraw = true;
 
         tokio::select! {
             Some(Ok(event)) = events.next() => {
                 if let Event::Key(key) = event {
+                    // Any keystroke breaks a pending double-click chain, so a
+                    // click that happens to follow (e.g. after closing a modal
+                    // opened with Enter) isn't mistaken for a double-click.
+                    app.last_mouse_click = None;
                     // Ignore key-release events. Terminals with the keyboard-
                     // enhancement protocol (or Windows) emit them, and acting on
                     // both press and release would double-fire actions like
@@ -170,12 +189,9 @@ where
                     sync_modal_cursors(&mut app);
                     match action {
                         Action::Quit => break,
-                        Action::LoadEntry => {
-                            app.filter = SingleLineInput::new();
-                            app.item_cursor = 0;
-                            app.detail_scroll = 0;
-                            app.clear_items();
-                            select_current_entry(&mut app, &engine, true).await;
+                        Action::LoadEntry => load_selected_entry(&mut app, &engine, true).await,
+                        Action::LoadEntryCached => {
+                            load_selected_entry(&mut app, &engine, false).await
                         }
                         Action::SaveNewQuery => {
                             let query_str = app.new_query_input.value().trim().to_string();
@@ -406,15 +422,7 @@ where
                                 }
                             }
                         }
-                        Action::OpenBrowser => {
-                            if let Some(item) = app.selected_item().cloned() {
-                                engine
-                                    .send(EngineCommand::OpenBrowser {
-                                        item: Box::new(item),
-                                    })
-                                    .await;
-                            }
-                        }
+                        Action::OpenBrowser => open_selected_in_browser(&app, &engine).await,
                         Action::CopyUrl => {
                             if let Some(item) = app.selected_item().cloned() {
                                 app.status = Some(match copy_to_clipboard_osc52(&item.url) {
@@ -459,16 +467,38 @@ where
                         }
                         Action::None => {}
                     }
-                    // Viewing an item (cursor on the item list or its detail pane)
-                    // marks it read and decrements the unread badge. Idempotent —
-                    // a no-op once the item is already read.
+                    // Viewing an item marks it read (and lazily fetches its body).
+                    if app.input_mode == InputMode::Normal {
+                        refresh_focused_item(&mut app, &engine).await;
+                    }
+                } else if let Event::Mouse(mouse) = event {
+                    // Mouse is only handled in Normal mode; while a modal/menu is
+                    // open, clicks and wheel events are ignored. `handle_mouse`
+                    // returns None for events we don't act on (motion/drag/etc.).
                     if app.input_mode == InputMode::Normal
-                        && matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
+                        && let Some(action) = handle_mouse(&mut app, mouse)
                     {
-                        mark_selected_item_read(&mut app, &engine).await;
-                        refetch_selected_body_if_missing(&mut app, &engine).await;
+                        match action {
+                            Action::LoadEntry => {
+                                load_selected_entry(&mut app, &engine, true).await
+                            }
+                            Action::LoadEntryCached => {
+                                load_selected_entry(&mut app, &engine, false).await
+                            }
+                            Action::OpenBrowser => {
+                                open_selected_in_browser(&app, &engine).await
+                            }
+                            _ => {}
+                        }
+                        // Mirror the post-key handling for the newly-selected item.
+                        refresh_focused_item(&mut app, &engine).await;
+                    } else {
+                        // Motion/drag, or a click while a modal is open: nothing
+                        // changed, so skip the repaint (motion arrives in bursts).
+                        needs_redraw = false;
                     }
                 }
+                // Other events (resize/focus/paste) keep the default repaint.
             }
             Some(msg) = engine.recv() => {
                 handle_app_message(&mut app, &engine, msg).await;
@@ -477,4 +507,38 @@ where
     }
 
     Ok(())
+}
+
+/// Load the currently selected left-pane entry into the item list, resetting the
+/// filter and cursors. `always_sync` forces a GitHub fetch (deliberate select);
+/// when false, only stale caches are synced (wheel scrolling). Shared by the
+/// `LoadEntry`/`LoadEntryCached` key actions and mouse interaction.
+async fn load_selected_entry(app: &mut App, engine: &Engine, always_sync: bool) {
+    app.filter = SingleLineInput::new();
+    app.item_cursor = 0;
+    app.detail_scroll = 0;
+    app.clear_items();
+    select_current_entry(app, engine, always_sync).await;
+}
+
+/// After a selection change, mark the focused item read and lazily fetch its
+/// body if missing — a no-op unless an item pane is focused. Single-sources the
+/// post-selection tail shared by the key and mouse paths.
+async fn refresh_focused_item(app: &mut App, engine: &Engine) {
+    if matches!(app.focus, Focus::ItemList | Focus::ItemDetail) {
+        mark_selected_item_read(app, engine).await;
+        refetch_selected_body_if_missing(app, engine).await;
+    }
+}
+
+/// Open the currently selected item in the browser. Shared by the `OpenBrowser`
+/// key action and mouse double-clicks on an item.
+async fn open_selected_in_browser(app: &App, engine: &Engine) {
+    if let Some(item) = app.selected_item().cloned() {
+        engine
+            .send(EngineCommand::OpenBrowser {
+                item: Box::new(item),
+            })
+            .await;
+    }
 }

@@ -63,12 +63,21 @@ pub(super) fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.entry_cursor));
 
+    // Record the list interior (inside the border) for mouse hit-testing before
+    // the block is moved into the List.
+    let inner = block.inner(area);
+
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight_style(focused))
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, area, &mut state);
+
+    let mut regions = app.mouse_regions.borrow_mut();
+    regions.query_inner = Some(inner);
+    regions.query_offset = state.offset();
+    regions.query_len = app.entries.len();
 }
 
 // ── Middle pane: item list ────────────────────────────────────────────────────
@@ -170,6 +179,8 @@ pub(super) fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     // Sample the clock once for the whole list so each row's relative time is
     // measured against the same instant (and we avoid a per-row `Utc::now()`).
     let now = Utc::now();
+    // Per-row heights (rows are variable-height), recorded for mouse hit-testing.
+    let mut row_heights: Vec<u16> = Vec::with_capacity(filtered.len());
     let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
@@ -239,6 +250,7 @@ pub(super) fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
             line2_spans.push(upd_span);
             lines.push(Line::from(line2_spans));
 
+            row_heights.push(lines.len() as u16);
             ListItem::new(lines)
         })
         .collect();
@@ -248,10 +260,19 @@ pub(super) fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
         state.select(Some(app.item_cursor));
     }
 
+    // List interior (inside the border) for mouse hit-testing, captured before
+    // the block is moved into the List.
+    let inner = block.inner(list_area);
+
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight_style(focused))
         .highlight_symbol(HIGHLIGHT_SYMBOL);
 
     f.render_stateful_widget(list, list_area, &mut state);
+
+    let mut regions = app.mouse_regions.borrow_mut();
+    regions.item_inner = Some(inner);
+    regions.item_offset = state.offset();
+    regions.item_heights = row_heights;
 }
