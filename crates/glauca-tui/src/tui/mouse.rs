@@ -10,7 +10,7 @@ use ratatui::layout::{Position, Rect};
 use std::time::{Duration, Instant};
 
 /// Two left-clicks on the same target within this window count as a double-click.
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 /// Rendered pane geometry captured during `ui::draw`, used to map a mouse
 /// coordinate back to a pane/row. The item list has variable-height rows, so it
@@ -59,16 +59,21 @@ pub(crate) enum MouseTarget {
 
 /// Resolve a terminal coordinate to a [`MouseTarget`] using the last frame's
 /// [`MouseRegions`]. Pure so it can be unit-tested without an `App`.
-pub(crate) fn hit_test(r: &MouseRegions, col: u16, row: u16) -> MouseTarget {
+pub(crate) fn hit_test(regions: &MouseRegions, col: u16, row: u16) -> MouseTarget {
     let pos = Position::new(col, row);
 
-    if let Some(area) = r.item_inner
+    if let Some(area) = regions.item_inner
         && area.contains(pos)
     {
         // Walk visible rows from the scroll offset, summing heights, to find the
         // row whose vertical span contains `row`.
         let mut y = area.y;
-        for (i, h) in r.item_heights.iter().enumerate().skip(r.item_offset) {
+        for (i, h) in regions
+            .item_heights
+            .iter()
+            .enumerate()
+            .skip(regions.item_offset)
+        {
             let next = y.saturating_add(*h);
             if row < next {
                 return MouseTarget::Item(i);
@@ -81,11 +86,11 @@ pub(crate) fn hit_test(r: &MouseRegions, col: u16, row: u16) -> MouseTarget {
         return MouseTarget::ItemPane;
     }
 
-    if let Some(area) = r.query_inner
+    if let Some(area) = regions.query_inner
         && area.contains(pos)
     {
-        let idx = r.query_offset + (row - area.y) as usize;
-        if idx < r.query_len {
+        let idx = regions.query_offset + (row - area.y) as usize;
+        if idx < regions.query_len {
             return MouseTarget::QueryEntry(idx);
         }
         return MouseTarget::QueryPane;
@@ -94,13 +99,13 @@ pub(crate) fn hit_test(r: &MouseRegions, col: u16, row: u16) -> MouseTarget {
     // Pane-level fallbacks: a click inside a column but not on a row (filter bar,
     // banner, border) still focuses that pane.
     let hits = |area: Option<Rect>| area.is_some_and(|a| a.contains(pos));
-    if hits(r.item_col) {
+    if hits(regions.item_col) {
         return MouseTarget::ItemPane;
     }
-    if hits(r.query_col) {
+    if hits(regions.query_col) {
         return MouseTarget::QueryPane;
     }
-    if hits(r.detail_area) {
+    if hits(regions.detail_area) {
         return MouseTarget::Detail;
     }
 
@@ -127,11 +132,11 @@ fn on_left_down(app: &mut App, col: u16, row: u16) -> Action {
     // Double-click = a second press on the same target within the window. Reset
     // the window once it fires so a third rapid click starts a fresh pair (rather
     // than counting as yet another double-click).
-    let double = matches!(
+    let is_double_click = matches!(
         app.last_mouse_click,
-        Some((at, prev)) if prev == target && at.elapsed() < DOUBLE_CLICK
+        Some((at, prev)) if prev == target && at.elapsed() < DOUBLE_CLICK_WINDOW
     );
-    app.last_mouse_click = if double {
+    app.last_mouse_click = if is_double_click {
         None
     } else {
         Some((Instant::now(), target))
@@ -143,7 +148,7 @@ fn on_left_down(app: &mut App, col: u16, row: u16) -> Action {
             app.entry_cursor = i;
             // The first press already loaded (and force-synced) this entry; the
             // second press of a double-click would only repeat that fetch.
-            if double {
+            if is_double_click {
                 Action::None
             } else {
                 Action::LoadEntry
@@ -159,7 +164,7 @@ fn on_left_down(app: &mut App, col: u16, row: u16) -> Action {
             app.clamp_item_cursor();
             app.detail_scroll = 0;
             // Double-click opens the item in the browser (same as the `o` key).
-            if double {
+            if is_double_click {
                 Action::OpenBrowser
             } else {
                 Action::None
