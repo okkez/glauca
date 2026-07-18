@@ -18,12 +18,18 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// the stateful render) to reconstruct which row a `y` falls in.
 #[derive(Default)]
 pub(crate) struct MouseRegions {
+    /// Left pane whole column. A click here that misses a row still focuses the
+    /// pane (`QueryPane`).
+    pub(crate) query_col: Option<Rect>,
     /// Left pane list interior (inside the border). Rows are always 1 line tall.
     pub(crate) query_inner: Option<Rect>,
     /// First visible entry index (`ListState::offset`) of the left pane.
     pub(crate) query_offset: usize,
     /// Number of entries in the left pane (bounds the hit-test).
     pub(crate) query_len: usize,
+    /// Middle pane whole column. A click on its filter bar / banner / border
+    /// (outside `item_inner`) still focuses the pane (`ItemPane`).
+    pub(crate) item_col: Option<Rect>,
     /// Middle pane item-list interior (inside the border).
     pub(crate) item_inner: Option<Rect>,
     /// First visible item index (`ListState::offset`) of the middle pane.
@@ -85,6 +91,20 @@ pub(crate) fn hit_test(r: &MouseRegions, col: u16, row: u16) -> MouseTarget {
         return MouseTarget::QueryPane;
     }
 
+    // Pane-level fallbacks: a click inside a column but not on a row (filter bar,
+    // banner, border) still focuses that pane.
+    if let Some(area) = r.item_col
+        && area.contains(pos)
+    {
+        return MouseTarget::ItemPane;
+    }
+
+    if let Some(area) = r.query_col
+        && area.contains(pos)
+    {
+        return MouseTarget::QueryPane;
+    }
+
     if let Some(area) = r.detail_area
         && area.contains(pos)
     {
@@ -111,12 +131,18 @@ pub(crate) fn handle_mouse(app: &mut App, me: MouseEvent) -> Option<Action> {
 fn on_left_down(app: &mut App, col: u16, row: u16) -> Action {
     let target = hit_test(&app.mouse_regions.borrow(), col, row);
 
-    // Double-click = a second press on the same target within the window.
+    // Double-click = a second press on the same target within the window. Reset
+    // the window once it fires so a third rapid click starts a fresh pair (rather
+    // than counting as yet another double-click).
     let double = matches!(
         app.last_mouse_click,
         Some((at, prev)) if prev == target && at.elapsed() < DOUBLE_CLICK
     );
-    app.last_mouse_click = Some((Instant::now(), target));
+    app.last_mouse_click = if double {
+        None
+    } else {
+        Some((Instant::now(), target))
+    };
 
     match target {
         MouseTarget::QueryEntry(i) => {
@@ -152,12 +178,14 @@ fn on_left_down(app: &mut App, col: u16, row: u16) -> Action {
     }
 }
 
-/// Scroll the pane under the cursor by one notch, mirroring `j`/`k`. Focus is
-/// left unchanged (you scroll what you point at without focusing it).
+/// Scroll the pane under the cursor by one notch, mirroring `j`/`k`. Focus moves
+/// to the scrolled pane so the run loop's item-focus post-processing (mark-read /
+/// lazy body fetch) runs, matching keyboard navigation.
 fn on_scroll(app: &mut App, col: u16, row: u16, down: bool) -> Action {
     let target = hit_test(&app.mouse_regions.borrow(), col, row);
     match target {
         MouseTarget::QueryEntry(_) | MouseTarget::QueryPane => {
+            app.focus = Focus::QueryList;
             // Cached load (no forced sync): a scroll gesture emits several notches
             // and forcing a GitHub sync on each would burst API calls.
             if down {
@@ -172,6 +200,7 @@ fn on_scroll(app: &mut App, col: u16, row: u16, down: bool) -> Action {
             Action::None
         }
         MouseTarget::Item(_) | MouseTarget::ItemPane => {
+            app.focus = Focus::ItemList;
             let max = app.filtered_items().len().saturating_sub(1);
             if down {
                 if app.item_cursor < max {
@@ -185,6 +214,7 @@ fn on_scroll(app: &mut App, col: u16, row: u16, down: bool) -> Action {
             Action::None
         }
         MouseTarget::Detail => {
+            app.focus = Focus::ItemDetail;
             app.detail_scroll = if down {
                 app.detail_scroll.saturating_add(1)
             } else {
@@ -230,11 +260,13 @@ mod tests {
 
     fn regions() -> MouseRegions {
         MouseRegions {
-            // Left pane interior at x:1..19, y:1..10 (3 entries).
+            // Left pane column x:0..20, interior x:1..19, y:1..10 (3 entries).
+            query_col: Some(Rect::new(0, 0, 20, 11)),
             query_inner: Some(Rect::new(1, 1, 18, 9)),
             query_offset: 0,
             query_len: 3,
-            // Middle pane interior at x:21..49, y:1..10.
+            // Middle pane column x:20..50, list interior x:21..49, y:1..10.
+            item_col: Some(Rect::new(20, 0, 30, 11)),
             item_inner: Some(Rect::new(21, 1, 28, 9)),
             item_offset: 0,
             // 3 rows of heights 3, 3, 2 lines.
@@ -295,8 +327,18 @@ mod tests {
     fn hit_test_detail_and_outside() {
         let r = regions();
         assert_eq!(hit_test(&r, 60, 5), MouseTarget::Detail);
-        // The status-bar row / gaps map to nothing.
-        assert_eq!(hit_test(&r, 0, 0), MouseTarget::None);
+        // Below the columns (e.g. the status-bar row) maps to nothing.
+        assert_eq!(hit_test(&r, 5, 15), MouseTarget::None);
+    }
+
+    #[test]
+    fn hit_test_pane_fallback_off_row() {
+        let r = regions();
+        // Inside the middle column but above the item list (filter bar/banner)
+        // still focuses the item pane instead of falling through to None.
+        assert_eq!(hit_test(&r, 25, 0), MouseTarget::ItemPane);
+        // Inside the left column but off any entry row focuses the query pane.
+        assert_eq!(hit_test(&r, 5, 0), MouseTarget::QueryPane);
     }
 
     #[test]
@@ -333,6 +375,27 @@ mod tests {
             handle_mouse(&mut app, ev()),
             Some(Action::OpenBrowser)
         ));
+        // Third rapid click starts a fresh pair — it must NOT re-open the browser.
+        assert!(matches!(handle_mouse(&mut app, ev()), Some(Action::None)));
+    }
+
+    #[test]
+    fn scroll_focuses_the_scrolled_pane() {
+        let mut app = make_app_with_items(&["a", "b"]);
+        *app.mouse_regions.borrow_mut() = MouseRegions {
+            item_inner: Some(Rect::new(21, 1, 28, 9)),
+            item_heights: vec![1, 1],
+            detail_area: Some(Rect::new(50, 0, 40, 11)),
+            ..Default::default()
+        };
+        app.focus = Focus::QueryList;
+        // Wheel over the item list focuses it, so the run loop's item-focus
+        // post-processing (mark-read) runs.
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 25, 1));
+        assert_eq!(app.focus, Focus::ItemList);
+        // Wheel over the detail pane focuses it.
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 60, 5));
+        assert_eq!(app.focus, Focus::ItemDetail);
     }
 
     #[test]

@@ -81,9 +81,16 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    // Record the detail column so mouse events can hit-test it (the left/middle
-    // panes record their own inner areas in the list draws below).
-    app.mouse_regions.borrow_mut().detail_area = Some(cols[2]);
+    // Record each column so mouse events can hit-test it. The left/middle panes
+    // also record their inner list areas in the draws below (for row resolution);
+    // the whole-column rects are the pane-level fallback for clicks that miss a
+    // row (filter bar, banner, borders).
+    {
+        let mut regions = app.mouse_regions.borrow_mut();
+        regions.query_col = Some(cols[0]);
+        regions.item_col = Some(cols[1]);
+        regions.detail_area = Some(cols[2]);
+    }
 
     draw_query_list(f, app, cols[0]);
     draw_item_list(f, app, cols[1]);
