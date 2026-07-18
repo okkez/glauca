@@ -97,12 +97,22 @@ where
 
     let mut events = EventStream::new();
 
+    // Repaint only when something changed. Mouse capture reports motion/drag
+    // events (crossterm enables any-motion tracking), and redrawing the whole UI
+    // on every pointer move is wasted work; those events leave this flag false.
+    let mut needs_redraw = true;
+
     loop {
-        terminal.draw(|f| ui::draw(f, &app))?;
+        if needs_redraw {
+            terminal.draw(|f| ui::draw(f, &app))?;
+            needs_redraw = false;
+        }
 
         tokio::select! {
             Some(Ok(event)) = events.next() => {
                 if let Event::Key(key) = event {
+                    // A key event may change any visible state; repaint after it.
+                    needs_redraw = true;
                     // Ignore key-release events. Terminals with the keyboard-
                     // enhancement protocol (or Windows) emit them, and acting on
                     // both press and release would double-fire actions like
@@ -175,7 +185,10 @@ where
                     sync_modal_cursors(&mut app);
                     match action {
                         Action::Quit => break,
-                        Action::LoadEntry => load_selected_entry(&mut app, &engine).await,
+                        Action::LoadEntry => load_selected_entry(&mut app, &engine, true).await,
+                        Action::LoadEntryCached => {
+                            load_selected_entry(&mut app, &engine, false).await
+                        }
                         Action::SaveNewQuery => {
                             let query_str = app.new_query_input.value().trim().to_string();
                             let name_str = app.new_query_name.value().trim().to_string();
@@ -461,10 +474,21 @@ where
                     }
                 } else if let Event::Mouse(mouse) = event {
                     // Mouse is only handled in Normal mode; while a modal/menu is
-                    // open, clicks and wheel events are ignored.
-                    if app.input_mode == InputMode::Normal {
-                        match handle_mouse(&mut app, mouse) {
-                            Action::LoadEntry => load_selected_entry(&mut app, &engine).await,
+                    // open, clicks and wheel events are ignored. `handle_mouse`
+                    // returns None for events we don't act on (motion/drag/etc.),
+                    // in which case we skip the redraw entirely — mouse capture
+                    // reports motion, and repainting on every move would churn.
+                    if app.input_mode == InputMode::Normal
+                        && let Some(action) = handle_mouse(&mut app, mouse)
+                    {
+                        needs_redraw = true;
+                        match action {
+                            Action::LoadEntry => {
+                                load_selected_entry(&mut app, &engine, true).await
+                            }
+                            Action::LoadEntryCached => {
+                                load_selected_entry(&mut app, &engine, false).await
+                            }
                             Action::OpenBrowser => {
                                 open_selected_in_browser(&app, &engine).await
                             }
@@ -477,10 +501,14 @@ where
                             refetch_selected_body_if_missing(&mut app, &engine).await;
                         }
                     }
+                } else {
+                    // Resize / focus / paste events: repaint to reflect the change.
+                    needs_redraw = true;
                 }
             }
             Some(msg) = engine.recv() => {
                 handle_app_message(&mut app, &engine, msg).await;
+                needs_redraw = true;
             }
         }
     }
@@ -489,14 +517,15 @@ where
 }
 
 /// Load the currently selected left-pane entry into the item list, resetting the
-/// filter and cursors. Shared by the `LoadEntry` key action and mouse clicks on
-/// a query entry.
-async fn load_selected_entry(app: &mut App, engine: &Engine) {
+/// filter and cursors. `always_sync` forces a GitHub fetch (deliberate select);
+/// when false, only stale caches are synced (wheel scrolling). Shared by the
+/// `LoadEntry`/`LoadEntryCached` key actions and mouse interaction.
+async fn load_selected_entry(app: &mut App, engine: &Engine, always_sync: bool) {
     app.filter = SingleLineInput::new();
     app.item_cursor = 0;
     app.detail_scroll = 0;
     app.clear_items();
-    select_current_entry(app, engine, true).await;
+    select_current_entry(app, engine, always_sync).await;
 }
 
 /// Open the currently selected item in the browser. Shared by the `OpenBrowser`

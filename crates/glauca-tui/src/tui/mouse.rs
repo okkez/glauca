@@ -95,14 +95,16 @@ pub(crate) fn hit_test(r: &MouseRegions, col: u16, row: u16) -> MouseTarget {
 }
 
 /// Translate a mouse event into focus/cursor changes plus an [`Action`] for the
-/// run loop to carry out (mirrors `handle_key_normal`). Only left-button presses
-/// and the scroll wheel are meaningful; everything else is a no-op.
-pub(crate) fn handle_mouse(app: &mut App, me: MouseEvent) -> Action {
+/// run loop to carry out (mirrors `handle_key_normal`). Returns `None` for events
+/// we don't act on (motion, drag, button-up, non-left buttons) so the run loop
+/// can skip an otherwise-wasted redraw — mouse capture reports motion events,
+/// which would otherwise repaint the whole UI on every pointer move.
+pub(crate) fn handle_mouse(app: &mut App, me: MouseEvent) -> Option<Action> {
     match me.kind {
-        MouseEventKind::Down(MouseButton::Left) => on_left_down(app, me.column, me.row),
-        MouseEventKind::ScrollDown => on_scroll(app, me.column, me.row, true),
-        MouseEventKind::ScrollUp => on_scroll(app, me.column, me.row, false),
-        _ => Action::None,
+        MouseEventKind::Down(MouseButton::Left) => Some(on_left_down(app, me.column, me.row)),
+        MouseEventKind::ScrollDown => Some(on_scroll(app, me.column, me.row, true)),
+        MouseEventKind::ScrollUp => Some(on_scroll(app, me.column, me.row, false)),
+        _ => None,
     }
 }
 
@@ -156,14 +158,16 @@ fn on_scroll(app: &mut App, col: u16, row: u16, down: bool) -> Action {
     let target = hit_test(&app.mouse_regions.borrow(), col, row);
     match target {
         MouseTarget::QueryEntry(_) | MouseTarget::QueryPane => {
+            // Cached load (no forced sync): a scroll gesture emits several notches
+            // and forcing a GitHub sync on each would burst API calls.
             if down {
                 if app.entry_cursor + 1 < app.entries.len() {
                     app.entry_cursor += 1;
-                    return Action::LoadEntry;
+                    return Action::LoadEntryCached;
                 }
             } else if app.entry_cursor > 0 {
                 app.entry_cursor -= 1;
-                return Action::LoadEntry;
+                return Action::LoadEntryCached;
             }
             Action::None
         }
@@ -307,7 +311,7 @@ mod tests {
             &mut app,
             mouse(MouseEventKind::Down(MouseButton::Left), 5, 2),
         );
-        assert!(matches!(action, Action::LoadEntry));
+        assert!(matches!(action, Some(Action::LoadEntry)));
         assert_eq!(app.entry_cursor, 1);
         assert_eq!(app.focus, Focus::QueryList);
     }
@@ -322,10 +326,13 @@ mod tests {
         };
         let ev = || mouse(MouseEventKind::Down(MouseButton::Left), 25, 1);
         // First click just selects.
-        assert!(matches!(handle_mouse(&mut app, ev()), Action::None));
+        assert!(matches!(handle_mouse(&mut app, ev()), Some(Action::None)));
         assert_eq!(app.focus, Focus::ItemList);
         // Second click on the same target within the window opens the browser.
-        assert!(matches!(handle_mouse(&mut app, ev()), Action::OpenBrowser));
+        assert!(matches!(
+            handle_mouse(&mut app, ev()),
+            Some(Action::OpenBrowser)
+        ));
     }
 
     #[test]
@@ -368,5 +375,31 @@ mod tests {
         assert_eq!(app.detail_scroll, 1);
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 60, 5));
         assert_eq!(app.detail_scroll, 0);
+    }
+
+    #[test]
+    fn scroll_query_pane_uses_cached_load() {
+        let mut app = App::new(two_queries());
+        *app.mouse_regions.borrow_mut() = MouseRegions {
+            query_inner: Some(Rect::new(1, 1, 18, 9)),
+            query_len: 2,
+            ..Default::default()
+        };
+        // Wheel over the query pane must not force a sync (LoadEntryCached, not
+        // LoadEntry) to avoid a burst of GitHub fetches per scroll gesture.
+        let action = handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 5, 1));
+        assert!(matches!(action, Some(Action::LoadEntryCached)));
+        assert_eq!(app.entry_cursor, 1);
+    }
+
+    #[test]
+    fn motion_events_are_ignored() {
+        let mut app = App::new(one_query());
+        *app.mouse_regions.borrow_mut() = MouseRegions {
+            detail_area: Some(Rect::new(50, 0, 40, 11)),
+            ..Default::default()
+        };
+        // Pointer motion must return None so the run loop can skip its redraw.
+        assert!(handle_mouse(&mut app, mouse(MouseEventKind::Moved, 60, 5)).is_none());
     }
 }

@@ -210,6 +210,10 @@ enum Action {
     None,
     Quit,
     LoadEntry,
+    /// Like `LoadEntry` but only syncs when the cache is stale (no forced GitHub
+    /// fetch). Used by wheel-scrolling the query pane, which can emit several
+    /// notches per gesture — a forced sync each would be a burst of API calls.
+    LoadEntryCached,
     SaveNewQuery,
     SaveNewFilterStream,
     SaveEditQuery,
