@@ -1698,4 +1698,45 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec![q1, q2], "each stale query enqueued exactly once");
     }
+
+    /// The other half of coalescing: once the worker releases a query's slot,
+    /// a still-stale query must be re-enqueued on the next pass. This is what
+    /// keeps an offline query retrying roughly once per interval rather than
+    /// getting stuck forever after its first (failed) attempt.
+    #[tokio::test]
+    async fn enqueue_stale_reenqueues_after_slot_released() {
+        use tempfile::NamedTempFile;
+
+        let file = NamedTempFile::new().expect("tempfile");
+        let pool = db::open_pool(&file.path().to_path_buf())
+            .await
+            .expect("open pool");
+        let q1 = db::upsert_query(&pool, "repo:o/a is:pr", "pull_request", None)
+            .await
+            .expect("q1");
+
+        let (sync_tx, mut sync_rx) = mpsc::channel::<SyncJob>(256);
+        let (app_tx, _app_rx) = mpsc::channel::<AppMessage>(256);
+        let gate = RateLimitGate::new();
+        let pending: PendingSyncSet = Arc::new(Mutex::new(HashSet::new()));
+
+        // First pass enqueues the stale query.
+        enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, 60, &gate, &pending).await;
+        let first = sync_rx.recv().await.expect("first job");
+        assert_eq!(first.query_id, q1);
+
+        // Slot still held (worker hasn't finished): the still-stale query must
+        // NOT be re-enqueued.
+        enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, 60, &gate, &pending).await;
+        assert!(
+            sync_rx.try_recv().is_err(),
+            "must not re-enqueue while the slot is held"
+        );
+
+        // Worker completion releases the slot; the still-stale query re-enqueues.
+        pending.lock().unwrap().remove(&q1);
+        enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, 60, &gate, &pending).await;
+        let second = sync_rx.recv().await.expect("re-enqueued job");
+        assert_eq!(second.query_id, q1, "released slot allows re-enqueue");
+    }
 }
