@@ -11,9 +11,10 @@ use crate::{db, github};
 use chrono::Utc;
 use octocrab::Octocrab;
 use sqlx::SqlitePool;
+use std::collections::HashSet;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, info, instrument, warn};
 
@@ -106,6 +107,9 @@ pub struct SyncJob {
     pub query_id: i64,
     pub query_str: String,
 }
+
+/// query_id のうち、キュー投入済み or 同期実行中のもの。背景同期の重複投入を防ぐ。
+type PendingSyncSet = Arc<Mutex<HashSet<i64>>>;
 
 // ── Background task helpers ───────────────────────────────────────────────────
 
@@ -692,12 +696,14 @@ pub async fn sync_worker_task(
     tx: mpsc::Sender<AppMessage>,
     stale_secs: i64,
     gate: RateLimitGate,
+    pending: PendingSyncSet,
 ) {
     while let Some(job) = rx.recv().await {
         // Skip (don't hit the API) while rate-limited; the query stays stale and
         // will be re-enqueued once the gate reopens.
         if !gate.is_open(Utc::now().timestamp()) {
             debug!(query_id = job.query_id, "skip sync: rate-limited");
+            pending.lock().unwrap().remove(&job.query_id);
             let _ = tx.send(AppMessage::BgSyncJobDone).await;
             continue;
         }
@@ -719,6 +725,9 @@ pub async fn sync_worker_task(
             )
             .await;
         }
+        // Job done (synced, skipped-as-fresh, or failed): release the coalescing
+        // slot so the next timer tick can re-enqueue this query.
+        pending.lock().unwrap().remove(&job.query_id);
         let _ = tx.send(AppMessage::BgSyncJobDone).await;
     }
 }
@@ -733,6 +742,7 @@ async fn enqueue_stale_queries(
     skip_query_id: Option<i64>,
     stale_secs: i64,
     gate: &RateLimitGate,
+    pending: &PendingSyncSet,
 ) {
     // Don't fill the queue while rate-limited; the timer will try again later.
     if !gate.is_open(Utc::now().timestamp()) {
@@ -749,13 +759,20 @@ async fn enqueue_stale_queries(
             .await
             .unwrap_or(true)
         {
-            let _ = sync_tx
-                .send(SyncJob {
-                    query_id: q.id,
-                    query_str: q.query,
-                })
-                .await;
-            count += 1;
+            // Coalesce: enqueue only if this query isn't already queued or in
+            // flight, so a long offline stretch can't pile up duplicate jobs.
+            // Lock is dropped before the await below (std Mutex must not be held
+            // across `.await`).
+            let newly = pending.lock().unwrap().insert(q.id);
+            if newly {
+                let _ = sync_tx
+                    .send(SyncJob {
+                        query_id: q.id,
+                        query_str: q.query,
+                    })
+                    .await;
+                count += 1;
+            }
         }
     }
     debug!(count, "enqueued stale queries");
@@ -773,12 +790,22 @@ pub async fn refresh_timer_task(
     app_tx: mpsc::Sender<AppMessage>,
     interval_secs: u64,
     gate: RateLimitGate,
+    pending: PendingSyncSet,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
     interval.tick().await; // skip the immediate first tick
     loop {
         interval.tick().await;
-        enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, interval_secs as i64, &gate).await;
+        enqueue_stale_queries(
+            &pool,
+            &sync_tx,
+            &app_tx,
+            None,
+            interval_secs as i64,
+            &gate,
+            &pending,
+        )
+        .await;
     }
 }
 
@@ -1041,6 +1068,9 @@ impl Engine {
         info!(sync_interval_secs = interval, "engine started");
         // Shared gate that pauses background sync after a rate limit is hit.
         let gate = RateLimitGate::new();
+        // Shared set coalescing background sync jobs: at most one queued/in-flight
+        // job per query, so a long offline stretch can't pile up duplicates.
+        let pending: PendingSyncSet = Arc::new(Mutex::new(HashSet::new()));
 
         // Spawn the sequential background sync worker.
         tokio::spawn(sync_worker_task(
@@ -1050,6 +1080,7 @@ impl Engine {
             msg_tx.clone(),
             stale,
             gate.clone(),
+            pending.clone(),
         ));
         // Spawn the periodic refresh timer.
         tokio::spawn(refresh_timer_task(
@@ -1058,6 +1089,7 @@ impl Engine {
             msg_tx.clone(),
             interval,
             gate.clone(),
+            pending.clone(),
         ));
         // Spawn the periodic local cache-maintenance sweep (body clears, overflow
         // prune, VACUUM). Purely local, so it ignores the rate-limit gate.
@@ -1071,6 +1103,7 @@ impl Engine {
             sync_job_tx,
             stale,
             gate,
+            pending,
         ));
 
         Ok((
@@ -1110,6 +1143,7 @@ impl Engine {
 
 /// Dispatch `EngineCommand`s, spawning the underlying async tasks so the loop never
 /// blocks on a single command (mirrors the previous in-`run_app` `tokio::spawn` use).
+#[allow(clippy::too_many_arguments)] // pool/gh/channels/stale/gate/pending are all genuinely needed
 async fn command_loop(
     pool: SqlitePool,
     gh: Octocrab,
@@ -1118,6 +1152,7 @@ async fn command_loop(
     sync_tx: mpsc::Sender<SyncJob>,
     stale_secs: i64,
     gate: RateLimitGate,
+    pending: PendingSyncSet,
 ) {
     // Bounds concurrent single-item re-fetches (see the RefreshItem arm). Shared
     // across all spawned RefreshItem tasks for the loop's lifetime.
@@ -1250,6 +1285,7 @@ async fn command_loop(
                 let sync_tx2 = sync_tx.clone();
                 let tx2 = msg_tx.clone();
                 let gate2 = gate.clone();
+                let pending2 = pending.clone();
                 tokio::spawn(async move {
                     enqueue_stale_queries(
                         &pool2,
@@ -1258,6 +1294,7 @@ async fn command_loop(
                         skip_query_id,
                         stale_secs,
                         &gate2,
+                        &pending2,
                     )
                     .await;
                 });
@@ -1620,5 +1657,45 @@ mod tests {
         // Past the reset it stays open with no negative wait.
         assert!(gate.is_open(1200));
         assert_eq!(gate.remaining_secs(1200), 0);
+    }
+
+    /// While the worker isn't draining (e.g. offline, jobs stuck in flight),
+    /// repeated timer ticks must not pile up duplicate jobs for the same query:
+    /// each stale query is enqueued at most once until its slot is released.
+    #[tokio::test]
+    async fn enqueue_stale_coalesces_duplicate_jobs() {
+        use tempfile::NamedTempFile;
+
+        let file = NamedTempFile::new().expect("tempfile");
+        let pool = db::open_pool(&file.path().to_path_buf())
+            .await
+            .expect("open pool");
+
+        // Freshly-created queries have last_fetched_at = NULL, so both are stale.
+        let q1 = db::upsert_query(&pool, "repo:o/a is:pr", "pull_request", None)
+            .await
+            .expect("q1");
+        let q2 = db::upsert_query(&pool, "repo:o/b is:pr", "pull_request", None)
+            .await
+            .expect("q2");
+
+        let (sync_tx, mut sync_rx) = mpsc::channel::<SyncJob>(256);
+        let (app_tx, _app_rx) = mpsc::channel::<AppMessage>(256);
+        let gate = RateLimitGate::new();
+        let pending: PendingSyncSet = Arc::new(Mutex::new(HashSet::new()));
+
+        // First pass enqueues both stale queries.
+        enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, 60, &gate, &pending).await;
+        // Second pass: nothing drained the queue, so both stay pending and must
+        // NOT be enqueued again (without coalescing this would send 4 total).
+        enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, 60, &gate, &pending).await;
+
+        drop(sync_tx); // close the channel so the drain below terminates
+        let mut ids = Vec::new();
+        while let Some(job) = sync_rx.recv().await {
+            ids.push(job.query_id);
+        }
+        ids.sort();
+        assert_eq!(ids, vec![q1, q2], "each stale query enqueued exactly once");
     }
 }
