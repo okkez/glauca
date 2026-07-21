@@ -1,3 +1,20 @@
+## 0.2.1 (2026-07-21)
+
+### Features
+
+- support OR groups in filter-stream matching ([#54](https://github.com/okkez/glauca/pull/54) by @okkez)
+- edit filter streams as multiple OR boxes ([#54](https://github.com/okkez/glauca/pull/54) by @okkez)
+- edit filter streams as multiple OR boxes ([#54](https://github.com/okkez/glauca/pull/54) by @okkez)
+- edit filter streams as multiple OR boxes ([#54](https://github.com/okkez/glauca/pull/54) by @okkez)
+- support mouse interactions ([#56](https://github.com/okkez/glauca/pull/56) by @okkez)
+
+### Fixes
+
+- preserve OR-group boundaries when expanding @me ([#54](https://github.com/okkez/glauca/pull/54) by @okkez)
+- correct mouse double-click, scroll focus, and pane hit-testing ([#56](https://github.com/okkez/glauca/pull/56) by @okkez)
+- harden mouse double-click against stray triggers ([#56](https://github.com/okkez/glauca/pull/56) by @okkez)
+- coalesce background sync jobs per query ([#57](https://github.com/okkez/glauca/pull/57) by @okkez)
+
 ## 0.2.0 (2026-07-15)
 
 ### Breaking Changes
