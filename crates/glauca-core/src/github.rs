@@ -560,13 +560,13 @@ mod tests {
     #[case::falls_back_to_github_token(&[("GITHUB_TOKEN", "b")], Some("gh"), Some("b"), "GITHUB_TOKEN")]
     #[case::falls_back_to_gh_auth_token(&[], Some("gh"), Some("gh"), "gh auth token")]
     #[case::unauthenticated(&[], None, None, "unauthenticated")]
-    fn resolve_token(
+    fn resolve_token_precedence(
         #[case] env: &[(&str, &str)],
         #[case] gh_auth: Option<&str>,
         #[case] want_token: Option<&str>,
         #[case] want_source: &str,
     ) {
-        let (tok, src) = super::resolve_token(env_from(env), || gh_auth.map(Into::into));
+        let (tok, src) = resolve_token(env_from(env), || gh_auth.map(Into::into));
         assert_eq!(tok.as_deref(), want_token);
         assert_eq!(src, want_source);
     }
@@ -789,8 +789,12 @@ mod tests {
         Some("2026-06-19T00:00:00Z"),
         "is:pr updated:>2026-01-01"
     )]
-    fn apply_updated_since(#[case] q: &str, #[case] since: Option<&str>, #[case] expected: &str) {
-        assert_eq!(super::apply_updated_since(q, since), expected);
+    fn apply_updated_since_cases(
+        #[case] q: &str,
+        #[case] since: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(apply_updated_since(q, since), expected);
     }
 
     // ── node_to_cached_item: None cases ──────────────────────────────────────────
