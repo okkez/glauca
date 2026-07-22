@@ -34,6 +34,7 @@ chrono = { version = "0.4.44", features = ["clock"] }
 tui-markdown = "0.3"
 base64 = "0.22"
 tempfile = "3.27.0"
+rstest = "0.26"
 glauca-core = { path = "crates/glauca-core" }
 smol = "2"
 # gpui GUI stack (pre-1.0, git-only). We track zed's default branch (same reference

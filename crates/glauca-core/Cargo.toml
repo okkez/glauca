@@ -24,3 +24,4 @@ tracing-appender.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rstest.workspace = true
