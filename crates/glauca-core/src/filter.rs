@@ -433,6 +433,7 @@ impl StreamFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn item(title: &str, author: &str, state: &str, labels: &[&str], repo: &str) -> ItemEntry {
         let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
@@ -464,46 +465,39 @@ mod tests {
         }
     }
 
-    #[test]
-    fn plain_text_matches_title() {
-        let q = FilterQuery::parse("fix");
-        assert!(q.matches(&item("Fix the bug", "alice", "open", &[], "owner/repo")));
-        assert!(!q.matches(&item("Add feature", "alice", "open", &[], "owner/repo")));
-    }
-
-    #[test]
-    fn state_filter() {
-        let q = FilterQuery::parse("state:open");
-        assert!(q.matches(&item("PR", "a", "open", &[], "o/r")));
-        assert!(!q.matches(&item("PR", "a", "closed", &[], "o/r")));
-    }
-
-    #[test]
-    fn is_prefix_alias() {
-        let q = FilterQuery::parse("is:merged");
-        assert!(q.matches(&item("PR", "a", "merged", &[], "o/r")));
-        assert!(!q.matches(&item("PR", "a", "open", &[], "o/r")));
-    }
-
-    #[test]
-    fn author_filter() {
-        let q = FilterQuery::parse("author:bob");
-        assert!(q.matches(&item("PR", "bob", "open", &[], "o/r")));
-        assert!(!q.matches(&item("PR", "alice", "open", &[], "o/r")));
-    }
-
-    #[test]
-    fn label_filter() {
-        let q = FilterQuery::parse("label:bug");
-        assert!(q.matches(&item("PR", "a", "open", &["bug", "wontfix"], "o/r")));
-        assert!(!q.matches(&item("PR", "a", "open", &["enhancement"], "o/r")));
-    }
-
-    #[test]
-    fn repo_filter() {
-        let q = FilterQuery::parse("repo:owner/myrepo");
-        assert!(q.matches(&item("PR", "a", "open", &[], "owner/myrepo")));
-        assert!(!q.matches(&item("PR", "a", "open", &[], "other/repo")));
+    // Single-qualifier / plain-text matching against the `item()` builder.
+    // Each case carries `(query, item, expected)`; positive and negative rows
+    // are listed adjacently so a failing qualifier is obvious from its name.
+    #[rstest]
+    // plain text matches the title …
+    #[case::text_title_hit("fix", item("Fix the bug", "alice", "open", &[], "owner/repo"), true)]
+    #[case::text_title_miss("fix", item("Add feature", "alice", "open", &[], "owner/repo"), false)]
+    // … the author …
+    #[case::text_author_hit("alice", item("some PR", "alice", "open", &[], "o/r"), true)]
+    #[case::text_author_miss("alice", item("some PR", "bob", "open", &[], "o/r"), false)]
+    // … a label …
+    #[case::text_label_hit("bug", item("some PR", "a", "open", &["bug"], "o/r"), true)]
+    #[case::text_label_miss("bug", item("some PR", "a", "open", &["enhancement"], "o/r"), false)]
+    // … and the "owner/name" repo string.
+    #[case::text_repo_hit("myrepo", item("PR", "a", "open", &[], "owner/myrepo"), true)]
+    #[case::text_repo_miss("myrepo", item("PR", "a", "open", &[], "owner/other"), false)]
+    // state:
+    #[case::state_open("state:open", item("PR", "a", "open", &[], "o/r"), true)]
+    #[case::state_closed("state:open", item("PR", "a", "closed", &[], "o/r"), false)]
+    // is: is an alias for state:
+    #[case::is_merged_hit("is:merged", item("PR", "a", "merged", &[], "o/r"), true)]
+    #[case::is_merged_miss("is:merged", item("PR", "a", "open", &[], "o/r"), false)]
+    // author:
+    #[case::author_hit("author:bob", item("PR", "bob", "open", &[], "o/r"), true)]
+    #[case::author_miss("author:bob", item("PR", "alice", "open", &[], "o/r"), false)]
+    // label:
+    #[case::label_hit("label:bug", item("PR", "a", "open", &["bug", "wontfix"], "o/r"), true)]
+    #[case::label_miss("label:bug", item("PR", "a", "open", &["enhancement"], "o/r"), false)]
+    // repo:
+    #[case::repo_hit("repo:owner/myrepo", item("PR", "a", "open", &[], "owner/myrepo"), true)]
+    #[case::repo_miss("repo:owner/myrepo", item("PR", "a", "open", &[], "other/repo"), false)]
+    fn matches(#[case] q: &str, #[case] it: ItemEntry, #[case] expected: bool) {
+        assert_eq!(FilterQuery::parse(q).matches(&it), expected);
     }
 
     #[test]
@@ -680,40 +674,43 @@ mod tests {
         pr
     }
 
-    #[test]
-    fn assignee_filter() {
-        assert!(FilterQuery::parse("assignee:bob").matches(&with_assignees(&["bob", "carol"])));
-        assert!(!FilterQuery::parse("assignee:dave").matches(&with_assignees(&["bob", "carol"])));
-        assert!(!FilterQuery::parse("assignee:bob").matches(&with_assignees(&[])));
+    #[rstest]
+    #[case::assignee_hit("assignee:bob", &["bob", "carol"], true)]
+    #[case::assignee_miss("assignee:dave", &["bob", "carol"], false)]
+    #[case::assignee_none("assignee:bob", &[], false)]
+    fn matches_assignee(#[case] q: &str, #[case] assignees: &[&str], #[case] expected: bool) {
+        assert_eq!(
+            FilterQuery::parse(q).matches(&with_assignees(assignees)),
+            expected
+        );
     }
 
-    #[test]
-    fn milestone_filter() {
+    #[rstest]
+    #[case::milestone_hit("milestone:v2.0", Some("v2.0"), true)]
+    #[case::milestone_miss("milestone:v3.0", Some("v2.0"), false)]
+    // No milestone set → no match.
+    #[case::milestone_none("milestone:v2.0", None, false)]
+    fn matches_milestone(#[case] q: &str, #[case] milestone: Option<&str>, #[case] expected: bool) {
         let mut pr = item("PR", "a", "open", &[], "o/r");
-        pr.milestone = Some("v2.0".to_string());
-        assert!(FilterQuery::parse("milestone:v2.0").matches(&pr));
-        assert!(!FilterQuery::parse("milestone:v3.0").matches(&pr));
-        // No milestone set → no match.
-        assert!(!FilterQuery::parse("milestone:v2.0").matches(&item(
-            "PR",
-            "a",
-            "open",
-            &[],
-            "o/r"
-        )));
+        pr.milestone = milestone.map(str::to_string);
+        assert_eq!(FilterQuery::parse(q).matches(&pr), expected);
     }
 
-    #[test]
-    fn base_and_head_filter() {
+    // `with_refs` items carry base_ref = "main", head_ref = "feature/x".
+    #[rstest]
+    #[case::base_hit("base:main", true, true)]
+    #[case::base_miss("base:develop", true, false)]
+    #[case::head_hit("head:feature/x", true, true)]
+    #[case::head_miss("head:feature/y", true, false)]
+    // No refs set → no match.
+    #[case::base_none("base:main", false, false)]
+    fn matches_base_head(#[case] q: &str, #[case] with_refs: bool, #[case] expected: bool) {
         let mut pr = item("PR", "a", "open", &[], "o/r");
-        pr.base_ref = Some("main".to_string());
-        pr.head_ref = Some("feature/x".to_string());
-        assert!(FilterQuery::parse("base:main").matches(&pr));
-        assert!(!FilterQuery::parse("base:develop").matches(&pr));
-        assert!(FilterQuery::parse("head:feature/x").matches(&pr));
-        assert!(!FilterQuery::parse("head:feature/y").matches(&pr));
-        // No refs set → no match.
-        assert!(!FilterQuery::parse("base:main").matches(&item("PR", "a", "open", &[], "o/r")));
+        if with_refs {
+            pr.base_ref = Some("main".to_string());
+            pr.head_ref = Some("feature/x".to_string());
+        }
+        assert_eq!(FilterQuery::parse(q).matches(&pr), expected);
     }
 
     #[test]
@@ -734,23 +731,20 @@ mod tests {
         pr
     }
 
-    #[test]
-    fn review_requested_matches_a_requested_reviewer() {
-        let pr = pr_with_reviewers(&["bob", "carol"]);
-        assert!(FilterQuery::parse("review-requested:bob").matches(&pr));
-        assert!(FilterQuery::parse("review-requested:carol").matches(&pr));
-    }
-
-    #[test]
-    fn review_requested_no_match_for_unrequested_login() {
-        let pr = pr_with_reviewers(&["bob", "carol"]);
-        assert!(!FilterQuery::parse("review-requested:dave").matches(&pr));
-    }
-
-    #[test]
-    fn review_requested_no_match_when_no_reviewers() {
-        let pr = pr_with_reviewers(&[]);
-        assert!(!FilterQuery::parse("review-requested:bob").matches(&pr));
+    #[rstest]
+    #[case::requested_bob("review-requested:bob", &["bob", "carol"], true)]
+    #[case::requested_carol("review-requested:carol", &["bob", "carol"], true)]
+    #[case::unrequested_login("review-requested:dave", &["bob", "carol"], false)]
+    #[case::no_reviewers("review-requested:bob", &[], false)]
+    fn matches_review_requested(
+        #[case] q: &str,
+        #[case] reviewers: &[&str],
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            FilterQuery::parse(q).matches(&pr_with_reviewers(reviewers)),
+            expected
+        );
     }
 
     #[test]
@@ -762,50 +756,28 @@ mod tests {
 
     // ── highlight_ranges ────────────────────────────────────────────────────────
 
-    #[test]
-    fn highlight_ranges_no_match_returns_empty() {
-        // No 'x','y','z' subsequence in the text → no ranges.
-        let q = FilterQuery::parse("xyz");
-        assert_eq!(q.highlight_ranges("Fix the bug"), vec![]);
-    }
-
-    #[test]
-    fn highlight_ranges_match_in_middle() {
-        let q = FilterQuery::parse("bug");
-        // "Fix the " = 8 bytes, "bug" = 3 bytes.
-        assert_eq!(q.highlight_ranges("Fix the bug here"), vec![(8, 11)]);
-    }
-
-    #[test]
-    fn highlight_ranges_match_at_start() {
-        let q = FilterQuery::parse("fix");
-        assert_eq!(q.highlight_ranges("Fix the bug"), vec![(0, 3)]);
-    }
-
-    #[test]
-    fn highlight_ranges_match_at_end() {
-        let q = FilterQuery::parse("bug");
-        assert_eq!(q.highlight_ranges("Fix the bug"), vec![(8, 11)]);
-    }
-
-    #[test]
-    fn highlight_ranges_empty_query_empty() {
-        let q = FilterQuery::parse("");
-        assert_eq!(q.highlight_ranges("Fix the bug"), vec![]);
-    }
-
-    #[test]
-    fn highlight_ranges_structured_token_empty() {
-        // state:open is a structured token, not a plain text token → no highlight.
-        let q = FilterQuery::parse("state:open");
-        assert_eq!(q.highlight_ranges("open issue title"), vec![]);
-    }
-
-    #[test]
-    fn highlight_ranges_fuzzy_produces_multiple_runs() {
-        // "fb" is a non-contiguous subsequence of "Foo Bar": 'f' at 0, 'b' at 4.
-        let q = FilterQuery::parse("fb");
-        assert_eq!(q.highlight_ranges("Foo Bar"), vec![(0, 1), (4, 5)]);
+    #[rstest]
+    // No 'x','y','z' subsequence in the text → no ranges.
+    #[case::no_match("xyz", "Fix the bug", vec![])]
+    // "Fix the " = 8 bytes, "bug" = 3 bytes.
+    #[case::match_in_middle("bug", "Fix the bug here", vec![(8, 11)])]
+    #[case::match_at_start("fix", "Fix the bug", vec![(0, 3)])]
+    #[case::match_at_end("bug", "Fix the bug", vec![(8, 11)])]
+    #[case::empty_query("", "Fix the bug", vec![])]
+    // state:open is a structured token, not a plain text token → no highlight.
+    #[case::structured_token("state:open", "open issue title", vec![])]
+    // "fb" is a non-contiguous subsequence of "Foo Bar": 'f' at 0, 'b' at 4.
+    #[case::fuzzy_multiple_runs("fb", "Foo Bar", vec![(0, 1), (4, 5)])]
+    // A negated text token never highlights.
+    #[case::negated_token("-bug", "Fix the bug", vec![])]
+    // "Fix" matches even though the token is lowercase "fix".
+    #[case::case_insensitive("fix", "Fix the bug", vec![(0, 3)])]
+    fn highlight_ranges(
+        #[case] q: &str,
+        #[case] text: &str,
+        #[case] expected: Vec<(usize, usize)>,
+    ) {
+        assert_eq!(FilterQuery::parse(q).highlight_ranges(text), expected);
     }
 
     // ── parse edge cases ────────────────────────────────────────────────────────
@@ -954,27 +926,7 @@ mod tests {
         assert!(!q.matches(&with_ms));
     }
 
-    #[test]
-    fn negated_text_token_does_not_highlight() {
-        let q = FilterQuery::parse("-bug");
-        assert_eq!(q.highlight_ranges("Fix the bug"), vec![]);
-    }
-
     // ── matches edge cases ───────────────────────────────────────────────────────
-
-    #[test]
-    fn plain_text_matches_author() {
-        let q = FilterQuery::parse("alice");
-        assert!(q.matches(&item("some PR", "alice", "open", &[], "o/r")));
-        assert!(!q.matches(&item("some PR", "bob", "open", &[], "o/r")));
-    }
-
-    #[test]
-    fn plain_text_matches_label() {
-        let q = FilterQuery::parse("bug");
-        assert!(q.matches(&item("some PR", "a", "open", &["bug"], "o/r")));
-        assert!(!q.matches(&item("some PR", "a", "open", &["enhancement"], "o/r")));
-    }
 
     #[test]
     fn author_filter_none_author_does_not_match() {
@@ -1006,13 +958,6 @@ mod tests {
     fn author_filter_case_insensitive() {
         let q = FilterQuery::parse("author:Alice");
         assert!(q.matches(&item("PR", "alice", "open", &[], "o/r")));
-    }
-
-    #[test]
-    fn highlight_ranges_case_insensitive_match() {
-        let q = FilterQuery::parse("fix");
-        // "Fix" should still match even though the token is lowercase "fix".
-        assert_eq!(q.highlight_ranges("Fix the bug"), vec![(0, 3)]);
     }
 
     #[test]
@@ -1066,13 +1011,5 @@ mod tests {
         assert!(q.matches(&item("Filter the list", "a", "open", &[], "o/r")));
         // A char not present in order must not match.
         assert!(!FilterQuery::parse("zzz").matches(&item("Filter", "a", "open", &[], "o/r")));
-    }
-
-    #[test]
-    fn plain_text_matches_repo() {
-        // Plain tokens now also match the "owner/name" repo string.
-        let q = FilterQuery::parse("myrepo");
-        assert!(q.matches(&item("PR", "a", "open", &[], "owner/myrepo")));
-        assert!(!q.matches(&item("PR", "a", "open", &[], "owner/other")));
     }
 }

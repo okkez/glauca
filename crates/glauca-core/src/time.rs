@@ -65,23 +65,27 @@ pub fn format_local_datetime(rfc3339: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn humanize_secs_buckets() {
-        assert_eq!(humanize_secs(0), "now");
-        assert_eq!(humanize_secs(59), "now");
-        assert_eq!(humanize_secs(60), "1m");
-        assert_eq!(humanize_secs(3599), "59m");
-        assert_eq!(humanize_secs(3600), "1h");
-        assert_eq!(humanize_secs(86_399), "23h");
-        assert_eq!(humanize_secs(86_400), "1d");
-        assert_eq!(humanize_secs(2_591_999), "29d");
-        assert_eq!(humanize_secs(2_592_000), "1mo");
-        // 30-day months mean the last sub-year bucket reads "12mo".
-        assert_eq!(humanize_secs(31_535_999), "12mo");
-        assert_eq!(humanize_secs(31_536_000), "1y");
-        // Clock skew / future timestamps clamp to "now".
-        assert_eq!(humanize_secs(-100), "now");
+    // Bucket boundaries: each pair is (seconds, expected label), with the
+    // low/high edges of every bucket listed adjacently.
+    #[rstest]
+    #[case::now_zero(0, "now")]
+    #[case::now_upper(59, "now")]
+    #[case::minute_lower(60, "1m")]
+    #[case::minute_upper(3599, "59m")]
+    #[case::hour_lower(3600, "1h")]
+    #[case::hour_upper(86_399, "23h")]
+    #[case::day_lower(86_400, "1d")]
+    #[case::day_upper(2_591_999, "29d")]
+    #[case::month_lower(2_592_000, "1mo")]
+    // 30-day months mean the last sub-year bucket reads "12mo".
+    #[case::month_upper(31_535_999, "12mo")]
+    #[case::year_lower(31_536_000, "1y")]
+    // Clock skew / future timestamps clamp to "now".
+    #[case::negative_clamps_to_now(-100, "now")]
+    fn humanize_secs_buckets(#[case] secs: i64, #[case] expected: &str) {
+        assert_eq!(humanize_secs(secs), expected);
     }
 
     #[test]
