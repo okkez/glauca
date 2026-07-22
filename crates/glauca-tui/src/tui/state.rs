@@ -278,6 +278,7 @@ mod tests {
     use super::*;
     use crate::tui::test_support::*;
     use glauca_core::types::FilterStreamEntry;
+    use rstest::rstest;
 
     #[test]
     fn clamp_item_cursor_when_filter_reduces_list() {
@@ -503,53 +504,27 @@ mod tests {
 
     // ── expand_me ────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn expand_me_author_at_me() {
+    #[rstest]
+    #[case::author_at_me(Some("octocat"), "author:@me", "author:octocat")]
+    #[case::review_requested_at_me(
+        Some("octocat"),
+        "review-requested:@me",
+        "review-requested:octocat"
+    )]
+    #[case::standalone_at_me(Some("octocat"), "@me", "octocat")]
+    #[case::multiple_tokens(
+        Some("octocat"),
+        "author:@me review-requested:@me",
+        "author:octocat review-requested:octocat"
+    )]
+    // current_user is None → @me is preserved.
+    #[case::no_current_user(None, "author:@me", "author:@me")]
+    // No @me token → query is returned unchanged.
+    #[case::no_at_me(Some("octocat"), "is:pr is:open label:bug", "is:pr is:open label:bug")]
+    fn expand_me(#[case] user: Option<&str>, #[case] input: &str, #[case] expected: &str) {
         let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        assert_eq!(app.expand_me("author:@me"), "author:octocat");
-    }
-
-    #[test]
-    fn expand_me_review_requested_at_me() {
-        let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        assert_eq!(
-            app.expand_me("review-requested:@me"),
-            "review-requested:octocat"
-        );
-    }
-
-    #[test]
-    fn expand_me_standalone_at_me() {
-        let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        assert_eq!(app.expand_me("@me"), "octocat");
-    }
-
-    #[test]
-    fn expand_me_multiple_tokens() {
-        let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        assert_eq!(
-            app.expand_me("author:@me review-requested:@me"),
-            "author:octocat review-requested:octocat"
-        );
-    }
-
-    #[test]
-    fn expand_me_no_current_user_leaves_unchanged() {
-        let app = App::new(vec![]);
-        // current_user is None → @me is preserved.
-        assert_eq!(app.expand_me("author:@me"), "author:@me");
-    }
-
-    #[test]
-    fn expand_me_no_at_me_unchanged() {
-        let mut app = App::new(vec![]);
-        app.current_user = Some("octocat".into());
-        let q = "is:pr is:open label:bug";
-        assert_eq!(app.expand_me(q), q);
+        app.current_user = user.map(Into::into);
+        assert_eq!(app.expand_me(input), expected);
     }
 
     #[test]
