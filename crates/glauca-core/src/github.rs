@@ -542,6 +542,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     // Env lookup over a fixed map, for resolve_token tests.
     fn env_from<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -553,35 +554,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolve_token_prefers_gh_token() {
-        let (tok, src) = resolve_token(
-            env_from(&[("GH_TOKEN", "a"), ("GITHUB_TOKEN", "b")]),
-            || Some("gh".into()),
-        );
-        assert_eq!(tok.as_deref(), Some("a"));
-        assert_eq!(src, "GH_TOKEN");
-    }
-
-    #[test]
-    fn resolve_token_falls_back_to_github_token() {
-        let (tok, src) = resolve_token(env_from(&[("GITHUB_TOKEN", "b")]), || Some("gh".into()));
-        assert_eq!(tok.as_deref(), Some("b"));
-        assert_eq!(src, "GITHUB_TOKEN");
-    }
-
-    #[test]
-    fn resolve_token_falls_back_to_gh_auth_token() {
-        let (tok, src) = resolve_token(env_from(&[]), || Some("gh".into()));
-        assert_eq!(tok.as_deref(), Some("gh"));
-        assert_eq!(src, "gh auth token");
-    }
-
-    #[test]
-    fn resolve_token_unauthenticated_when_nothing_available() {
-        let (tok, src) = resolve_token(env_from(&[]), || None);
-        assert_eq!(tok, None);
-        assert_eq!(src, "unauthenticated");
+    // Precedence: GH_TOKEN > GITHUB_TOKEN > `gh auth token` > unauthenticated.
+    #[rstest]
+    #[case::prefers_gh_token(&[("GH_TOKEN", "a"), ("GITHUB_TOKEN", "b")], Some("gh"), Some("a"), "GH_TOKEN")]
+    #[case::falls_back_to_github_token(&[("GITHUB_TOKEN", "b")], Some("gh"), Some("b"), "GITHUB_TOKEN")]
+    #[case::falls_back_to_gh_auth_token(&[], Some("gh"), Some("gh"), "gh auth token")]
+    #[case::unauthenticated(&[], None, None, "unauthenticated")]
+    fn resolve_token(
+        #[case] env: &[(&str, &str)],
+        #[case] gh_auth: Option<&str>,
+        #[case] want_token: Option<&str>,
+        #[case] want_source: &str,
+    ) {
+        let (tok, src) = super::resolve_token(env_from(env), || gh_auth.map(Into::into));
+        assert_eq!(tok.as_deref(), want_token);
+        assert_eq!(src, want_source);
     }
 
     #[test]
@@ -778,38 +765,32 @@ mod tests {
         assert!(result.contains("is:pr"));
     }
 
-    #[test]
-    fn apply_default_sort_preserves_explicit_sort() {
-        let q = "is:pr sort:created-desc";
+    // An explicit sort: qualifier is left untouched (append test kept separate
+    // above because it verifies suffix/substring, not full-string equality).
+    #[rstest]
+    #[case::explicit_sort("is:pr sort:created-desc")]
+    #[case::sort_updated_asc("is:issue sort:updated-asc")]
+    fn apply_default_sort_preserves_explicit_sort(#[case] q: &str) {
         let result = apply_default_sort(q);
         assert_eq!(result, q);
         assert!(!result.contains("sort:updated-desc"));
     }
 
-    #[test]
-    fn apply_default_sort_preserves_sort_updated_asc() {
-        let q = "is:issue sort:updated-asc";
-        let result = apply_default_sort(q);
-        assert_eq!(result, q);
-    }
-
-    #[test]
-    fn apply_updated_since_appends_when_set() {
-        let result = apply_updated_since("is:pr is:open", Some("2026-06-19T00:00:00Z"));
-        assert_eq!(result, "is:pr is:open updated:>=2026-06-19T00:00:00Z");
-    }
-
-    #[test]
-    fn apply_updated_since_none_is_full_fetch() {
-        let q = "is:pr is:open";
-        assert_eq!(apply_updated_since(q, None), q);
-    }
-
-    #[test]
-    fn apply_updated_since_respects_user_updated_qualifier() {
-        let q = "is:pr updated:>2026-01-01";
-        // User already constrains `updated:` — leave their query untouched.
-        assert_eq!(apply_updated_since(q, Some("2026-06-19T00:00:00Z")), q);
+    #[rstest]
+    #[case::appends_when_set(
+        "is:pr is:open",
+        Some("2026-06-19T00:00:00Z"),
+        "is:pr is:open updated:>=2026-06-19T00:00:00Z"
+    )]
+    #[case::none_is_full_fetch("is:pr is:open", None, "is:pr is:open")]
+    // User already constrains `updated:` → leave their query untouched.
+    #[case::respects_user_qualifier(
+        "is:pr updated:>2026-01-01",
+        Some("2026-06-19T00:00:00Z"),
+        "is:pr updated:>2026-01-01"
+    )]
+    fn apply_updated_since(#[case] q: &str, #[case] since: Option<&str>, #[case] expected: &str) {
+        assert_eq!(super::apply_updated_since(q, since), expected);
     }
 
     // ── node_to_cached_item: None cases ──────────────────────────────────────────
