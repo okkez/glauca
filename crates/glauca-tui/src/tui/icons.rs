@@ -161,6 +161,7 @@ impl Default for Icons {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn new_selects_set() {
@@ -170,11 +171,12 @@ mod tests {
         assert_ne!(Icons::unicode().pr, Icons::icon_font().pr);
     }
 
-    #[test]
-    fn review_state_badge_maps() {
+    #[rstest]
+    #[case::approved("APPROVED", "✅")]
+    #[case::unknown("unknown", "?")]
+    fn review_state_badge_maps(#[case] state: &str, #[case] expected: &str) {
         let i = Icons::unicode();
-        assert_eq!(i.review_state_badge("APPROVED").0, "✅");
-        assert_eq!(i.review_state_badge("unknown").0, "?");
+        assert_eq!(i.review_state_badge(state).0, expected);
     }
 
     #[test]

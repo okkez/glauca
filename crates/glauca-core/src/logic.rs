@@ -308,6 +308,7 @@ pub fn move_group_down(entries: &mut Vec<LeftPaneEntry>, query_idx: usize) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn expand_me_preserves_newline_group_separators() {
@@ -352,18 +353,19 @@ mod tests {
         assert_eq!(reviews[0].1, "APPROVED");
     }
 
-    #[test]
-    fn review_state_from_state_maps_all_variants() {
-        assert_eq!(ReviewState::from_state("APPROVED"), ReviewState::Approved);
-        assert_eq!(
-            ReviewState::from_state("CHANGES_REQUESTED"),
-            ReviewState::ChangesRequested
-        );
-        assert_eq!(ReviewState::from_state("COMMENTED"), ReviewState::Commented);
-        assert_eq!(ReviewState::from_state("DISMISSED"), ReviewState::Dismissed);
-        assert_eq!(ReviewState::from_state("PENDING"), ReviewState::Pending);
-        // Unknown / unexpected values fall back to Commented.
-        assert_eq!(ReviewState::from_state("WHATEVER"), ReviewState::Commented);
+    #[rstest]
+    #[case::approved("APPROVED", ReviewState::Approved)]
+    #[case::changes_requested("CHANGES_REQUESTED", ReviewState::ChangesRequested)]
+    #[case::commented("COMMENTED", ReviewState::Commented)]
+    #[case::dismissed("DISMISSED", ReviewState::Dismissed)]
+    #[case::pending("PENDING", ReviewState::Pending)]
+    // Unknown / unexpected values fall back to Commented.
+    #[case::unknown_falls_back("WHATEVER", ReviewState::Commented)]
+    fn review_state_from_state_maps_all_variants(
+        #[case] input: &str,
+        #[case] expected: ReviewState,
+    ) {
+        assert_eq!(ReviewState::from_state(input), expected);
     }
 
     #[test]
