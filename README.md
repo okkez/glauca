@@ -209,7 +209,10 @@ An item has to be missing from **two** such fetches in a row before it is droppe
 so expect it to disappear within two intervals rather than one. One absence isn't
 proof: a paged fetch can race an update that moves an item out from under the
 cursor, and GitHub's search index sometimes lags writes — deleting on the first
-miss would throw away that item's read state for nothing.
+miss would throw away that item's read state for nothing. Two cases skip the wait,
+because there the cached rows are known-stale rather than possibly-transient: a
+full resync you ask for explicitly (`S`), and the first sync after you edit a
+query's search string.
 
 Read/unread state lives on the cached row, so an item that leaves a query and later
 matches it again comes back marked unread — a re-requested review or a reopened

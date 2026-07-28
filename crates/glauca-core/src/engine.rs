@@ -526,6 +526,13 @@ pub async fn sync_task(
     // incremental fetches (a partial set can't tell us what fell out).
     let is_full = since.is_none();
     let mut keep_keys: Vec<(String, String, i64)> = Vec::new();
+    // `last_full_fetch_at` as it stands *before* the walk. Handed to the prune so it
+    // can detect a concurrent full fetch finishing first — see `prune_missing_items`.
+    let stamp_before = if is_full {
+        db::last_full_fetch_at(&pool, query_id).await.ok().flatten()
+    } else {
+        None
+    };
 
     // Reload the query's items from the DB and push them to the UI. Called after
     // each page (incremental display) and after a prune actually removes rows.
@@ -577,6 +584,15 @@ pub async fn sync_task(
             }
             Err(github::SearchError::Other(e)) => {
                 warn!(error = %e, "sync failed");
+                // Record the *attempt* so a query that reliably fails mid-walk doesn't
+                // re-page on every single sync forever: `last_full_fetch_at` staying
+                // unset would keep promoting each one to a full fetch, and this error
+                // path (unlike a rate limit) has no backoff of its own.
+                // `last_fetched_at` is untouched, so the cheap incremental retry still
+                // happens next cycle.
+                if is_full && let Err(e) = db::mark_full_fetch_attempted(&pool, query_id).await {
+                    warn!(error = %e, "failed to record full-fetch attempt");
+                }
                 let _ = tx
                     .send(AppMessage::SyncError {
                         query_id,
@@ -650,7 +666,23 @@ pub async fn sync_task(
         warn!("skipping prune: incomplete result set");
     }
     if may_prune(is_full, total_count, complete) {
-        match db::prune_missing_items(&pool, query_id, &keep_keys).await {
+        // `incremental: false` is only ever set by `FullResync` — the user's explicit
+        // "clean this up now". Honour that on the first absence instead of making them
+        // press `S` twice; automatic syncs still corroborate.
+        let strikes_required = if opts.incremental {
+            db::PRUNE_STRIKES
+        } else {
+            1
+        };
+        match db::prune_missing_items(
+            &pool,
+            query_id,
+            &keep_keys,
+            strikes_required,
+            stamp_before.as_deref(),
+        )
+        .await
+        {
             // Only reload when rows were actually removed — the final per-page
             // reload already reflects every upsert.
             Ok(deleted) if deleted > 0 => {

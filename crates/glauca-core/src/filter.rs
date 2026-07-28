@@ -153,7 +153,17 @@ impl Conditions {
             // cached, so keep just the last path segment. Without this the *canonical*
             // form a user copies out of their saved query would match nothing —
             // exactly the silent failure this qualifier was added to fix.
-            let slug = val.rsplit('/').next().unwrap_or(val);
+            //
+            // A trailing slash (`my-org/`, easy to hit mid-edit) leaves an empty
+            // segment; keep the raw value then, because reviewer matching is
+            // `contains`, and `contains("")` would match every item that has any
+            // requested reviewer at all. The raw value still contains a `/`, so it
+            // matches nothing — the right answer for an incomplete qualifier.
+            let slug = val
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(val);
             self.review_requested.push(slug.to_string());
         } else {
             self.text_tokens.push(lower.to_string());
@@ -761,6 +771,10 @@ mod tests {
     // so the org prefix is dropped rather than silently matching nothing.
     #[case::team_org_qualified("team-review-requested:my-org/my-team", &["my-team"], true)]
     #[case::team_org_qualified_no_match("team-review-requested:my-org/other", &["my-team"], false)]
+    // A trailing slash must not degenerate into `contains("")`, which would match
+    // every item that has any requested reviewer.
+    #[case::team_trailing_slash_matches_nothing("team-review-requested:my-org/", &["my-team"], false)]
+    #[case::team_bare_slash_matches_nothing("team-review-requested:/", &["my-team"], false)]
     fn matches_review_requested(
         #[case] q: &str,
         #[case] reviewers: &[&str],

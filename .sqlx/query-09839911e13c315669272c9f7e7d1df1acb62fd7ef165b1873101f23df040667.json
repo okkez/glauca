@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO items\n            (query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,\n             author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,\n             reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,\n             review_decision, milestone, last_read_updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT (query_id, repo_owner, repo_name, number)\n        DO UPDATE SET\n            title               = excluded.title,\n            url                 = excluded.url,\n            author              = excluded.author,\n            author_avatar_url   = excluded.author_avatar_url,\n            state               = excluded.state,\n            updated_at          = excluded.updated_at,\n            labels              = excluded.labels,\n            comment_count       = excluded.comment_count,\n            requested_reviewers = excluded.requested_reviewers,\n            reviews             = excluded.reviews,\n            body                = excluded.body,\n            assignees           = excluded.assignees,\n            is_draft            = excluded.is_draft,\n            repo_private        = excluded.repo_private,\n            created_at_item     = excluded.created_at_item,\n            base_ref            = excluded.base_ref,\n            head_ref            = excluded.head_ref,\n            review_decision     = excluded.review_decision,\n            milestone           = excluded.milestone,\n            -- A search that returned this item proves it still matches, so clear the\n            -- prune strikes it may have accumulated (see `prune_missing_items`). A\n            -- by-number re-fetch proves nothing about membership, so it leaves them.\n            missing_count       = CASE WHEN ? THEN 0 ELSE missing_count END\n            -- `last_read_updated_at` is intentionally NOT updated: it records the\n            -- `updated_at` the user had read up to. `updated_at` above IS refreshed,\n            -- so once a re-sync advances it past `last_read_updated_at` the item\n            -- becomes unread again (is_item_unread). New rows insert it as NULL.\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 26
+    },
+    "nullable": []
+  },
+  "hash": "09839911e13c315669272c9f7e7d1df1acb62fd7ef165b1873101f23df040667"
+}

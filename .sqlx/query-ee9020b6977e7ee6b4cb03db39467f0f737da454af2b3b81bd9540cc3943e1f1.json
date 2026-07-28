@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_full_fetch_at FROM queries WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_full_fetch_at",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ee9020b6977e7ee6b4cb03db39467f0f737da454af2b3b81bd9540cc3943e1f1"
+}
