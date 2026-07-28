@@ -144,15 +144,30 @@ pub async fn swap_filter_stream_positions(
 
 /// Update an existing query's display name and/or search string.
 /// Passing `None` for `name` clears the display name (falls back to query string).
+///
 /// Resets both fetch timestamps: the cache is stale, and the edited query needs a
 /// fresh full fetch to prune items the *old* query matched but the new one doesn't.
+///
+/// When the *search string* actually changed, also arms every cached row one strike
+/// short of deletion, so the first fetch under the new definition drops whatever it no
+/// longer returns instead of making the user stare at the old result set for another
+/// full-fetch interval. Renames must not do this: the result set is unchanged, so the
+/// transient absences corroboration exists to absorb (pagination races, search-index
+/// lag) are fully live and a single one would cost a live row its read marker. The
+/// front-ends submit name and query together from one form, so telling the two cases
+/// apart has to happen here.
 pub async fn update_query(
     pool: &SqlitePool,
     id: i64,
     name: Option<&str>,
     query: &str,
 ) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let previous = sqlx::query_scalar!("SELECT query FROM queries WHERE id = ?", id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let query_changed = previous.as_deref() != Some(query);
+
     sqlx::query!(
         "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL, last_full_fetch_at = NULL WHERE id = ?",
         name,
@@ -161,20 +176,17 @@ pub async fn update_query(
     )
     .execute(&mut *tx)
     .await?;
-    // Arm every cached row one strike short of deletion, so the first fetch under the
-    // new definition drops whatever it no longer returns. Corroboration exists to
-    // absorb *transient* absences from an unchanged query; after a redefinition the
-    // rows that stop matching are known-stale by construction, and making the user
-    // stare at the old result set for another full-fetch interval would be absurd.
-    // Rows the new query does return are reset to 0 by `upsert_items`.
-    let armed = PRUNE_STRIKES - 1;
-    sqlx::query!(
-        "UPDATE items SET missing_count = ? WHERE query_id = ?",
-        armed,
-        id
-    )
-    .execute(&mut *tx)
-    .await?;
+    if query_changed {
+        // Rows the new query does return are reset to 0 by `upsert_items`.
+        let armed = PRUNE_STRIKES - 1;
+        sqlx::query!(
+            "UPDATE items SET missing_count = ? WHERE query_id = ?",
+            armed,
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -262,8 +274,9 @@ pub async fn upsert_query(
 /// `last_full_fetch_at`, which gates the next forced full fetch — pass `true` only
 /// when the fetch really covered the whole result set *and* the prune ran (or was
 /// impossible), since that timestamp is a promise that ghosts were cleared. Both
-/// columns are written in one statement so `last_full_fetch_at <= last_fetched_at`
-/// always holds.
+/// columns are written in one statement, so this writer alone keeps
+/// `last_full_fetch_at <= last_fetched_at`; `mark_full_fetch_attempted` deliberately
+/// breaks that ordering to record a failed walk.
 pub async fn mark_fetched(pool: &SqlitePool, query_id: i64, full_fetch: bool) -> Result<()> {
     sqlx::query!(
         r#"
@@ -341,6 +354,16 @@ pub const PRUNE_STRIKES: i64 = 2;
 /// (Foreground `Sync`/`SyncIfStale` don't go through `SyncCoalescer`, so they really can
 /// overlap a background sync of the same query.)
 ///
+/// The check narrows that race rather than closing it, and knowingly so. `sync_task`
+/// stamps via `mark_fetched` *after* this returns, so a second walk committing inside
+/// that gap still sees the old value; `datetime('now')` has one-second resolution, so
+/// two walks finishing in the same second are indistinguishable; and two walks that
+/// both started before the query's first-ever full fetch both observe `NULL`. Closing
+/// these needs check-and-claim in one transaction — stamping here and demoting
+/// `mark_fetched` to `last_fetched_at` — which is worth doing if the race is ever
+/// observed. Each requires overlapping full walks *and* a transiently-absent row, and
+/// the cost when it happens is one row's read marker, so it is not worth the churn now.
+///
 /// Caller must only pass `keep` from an untruncated, complete full fetch — see
 /// `engine::may_prune`.
 pub async fn prune_missing_items(
@@ -378,7 +401,14 @@ pub async fn prune_missing_items(
     // the stamp inside the same transaction is what makes the concurrency check
     // meaningful: the winning walk's `mark_fetched` can't land between our read and
     // our writes.
-    let mut tx = pool.begin().await?;
+    //
+    // BEGIN IMMEDIATE, not the default deferred BEGIN: this transaction reads before
+    // it writes, and SQLite answers a SHARED→RESERVED promotion with an instant
+    // SQLITE_BUSY *without consulting the busy handler* (waiting there could
+    // deadlock), so `busy_timeout` would not save us from a concurrent writer —
+    // another query's `upsert_items`, a read-marking update, or the maintenance
+    // sweep. Taking the write lock up front makes the 30s timeout apply as intended.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let current_stamp = sqlx::query!(
         r#"SELECT last_full_fetch_at FROM queries WHERE id = ?"#,
         query_id,
@@ -388,6 +418,7 @@ pub async fn prune_missing_items(
     .last_full_fetch_at;
     if current_stamp.as_deref() != observed_stamp {
         debug!("skipping prune: a concurrent full fetch finished first");
+        tx.rollback().await?;
         return Ok(0);
     }
 
@@ -782,8 +813,17 @@ pub async fn last_full_fetch_at(pool: &SqlitePool, query_id: i64) -> Result<Opti
 /// Leaving the stamp alone would promote *every* subsequent sync to a full re-page for
 /// as long as the failure lasts — a query that reliably errors on page 3 would walk
 /// three pages a minute forever, with no backoff on the non-rate-limited error path.
-/// `last_fetched_at` is deliberately left stale so the cheap incremental retry still
-/// happens promptly; only the expensive full walk is deferred.
+/// `last_fetched_at` is deliberately left stale so the query is still retried next
+/// cycle; only the expensive *full* walk is deferred.
+///
+/// The deferral only helps a query that completed a fetch at least once before it
+/// started failing. One that has never succeeded has `last_fetched_at = NULL`, so
+/// `updated_since` yields nothing to be incremental against and `resolve_since` must
+/// keep choosing a full fetch regardless — there is no cheaper retry to fall back to.
+/// Editing a query re-enters that state.
+///
+/// Note this is the one writer that can leave `last_full_fetch_at > last_fetched_at`;
+/// see `mark_fetched`.
 pub async fn mark_full_fetch_attempted(pool: &SqlitePool, query_id: i64) -> Result<()> {
     sqlx::query!(
         "UPDATE queries SET last_full_fetch_at = datetime('now') WHERE id = ?",
@@ -1269,6 +1309,27 @@ mod tests {
         assert_eq!(auto_prune(&pool, qid, &keep(&[1])).await, 1);
         // …but keeps what it does.
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
+    }
+
+    /// Renaming must NOT arm: the search string is unchanged, so the result set is too,
+    /// and a single transient absence would then cost a live row its read marker. The
+    /// front-ends submit name and query together, so only `update_query` can tell the
+    /// two edits apart.
+    #[tokio::test]
+    async fn renaming_a_query_does_not_arm_prune_strikes() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1]).await;
+        let unchanged = "repo:owner/r is:pr";
+
+        update_query(&pool, qid, Some("New display name"), unchanged)
+            .await
+            .expect("rename");
+
+        // A first absence must still be just a strike.
+        assert_eq!(auto_prune(&pool, qid, &[]).await, 0);
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
+        // …and the second one deletes, so the counter is still working.
+        assert_eq!(auto_prune(&pool, qid, &[]).await, 1);
     }
 
     /// The arming must not outlive the first post-edit fetch: a row the new query does

@@ -112,6 +112,15 @@ struct Conditions {
 impl Conditions {
     /// Parse one token (already lowercased, `-` stripped) into this set.
     fn add_token(&mut self, lower: &str) {
+        // A qualifier with no value yet (`label:`, `team-review-requested:`) is a
+        // half-typed token from the type-ahead filter, not a constraint. It has to be
+        // dropped rather than stored: every qualifier below matches with `contains`,
+        // and `contains("")` is true, so an empty value would silently match *every*
+        // item that has the field at all — turning a partially-typed filter into no
+        // filter, which is precisely backwards.
+        if lower.ends_with(':') {
+            return;
+        }
         if let Some(val) = lower.strip_prefix("state:") {
             self.states.push(val.to_string());
         } else if let Some(val) = lower.strip_prefix("is:") {
@@ -775,6 +784,10 @@ mod tests {
     // every item that has any requested reviewer.
     #[case::team_trailing_slash_matches_nothing("team-review-requested:my-org/", &["my-team"], false)]
     #[case::team_bare_slash_matches_nothing("team-review-requested:/", &["my-team"], false)]
+    // A value-less qualifier is dropped, so it constrains nothing rather than acting
+    // as a hidden "has any requested reviewer" filter.
+    #[case::team_no_value_is_not_a_constraint("team-review-requested:", &[], true)]
+    #[case::review_requested_no_value_is_not_a_constraint("review-requested:", &[], true)]
     fn matches_review_requested(
         #[case] q: &str,
         #[case] reviewers: &[&str],
@@ -784,6 +797,31 @@ mod tests {
             FilterQuery::parse(q).matches(&pr_with_reviewers(reviewers)),
             expected
         );
+    }
+
+    /// Dropping a value-less qualifier must not drop the tokens typed alongside it —
+    /// the half-typed one stops constraining, the rest keep working.
+    #[test]
+    fn value_less_qualifier_leaves_sibling_conditions_intact() {
+        let q = FilterQuery::parse("is:pr label:");
+        let pr = item("Some PR", "alice", "open", &[], "o/r");
+        let mut issue = item("Some issue", "alice", "open", &[], "o/r");
+        issue.kind = "issue".into();
+
+        assert!(q.matches(&pr), "is:pr must still apply");
+        assert!(!q.matches(&issue), "is:pr must still exclude issues");
+    }
+
+    /// `label:` alone would otherwise become `contains("")` — true for any item that
+    /// has at least one label — quietly turning a partial filter into a wrong one.
+    #[test]
+    fn value_less_label_does_not_filter_by_having_labels() {
+        let q = FilterQuery::parse("label:");
+        let unlabelled = item("No labels", "alice", "open", &[], "o/r");
+        let labelled = item("Labelled", "alice", "open", &["bug"], "o/r");
+
+        assert!(q.matches(&unlabelled));
+        assert!(q.matches(&labelled));
     }
 
     #[test]

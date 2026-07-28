@@ -212,7 +212,9 @@ cursor, and GitHub's search index sometimes lags writes — deleting on the firs
 miss would throw away that item's read state for nothing. Two cases skip the wait,
 because there the cached rows are known-stale rather than possibly-transient: a
 full resync you ask for explicitly (`S`), and the first sync after you edit a
-query's search string.
+query's search string. Both accept the trade above — if such a fetch happens to
+race an update, an item can be dropped and come back unread on the next sync.
+(Renaming a query doesn't count as an edit here; the results are unchanged.)
 
 Read/unread state lives on the cached row, so an item that leaves a query and later
 matches it again comes back marked unread — a re-requested review or a reopened

@@ -467,6 +467,17 @@ fn may_prune(is_full: bool, total_count: usize, complete: bool) -> bool {
     is_full && total_count < SEARCH_RESULT_CAP && complete
 }
 
+/// How many consecutive absences this sync requires before deleting a row.
+///
+/// `incremental: false` is only ever set by `FullResync` — the user's explicit "clean
+/// this up now" — so that path deletes on the first absence rather than making them
+/// press `S` twice. Every automatic sync corroborates. The trade is deliberate: a
+/// forced resync that happens to race a mid-walk update can cost one row its read
+/// marker, which is the user's call to make and not the timer's.
+fn strikes_required(incremental: bool) -> i64 {
+    if incremental { db::PRUNE_STRIKES } else { 1 }
+}
+
 /// Resolve the `updated:>=` threshold for one sync. `Some(ts)` narrows the fetch to
 /// items updated since `ts`; `None` means a full fetch — the authoritative result
 /// set, and the only kind that may prune.
@@ -529,7 +540,16 @@ pub async fn sync_task(
     // `last_full_fetch_at` as it stands *before* the walk. Handed to the prune so it
     // can detect a concurrent full fetch finishing first — see `prune_missing_items`.
     let stamp_before = if is_full {
-        db::last_full_fetch_at(&pool, query_id).await.ok().flatten()
+        match db::last_full_fetch_at(&pool, query_id).await {
+            Ok(stamp) => stamp,
+            Err(e) => {
+                // Falling back to `None` will mismatch a non-NULL current stamp and so
+                // skip this cycle's prune — the safe direction, but log it rather than
+                // leaving a query that mysteriously never prunes.
+                warn!(error = %e, "could not read last_full_fetch_at; prune may be skipped");
+                None
+            }
+        }
     } else {
         None
     };
@@ -666,19 +686,11 @@ pub async fn sync_task(
         warn!("skipping prune: incomplete result set");
     }
     if may_prune(is_full, total_count, complete) {
-        // `incremental: false` is only ever set by `FullResync` — the user's explicit
-        // "clean this up now". Honour that on the first absence instead of making them
-        // press `S` twice; automatic syncs still corroborate.
-        let strikes_required = if opts.incremental {
-            db::PRUNE_STRIKES
-        } else {
-            1
-        };
         match db::prune_missing_items(
             &pool,
             query_id,
             &keep_keys,
-            strikes_required,
+            strikes_required(opts.incremental),
             stamp_before.as_deref(),
         )
         .await
@@ -698,10 +710,10 @@ pub async fn sync_task(
         }
     }
 
-    // Mark the query as freshly fetched only after all pages are done. Invariant:
-    // nothing stamps `last_full_fetch_at` before the paging loop finishes, so an
-    // aborted full fetch (rate limit, API error, DB write error — all of which
-    // `return` above) is never recorded as having pruned.
+    // Mark the query as freshly fetched only after all pages are done. Invariant: no
+    // path stamps `last_full_fetch_at` before the paging loop finishes *except*
+    // `mark_full_fetch_attempted` on the API-error return above, which records a failed
+    // attempt to bound retries and never implies a prune happened.
     //
     // A completed full fetch stamps even when it couldn't prune (truncated, or the
     // walk lost data). Withholding the stamp to "retry sooner" is a trap: some
@@ -804,6 +816,13 @@ impl MaintenanceConfig {
                 configured = max_items_per_query,
                 effective = effective.max_items_per_query,
                 "max_items_per_query raised to the search result cap"
+            );
+        }
+        if retention_days < effective.retention_days {
+            info!(
+                configured = retention_days,
+                effective = effective.retention_days,
+                "retention_days raised to its floor"
             );
         }
         effective
@@ -1862,6 +1881,16 @@ mod tests {
         #[case] want: bool,
     ) {
         assert_eq!(may_prune(is_full, total_count, complete), want);
+    }
+
+    #[rstest]
+    // Automatic syncs corroborate before deleting…
+    #[case::automatic(true, db::PRUNE_STRIKES)]
+    // …but `FullResync` (`incremental: false`, the `S` key) is an explicit request and
+    // must take effect on the first press.
+    #[case::forced_resync(false, 1)]
+    fn strikes_required_cases(#[case] incremental: bool, #[case] want: i64) {
+        assert_eq!(strikes_required(incremental), want);
     }
 
     #[rstest]
