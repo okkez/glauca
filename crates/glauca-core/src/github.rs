@@ -198,6 +198,16 @@ struct GqlError {
     message: String,
 }
 
+/// Join GraphQL error messages into one human-readable line, for the error text and
+/// the partial-response warning alike so both report failures the same way.
+fn error_detail(errors: &[GqlError]) -> String {
+    errors
+        .iter()
+        .map(|e| e.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// True when a GraphQL response carries a primary rate-limit error
 /// (`{"errors":[{"type":"RATE_LIMITED",...}]}`).
 fn is_rate_limited(resp: &GqlResponse) -> bool {
@@ -341,12 +351,7 @@ pub async fn search_page(
         return Err(SearchError::RateLimited);
     }
     let Some(data) = resp.data else {
-        let detail = resp
-            .errors
-            .iter()
-            .map(|e| e.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
+        let detail = error_detail(&resp.errors);
         return Err(SearchError::Other(anyhow::anyhow!(
             "GraphQL search returned no data: {detail}"
         )));
@@ -386,11 +391,7 @@ fn parse_nodes(
     let dropped = nodes.len() - items.len();
     let faithful = dropped == 0 && errors.is_empty();
     if !faithful {
-        let detail = errors
-            .iter()
-            .map(|e| e.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
+        let detail = error_detail(errors);
         warn!(
             dropped,
             node_count = nodes.len(),

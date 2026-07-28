@@ -69,7 +69,9 @@ pub struct TauriSettings {
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
     /// Per-query cap on cached rows; read overflow beyond it is pruned. Defaults
-    /// to `DEFAULT_MAX_ITEMS_PER_QUERY`.
+    /// to `DEFAULT_MAX_ITEMS_PER_QUERY`, and is raised to GitHub search's
+    /// ~1000-result cap if set lower (a smaller cap deletes rows the next sync
+    /// re-inserts as unread).
     #[serde(default = "default_max_items_per_query")]
     pub max_items_per_query: u64,
 }

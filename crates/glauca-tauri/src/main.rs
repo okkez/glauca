@@ -43,10 +43,10 @@ fn main() -> anyhow::Result<()> {
         settings.sync_interval_secs,
         settings.full_fetch_interval_secs,
     );
-    let maintenance = glauca_core::engine::MaintenanceConfig {
-        retention_days: settings.retention_days,
-        max_items_per_query: settings.max_items_per_query,
-    };
+    let maintenance = glauca_core::engine::MaintenanceConfig::effective(
+        settings.retention_days,
+        settings.max_items_per_query,
+    );
 
     // Bring up DB + GitHub client + engine on the Tauri-managed tokio runtime, so
     // the engine's internal `tokio::spawn` tasks share that runtime with the async

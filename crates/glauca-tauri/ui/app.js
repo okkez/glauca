@@ -162,20 +162,11 @@ function isUnread(it) {
   return it.last_read_updated_at == null || it.updated_at > it.last_read_updated_at;
 }
 
-// Banner text for a ChangeCounts. Mirrors core's `ChangeCounts::banner_label` so
-// the three front-ends word it identically.
-function changesLabel(c) {
-  if (c.updated && c.removed) return `${c.updated} updated, ${c.removed} no longer match`;
-  if (c.updated) return `${c.updated} updated`;
-  if (c.removed) return `${c.removed} no longer match`;
-  return "";
-}
-
 // Show/hide the change banner based on held-back background items for the
-// currently-selected query. Clicking it applies the pending items. The diff
-// delegates to core's count_changes (via count_item_changes) so the definition
-// matches the TUI/GUI — including counting removals, so a sync that only pruned
-// items no longer matching the query isn't mistaken for "nothing changed".
+// currently-selected query. Clicking it applies the pending items. Both the diff
+// and its wording come from core (via count_item_changes), so this matches the
+// TUI/GUI exactly — including counting removals, so a sync that only pruned items
+// no longer matching the query isn't mistaken for "nothing changed".
 async function updateBanner() {
   const banner = $("banner");
   const e = state.entries[state.selectedEntry];
@@ -189,25 +180,24 @@ async function updateBanner() {
   try {
     changes = await invoke("count_item_changes", { current, fresh });
   } catch {
-    // Banner is display-only, so a coarse count is fine — but `removed` must not be
-    // hardcoded to 0. A sync that pruned everything leaves `fresh` empty, and calling
-    // that "no changes" would discard the held-back list and keep the stale rows on
-    // screen: the exact bug the removed count exists to prevent.
-    changes = { updated: fresh.length, removed: Math.max(0, current.length - fresh.length) };
+    // The banner is display-only, so a vague label beats no banner at all: losing
+    // the count must not lose the affordance, or a sync that pruned everything
+    // would silently keep the stale rows on screen.
+    changes = { total: 1, label: "updated in background" };
   }
   // The selection may have moved while the count was in flight; a stale
   // resolution must not repaint the banner for a query no longer shown
   // (previewEntry already re-ran updateBanner for the new one).
   const cur = state.entries[state.selectedEntry];
   if (!cur || cur.rootQueryId !== e.rootQueryId) return;
-  if (changes.updated + changes.removed === 0) {
+  if (changes.total === 0) {
     // Nothing user-visible changed; drop the held-back items instead of
     // showing an empty banner (the GUI clears pending the same way).
     state.pending.delete(e.rootQueryId);
     banner.hidden = true;
     return;
   }
-  banner.textContent = `${changesLabel(changes)} — click to refresh`;
+  banner.textContent = `${changes.label} — click to refresh`;
   banner.hidden = false;
   banner.onclick = () => applyPending(e.rootQueryId);
 }

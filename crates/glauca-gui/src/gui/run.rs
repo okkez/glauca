@@ -35,10 +35,7 @@ pub(crate) fn run() -> Result<()> {
                 settings.sync_interval_secs,
                 settings.full_fetch_interval_secs,
             ),
-            MaintenanceConfig {
-                retention_days: settings.retention_days,
-                max_items_per_query: settings.max_items_per_query,
-            },
+            MaintenanceConfig::effective(settings.retention_days, settings.max_items_per_query),
         )
         .await
     })?;

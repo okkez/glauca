@@ -246,13 +246,33 @@ pub async fn filter_items(
         .collect())
 }
 
+/// What the banner needs to know about a background sync's results.
+///
+/// Carries the rendered `label` rather than leaving the JS to format one, so the
+/// wording lives only in `ChangeCounts::banner_label` and can't drift between the
+/// three front-ends. `total` is likewise pre-computed so the "is there anything to
+/// show?" test is core's `is_empty`, not a re-derivation in JS.
+#[derive(serde::Serialize)]
+pub struct ItemChanges {
+    pub updated: usize,
+    pub removed: usize,
+    pub total: usize,
+    pub label: String,
+}
+
 /// Diff `fresh` against `current`, delegating to `glauca_core::logic::count_changes`
 /// so the change banner uses the exact definition the TUI/GUI use instead of a JS
 /// re-implementation. Removals are part of the result, so a sync that only pruned
 /// items no longer matching the query is not mistaken for "nothing changed".
 #[tauri::command]
-pub async fn count_item_changes(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> ChangeCounts {
-    count_changes(&current, &fresh)
+pub async fn count_item_changes(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> ItemChanges {
+    let counts: ChangeCounts = count_changes(&current, &fresh);
+    ItemChanges {
+        updated: counts.updated,
+        removed: counts.removed,
+        total: counts.total(),
+        label: counts.banner_label(),
+    }
 }
 
 #[tauri::command]

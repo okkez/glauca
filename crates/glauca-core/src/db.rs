@@ -469,6 +469,36 @@ pub struct CachedItem {
 
 /// Insert or replace a cached item for a query.
 pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
+    upsert_item_with(pool, item).await
+}
+
+/// Insert or replace a whole page of items in one transaction.
+///
+/// Each `upsert_item` is otherwise its own implicit transaction, and SQLite's default
+/// `synchronous=FULL` makes that a couple of fsyncs apiece. That was tolerable when a
+/// sync only wrote the handful of items whose `updated_at` had moved, but a periodic
+/// full fetch re-upserts a query's entire result set — up to `SEARCH_RESULT_CAP` rows
+/// — so the per-item commits turn into a visible stall on the same file the UI reads
+/// from. One transaction per page also makes the page atomic: a mid-page failure no
+/// longer leaves half of it applied.
+pub async fn upsert_items(pool: &SqlitePool, items: &[CachedItem]) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for item in items {
+        upsert_item_with(&mut *tx, item).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// The upsert statement itself, generic over pool/transaction so the single-item and
+/// batched entry points can't drift apart.
+async fn upsert_item_with<'e, E>(exec: E, item: &CachedItem) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let is_draft_int = item.is_draft as i64;
     let repo_private_int = item.repo_private as i64;
     sqlx::query!(
@@ -531,7 +561,7 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
         item.milestone,
         item.last_read_updated_at,
     )
-    .execute(pool)
+    .execute(exec)
     .await?;
     Ok(())
 }
@@ -656,7 +686,7 @@ pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64)
 /// fetched (NULL) or the last one is older than `max_age_secs`.
 ///
 /// Only a full fetch is an authoritative result set, so only a full fetch may
-/// prune rows that left the query (`prune_query_items`). This is therefore what
+/// prune rows that left the query (`engine::prune_corroborated`). This is therefore what
 /// bounds how long a stale row can linger; see `engine::resolve_since`.
 pub async fn is_full_fetch_due(
     pool: &SqlitePool,
@@ -683,45 +713,7 @@ pub async fn is_full_fetch_due(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
-
-    async fn test_pool() -> (SqlitePool, NamedTempFile) {
-        let file = NamedTempFile::new().expect("tempfile");
-        let pool = open_pool(&file.path().to_path_buf())
-            .await
-            .unwrap_or_else(|e| panic!("open pool: {e:#}"));
-        (pool, file)
-    }
-
-    fn make_item(query_id: i64, number: i64, title: &str) -> CachedItem {
-        CachedItem {
-            query_id,
-            kind: "pull_request".into(),
-            repo_owner: "owner".into(),
-            repo_name: "repo".into(),
-            repo_private: false,
-            number,
-            title: title.to_string(),
-            url: format!("https://github.com/owner/repo/pull/{number}"),
-            author: Some("alice".into()),
-            author_avatar_url: None,
-            state: "open".into(),
-            updated_at: "2026-05-22T00:00:00Z".into(),
-            labels: "[]".into(),
-            comment_count: 0,
-            requested_reviewers: "[]".into(),
-            reviews: "[]".into(),
-            body: None,
-            assignees: "[]".into(),
-            is_draft: false,
-            created_at_item: None,
-            base_ref: None,
-            head_ref: None,
-            review_decision: None,
-            milestone: None,
-            last_read_updated_at: None,
-        }
-    }
+    use crate::test_support::{make_item, test_pool};
 
     #[tokio::test]
     async fn delete_query_cascades_items() {

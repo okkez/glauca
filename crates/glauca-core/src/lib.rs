@@ -12,5 +12,7 @@ pub mod github;
 pub mod logging;
 pub mod logic;
 pub mod notify;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod time;
 pub mod types;

@@ -27,7 +27,7 @@ pub struct ChangeCounts {
     /// Items new to the list, or whose `updated_at` advanced.
     pub updated: usize,
     /// Items on screen but absent from the fresh list — they no longer match the
-    /// query and were pruned from the cache (`db::prune_query_items`).
+    /// query and were pruned from the cache (`engine::prune_corroborated`).
     ///
     /// Counting these is what makes a removal-only background sync visible. A
     /// front-end that looked at `updated` alone would see zero changes, discard the
@@ -36,8 +36,7 @@ pub struct ChangeCounts {
 }
 
 impl ChangeCounts {
-    /// Every change, of either kind. The Tauri front-end mirrors this sum in JS to
-    /// decide whether to show the banner, so keep the two definitions in step.
+    /// Every change, of either kind.
     pub fn total(&self) -> usize {
         self.updated + self.removed
     }
