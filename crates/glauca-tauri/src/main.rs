@@ -39,7 +39,10 @@ fn main() -> anyhow::Result<()> {
     // Honor the user's persisted settings (same per-front-end TOML pattern as
     // glauca-tui / glauca-gui), falling back to the shared core defaults.
     let settings = settings::TauriSettings::load();
-    let sync_interval_secs = settings.sync_interval_secs;
+    let sync = glauca_core::engine::SyncConfig::effective(
+        settings.sync_interval_secs,
+        settings.full_fetch_interval_secs,
+    );
     let maintenance = glauca_core::engine::MaintenanceConfig {
         retention_days: settings.retention_days,
         max_items_per_query: settings.max_items_per_query,
@@ -59,8 +62,7 @@ fn main() -> anyhow::Result<()> {
             // Keep a clone for AppState (rebuilding the left pane via list_entries);
             // the engine takes ownership of the original.
             let pool_for_state = pool.clone();
-            let (engine, init) =
-                Engine::start(pool, gh_client, sync_interval_secs, maintenance).await?;
+            let (engine, init) = Engine::start(pool, gh_client, sync, maintenance).await?;
             let current_user = init.current_user.clone();
             let query_names = commands::query_name_map(&init.entries);
             let init_json = serde_json::to_value(&init)?;

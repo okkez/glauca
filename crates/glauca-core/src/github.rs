@@ -270,6 +270,14 @@ pub(crate) fn apply_default_sort(query: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Whether `query` already constrains `updated:` itself. Such a query is never
+/// narrowed further by `apply_updated_since` (the user's choice is preserved), so
+/// the engine must treat its fetch as a *full* one — otherwise it would skip the
+/// prune for a result set it actually fetched in full. See `engine::resolve_since`.
+pub(crate) fn constrains_updated(query: &str) -> bool {
+    query.contains("updated:")
+}
+
 /// Append `updated:>=<since>` to `query` for an incremental fetch, unless the
 /// query already constrains `updated:` (then the user's choice is preserved) or
 /// `since` is `None` (a full fetch).
@@ -278,7 +286,7 @@ pub(crate) fn apply_updated_since<'a>(
     since: Option<&str>,
 ) -> std::borrow::Cow<'a, str> {
     match since {
-        Some(since) if !query.contains("updated:") => {
+        Some(since) if !constrains_updated(query) => {
             std::borrow::Cow::Owned(format!("{query} updated:>={since}"))
         }
         _ => std::borrow::Cow::Borrowed(query),
@@ -795,6 +803,15 @@ mod tests {
         #[case] expected: &str,
     ) {
         assert_eq!(apply_updated_since(q, since), expected);
+    }
+
+    #[rstest]
+    #[case::explicit_lower_bound("is:pr updated:>2026-01-01", true)]
+    #[case::explicit_range("is:pr updated:2026-01-01..2026-02-01", true)]
+    #[case::no_updated_qualifier("is:pr is:open", false)]
+    #[case::similar_but_different("is:pr team-review-requested:o/t", false)]
+    fn constrains_updated_cases(#[case] q: &str, #[case] expected: bool) {
+        assert_eq!(constrains_updated(q), expected);
     }
 
     // ── node_to_cached_item: None cases ──────────────────────────────────────────

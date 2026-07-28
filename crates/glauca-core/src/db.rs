@@ -143,7 +143,8 @@ pub async fn swap_filter_stream_positions(
 
 /// Update an existing query's display name and/or search string.
 /// Passing `None` for `name` clears the display name (falls back to query string).
-/// Resets last_fetched_at so the cache is considered stale.
+/// Resets both fetch timestamps: the cache is stale, and the edited query needs a
+/// fresh full fetch to prune items the *old* query matched but the new one doesn't.
 pub async fn update_query(
     pool: &SqlitePool,
     id: i64,
@@ -151,7 +152,7 @@ pub async fn update_query(
     query: &str,
 ) -> Result<()> {
     sqlx::query!(
-        "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL WHERE id = ?",
+        "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL, last_full_fetch_at = NULL WHERE id = ?",
         name,
         query,
         id,
@@ -240,10 +241,21 @@ pub async fn upsert_query(
     Ok(row.id)
 }
 
-/// Mark a query as freshly fetched.
-pub async fn mark_fetched(pool: &SqlitePool, query_id: i64) -> Result<()> {
+/// Mark a query as freshly fetched. `full_fetch` additionally stamps
+/// `last_full_fetch_at`, which gates the next forced full fetch — pass `true` only
+/// when the fetch really covered the whole result set *and* the prune ran (or was
+/// impossible), since that timestamp is a promise that ghosts were cleared. Both
+/// columns are written in one statement so `last_full_fetch_at <= last_fetched_at`
+/// always holds.
+pub async fn mark_fetched(pool: &SqlitePool, query_id: i64, full_fetch: bool) -> Result<()> {
     sqlx::query!(
-        "UPDATE queries SET last_fetched_at = datetime('now') WHERE id = ?",
+        r#"
+        UPDATE queries
+        SET last_fetched_at    = datetime('now'),
+            last_full_fetch_at = CASE WHEN ? THEN datetime('now') ELSE last_full_fetch_at END
+        WHERE id = ?
+        "#,
+        full_fetch,
         query_id,
     )
     .execute(pool)
@@ -279,6 +291,14 @@ pub async fn updated_since(
 /// is absent from `keep` (the authoritative full-fetch result set). Returns the
 /// number of rows deleted. Used only after an untruncated full fetch, so items
 /// that no longer match the query are dropped instead of lingering as ghosts.
+///
+/// Read state is lost on departure: `upsert_item` never writes
+/// `last_read_updated_at`, so an item that leaves the query and later matches
+/// again comes back as unread. Unlike `prune_query_overflow` — which reasons at
+/// length about avoiding exactly that, and protects the newest rows — this
+/// function has no such protection, because deleting rows that no longer match is
+/// its whole purpose. The behaviour is intended: a re-requested review or a
+/// reopened issue is new actionable work, so surfacing it as unread is correct.
 pub async fn prune_query_items(
     pool: &SqlitePool,
     query_id: i64,
@@ -590,6 +610,20 @@ pub async fn mark_all_items_read(pool: &SqlitePool, query_id: i64) -> Result<()>
     Ok(())
 }
 
+/// Whether `ts` (a SQLite datetime string) is more than `max_age_secs` old.
+/// SQLite does the arithmetic, so there is no Rust-side timestamp parse. Shared by
+/// `is_cache_stale` and `is_full_fetch_due` so both use one definition of "too old".
+async fn older_than(pool: &SqlitePool, ts: &str, max_age_secs: i64) -> Result<bool> {
+    let old: bool = sqlx::query_scalar!(
+        r#"SELECT (strftime('%s', 'now') - strftime('%s', ?)) > ? AS "old: bool""#,
+        ts,
+        max_age_secs,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(old)
+}
+
 /// Check whether the cache for a query is stale (older than `max_age_secs`).
 pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64) -> Result<bool> {
     let row = sqlx::query!(
@@ -605,16 +639,35 @@ pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64)
 
     match row.last_fetched_at {
         None => Ok(true),
-        Some(ts) => {
-            let stale: bool = sqlx::query_scalar!(
-                r#"SELECT (strftime('%s', 'now') - strftime('%s', ?)) > ? AS "stale: bool""#,
-                ts,
-                max_age_secs,
-            )
-            .fetch_one(pool)
-            .await?;
-            Ok(stale)
-        }
+        Some(ts) => older_than(pool, &ts, max_age_secs).await,
+    }
+}
+
+/// Whether `query_id` is due for a *full* (non-incremental) fetch: never full
+/// fetched (NULL) or the last one is older than `max_age_secs`.
+///
+/// Only a full fetch is an authoritative result set, so only a full fetch may
+/// prune rows that left the query (`prune_query_items`). This is therefore what
+/// bounds how long a stale row can linger; see `engine::resolve_since`.
+pub async fn is_full_fetch_due(
+    pool: &SqlitePool,
+    query_id: i64,
+    max_age_secs: i64,
+) -> Result<bool> {
+    let row = sqlx::query!(
+        r#"
+        SELECT last_full_fetch_at
+        FROM queries
+        WHERE id = ?
+        "#,
+        query_id,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    match row.last_full_fetch_at {
+        None => Ok(true),
+        Some(ts) => older_than(pool, &ts, max_age_secs).await,
     }
 }
 
@@ -879,11 +932,36 @@ mod tests {
         let stale = is_cache_stale(&pool, qid, 300).await.expect("stale check");
         assert!(stale);
 
-        mark_fetched(&pool, qid).await.expect("mark fetched");
+        // An *incremental* mark (`full_fetch: false`) still refreshes the cache
+        // timestamp — the two columns move independently.
+        mark_fetched(&pool, qid, false).await.expect("mark fetched");
 
         // Just fetched → not stale within 5 minutes.
         let stale = is_cache_stale(&pool, qid, 300).await.expect("stale check");
         assert!(!stale);
+    }
+
+    #[tokio::test]
+    async fn full_fetch_due_until_marked_full() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:open", "issue", None)
+            .await
+            .expect("upsert query");
+
+        // Never full fetched → due.
+        assert!(is_full_fetch_due(&pool, qid, 300).await.expect("due check"));
+
+        // An incremental sync must not satisfy the full-fetch deadline, or ghosts
+        // would never be pruned.
+        mark_fetched(&pool, qid, false).await.expect("mark fetched");
+        assert!(is_full_fetch_due(&pool, qid, 300).await.expect("due check"));
+
+        mark_fetched(&pool, qid, true).await.expect("mark fetched");
+        assert!(!is_full_fetch_due(&pool, qid, 300).await.expect("due check"));
+
+        // A negative threshold makes the age comparison true without waiting or
+        // time-travelling the clock: "older than -1 seconds" is always the case.
+        assert!(is_full_fetch_due(&pool, qid, -1).await.expect("due check"));
     }
 
     #[tokio::test]
@@ -896,7 +974,7 @@ mod tests {
         // Never fetched → None (caller does a full fetch).
         assert_eq!(updated_since(&pool, qid, 600).await.expect("since"), None);
 
-        mark_fetched(&pool, qid).await.expect("mark fetched");
+        mark_fetched(&pool, qid, false).await.expect("mark fetched");
         let since = updated_since(&pool, qid, 600)
             .await
             .expect("since")
@@ -997,10 +1075,11 @@ mod tests {
         let id = upsert_query(&pool, "is:pr is:open", "pull_request", None)
             .await
             .expect("upsert");
-        mark_fetched(&pool, id).await.expect("mark fetched");
+        mark_fetched(&pool, id, true).await.expect("mark fetched");
 
         // Confirm not stale right after fetch.
         assert!(!is_cache_stale(&pool, id, 300).await.unwrap());
+        assert!(!is_full_fetch_due(&pool, id, 300).await.unwrap());
 
         update_query(&pool, id, Some("Updated name"), "is:pr is:merged")
             .await
@@ -1011,8 +1090,10 @@ mod tests {
         assert_eq!(row.query, "is:pr is:merged");
         assert_eq!(row.name.as_deref(), Some("Updated name"));
 
-        // last_fetched_at should have been reset → stale again.
+        // Both timestamps should have been reset → stale, and due for a full fetch
+        // so items the *old* query matched get pruned.
         assert!(is_cache_stale(&pool, id, 300).await.unwrap());
+        assert!(is_full_fetch_due(&pool, id, 300).await.unwrap());
     }
 
     #[tokio::test]

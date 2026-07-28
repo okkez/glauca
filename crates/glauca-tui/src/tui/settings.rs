@@ -16,6 +16,13 @@ fn default_sync_interval_secs() -> u64 {
     glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
 }
 
+/// Default when the settings file omits `full_fetch_interval_secs`. Defined in core
+/// so all front-ends share one default; clamped to at least the sync interval by
+/// `SyncConfig::effective`.
+fn default_full_fetch_interval_secs() -> u64 {
+    glauca_core::engine::DEFAULT_FULL_FETCH_INTERVAL_SECS
+}
+
 /// Default when the settings file omits `retention_days`. Defined in core so all
 /// front-ends share one default. See `db::clear_stale_bodies`.
 fn default_retention_days() -> u64 {
@@ -41,6 +48,12 @@ pub struct TuiSettings {
     /// `DEFAULT_SYNC_INTERVAL_SECS`; the engine clamps it to a sane minimum.
     #[serde(default = "default_sync_interval_secs")]
     pub sync_interval_secs: u64,
+    /// How often an incremental background sync is upgraded to a full fetch, which
+    /// is what prunes items that silently stopped matching the query. Lower it to
+    /// drop such items sooner, raise it to spend less API quota on large queries.
+    /// Defaults to `DEFAULT_FULL_FETCH_INTERVAL_SECS`.
+    #[serde(default = "default_full_fetch_interval_secs")]
+    pub full_fetch_interval_secs: u64,
     /// Whether to render semantic icons using icon-font glyphs (Font Awesome /
     /// Nerd Font) instead of the default emoji/Unicode set. Defaults to `false`
     /// (opt-in): these glyphs only display in a terminal whose font provides
@@ -63,6 +76,7 @@ impl Default for TuiSettings {
         Self {
             notifications_enabled: false,
             sync_interval_secs: default_sync_interval_secs(),
+            full_fetch_interval_secs: default_full_fetch_interval_secs(),
             use_icon_font: false,
             retention_days: default_retention_days(),
             max_items_per_query: default_max_items_per_query(),

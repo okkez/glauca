@@ -183,6 +183,7 @@ pane_sizes = [200.0, 600.0, 400.0]  # left / center / right pane widths
 theme = "system"                     # "system" | "light" | "dark"
 notifications_enabled = false        # toggle desktop notifications
 sync_interval_secs = 60              # background sync interval, in seconds
+full_fetch_interval_secs = 1800      # how often a sync re-fetches in full (see below)
 ```
 
 The TUI reads `~/.config/glauca/tui.toml`:
@@ -190,7 +191,16 @@ The TUI reads `~/.config/glauca/tui.toml`:
 ```toml
 notifications_enabled = false        # toggle desktop notifications
 sync_interval_secs = 60              # background sync interval, in seconds
+full_fetch_interval_secs = 1800      # how often a sync re-fetches in full (see below)
 ```
+
+A background sync normally fetches only what changed since the last one, which is
+cheap but cannot notice an item *leaving* a query (a PR that merges out of an
+`is:open` query, or stops matching `team-review-requested:` once someone reviews
+it). Every `full_fetch_interval_secs` a sync re-fetches the whole result set
+instead and drops such items from the cache. Lower it to have them disappear
+sooner; raise it to spend less API quota on queries with many results. For a query
+whose results fit one page this costs no extra requests at all.
 
 ### Custom actions
 

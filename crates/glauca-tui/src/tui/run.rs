@@ -44,7 +44,10 @@ where
     let (mut engine, init) = Engine::start(
         pool,
         gh,
-        tui_settings.sync_interval_secs,
+        glauca_core::engine::SyncConfig::effective(
+            tui_settings.sync_interval_secs,
+            tui_settings.full_fetch_interval_secs,
+        ),
         glauca_core::engine::MaintenanceConfig {
             retention_days: tui_settings.retention_days,
             max_items_per_query: tui_settings.max_items_per_query,
