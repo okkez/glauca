@@ -11,7 +11,7 @@ use crate::{db, github};
 use chrono::Utc;
 use octocrab::Octocrab;
 use sqlx::SqlitePool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -138,6 +138,58 @@ impl SyncCoalescer {
     /// re-enqueue the query if it's still stale.
     fn release(&self, query_id: i64) {
         self.pending.lock().unwrap().remove(&query_id);
+    }
+}
+
+/// Item identity within one query's cache, as `prune_query_items` keys it.
+type ItemKey = (String, String, i64);
+
+/// Requires an item to be missing from *two consecutive* full fetches before it is
+/// pruned. Shared, cloneable, and in-memory only, like [`SyncCoalescer`].
+///
+/// A single absence is not proof that an item left the query. Search results are
+/// paged with a cursor over a live, `updated-desc`-sorted index, so an item updated
+/// while the walk is in progress moves toward page 1 — past a cursor that has already
+/// gone by — and is never returned. GitHub's search index also lags writes, so an
+/// item can drop out of results briefly and come back. Either way the item is still
+/// live, and deleting it costs the user its read marker: it returns on the next sync
+/// as unread. That was tolerable when a full fetch only happened on the very first
+/// sync or on a manual `S`; once pruning runs on a timer it would be a recurring
+/// papercut, so require corroboration.
+///
+/// Not persisted, deliberately: after a restart the first full fetch prunes nothing
+/// and the second one does. Erring toward keeping a ghost one extra interval is the
+/// safe direction, and it avoids a schema change for what is purely a debounce.
+#[derive(Clone, Default)]
+pub struct PruneGuard {
+    /// query_id -> keys that were missing from that query's previous full fetch.
+    missing: Arc<Mutex<HashMap<i64, HashSet<ItemKey>>>>,
+}
+
+impl PruneGuard {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record this fetch's missing keys and return the subset that was *also*
+    /// missing last time — the ones safe to delete.
+    fn corroborate(&self, query_id: i64, missing_now: HashSet<ItemKey>) -> Vec<ItemKey> {
+        let mut map = self.missing.lock().unwrap();
+        let confirmed = match map.get(&query_id) {
+            Some(prev) => missing_now.intersection(prev).cloned().collect(),
+            None => Vec::new(),
+        };
+        // Keep this run's set as the baseline for the next one. Keys confirmed and
+        // deleted now simply won't appear as missing next time (the row is gone), so
+        // they fall out on their own.
+        map.insert(query_id, missing_now);
+        confirmed
+    }
+
+    /// Drop a query's state, so a deleted/edited query leaves nothing behind and an
+    /// edited query starts corroborating from scratch against its new result set.
+    fn forget(&self, query_id: i64) {
+        self.missing.lock().unwrap().remove(&query_id);
     }
 }
 
@@ -461,39 +513,67 @@ struct PruneDecision {
 /// Decide whether a finished fetch may prune, and whether it counts as a completed
 /// full fetch for scheduling purposes.
 ///
-/// Only a full fetch is authoritative, so an incremental one never prunes. Beyond
-/// that, two conditions disqualify pruning — for opposite reasons, which is why they
-/// produce different `stamp` values:
+/// Only a full fetch is authoritative, so an incremental one never prunes. Two things
+/// then disqualify pruning:
 ///
 /// - **Truncated** (`total_count >= SEARCH_RESULT_CAP`): GitHub may have cut the
-///   result set off, so we can't tell a dropped item from a cut-off one. Pruning is
-///   *impossible* for this query and no later attempt would do better, so still
-///   stamp — otherwise the query would re-page its entire result set every cycle
-///   chasing a prune that can never run.
-/// - **Incomplete** (`!complete`): this particular walk lost data (an unparseable
-///   node, a partial GraphQL error, a page walk that couldn't continue). Pruning
-///   would delete live rows and their read markers. Don't stamp, so the next sync
-///   retries the full fetch promptly.
+///   result set off, so we can't tell an item that left the query from one that was
+///   cut off.
+/// - **Incomplete** (`!complete`): this walk lost data (an unparseable node, a
+///   partial GraphQL error, a page walk that couldn't continue), so a missing key
+///   doesn't prove the item left. Pruning would delete live rows and their read
+///   markers.
 ///
-/// Truncation is checked first: a truncated *and* incomplete fetch still can't ever
-/// prune, so re-fetching it early would be pointless work.
+/// A completed walk always earns its `last_full_fetch_at` stamp, *including* when it
+/// couldn't prune. Withholding the stamp to "retry sooner" is a trap: some
+/// conditions are permanent, not transient — a query spanning a SAML/SSO-restricted
+/// or OAuth-App-restricted org gets `FORBIDDEN` errors alongside its `data` on every
+/// single request, so `complete` would be false forever. That would promote *every*
+/// background sync to a full re-page (10+ requests per minute for a large query,
+/// straight into a secondary rate limit) while never once pruning. Stamping bounds
+/// the retry to one attempt per `full_fetch_interval_secs`, which is the same
+/// cadence the feature runs at anyway; the only cost is that a ghost may survive one
+/// extra interval.
 fn prune_decision(is_full: bool, total_count: usize, complete: bool) -> PruneDecision {
-    if !is_full {
-        return PruneDecision {
-            prune: false,
-            stamp: false,
-        };
-    }
-    if total_count >= SEARCH_RESULT_CAP {
-        return PruneDecision {
-            prune: false,
-            stamp: true,
-        };
-    }
     PruneDecision {
-        prune: complete,
-        stamp: false, // the prune itself sets this on success
+        prune: is_full && total_count < SEARCH_RESULT_CAP && complete,
+        stamp: is_full,
     }
+}
+
+/// Delete the cached items for `query_id` that this full fetch didn't return *and*
+/// the previous one didn't either, per [`PruneGuard`]. Returns rows deleted.
+async fn prune_corroborated(
+    pool: &SqlitePool,
+    query_id: i64,
+    keep_keys: &[db::ItemKey],
+    guard: &PruneGuard,
+) -> anyhow::Result<u64> {
+    let missing = db::items_missing_from(pool, query_id, keep_keys).await?;
+    if missing.is_empty() {
+        // Nothing absent: clear the baseline so a *previously* absent item that came
+        // back doesn't stay armed for deletion.
+        guard.corroborate(query_id, HashSet::new());
+        return Ok(0);
+    }
+
+    let by_key: HashMap<ItemKey, i64> = missing
+        .into_iter()
+        .map(|(row_id, key)| (key, row_id))
+        .collect();
+    let confirmed = guard.corroborate(query_id, by_key.keys().cloned().collect());
+    if confirmed.len() < by_key.len() {
+        debug!(
+            missing = by_key.len(),
+            confirmed = confirmed.len(),
+            "deferring prune of items missing for the first time"
+        );
+    }
+    let ids: Vec<i64> = confirmed
+        .iter()
+        .filter_map(|k| by_key.get(k).copied())
+        .collect();
+    db::delete_items(pool, &ids).await
 }
 
 /// Resolve the `updated:>=` threshold for one sync. `Some(ts)` narrows the fetch to
@@ -532,9 +612,9 @@ async fn resolve_since(
 
 /// Fetch fresh results from GitHub API page by page, upserting each page immediately
 /// so the UI can show results as they arrive rather than waiting for all pages.
-#[allow(clippy::too_many_arguments)] // pool/gh/ids/opts/tx/gate are all genuinely needed
+#[allow(clippy::too_many_arguments)] // pool/gh/ids/opts/tx/gate/guard are all genuinely needed
 #[instrument(
-    skip(pool, gh, query_str, opts, tx, gate),
+    skip(pool, gh, query_str, opts, tx, gate, guard),
     fields(background = opts.background, incremental = opts.incremental)
 )]
 pub async fn sync_task(
@@ -545,6 +625,7 @@ pub async fn sync_task(
     opts: SyncOpts,
     tx: mpsc::Sender<AppMessage>,
     gate: RateLimitGate,
+    guard: PruneGuard,
 ) {
     // Incremental fetches narrow the query to items updated since the last fetch;
     // `None` means a full fetch. See `resolve_since` for when each is chosen — in
@@ -566,6 +647,9 @@ pub async fn sync_task(
     // comparison, which must reflect what GitHub returned. Counting parsed items
     // would let dropped nodes pull a truncated set under the cap.
     let mut total_count = 0usize;
+    // Items actually cached, which is what the UI's "Synced N items" should say —
+    // reporting `total_count` there would include nodes we failed to parse.
+    let mut item_count = 0usize;
     // Whether `keep_keys` may be trusted as the complete result set. Cleared by any
     // page that lost nodes (parse failure or partial GraphQL error) and by a walk
     // that ended without exhausting the pages — in either case a key could be
@@ -638,6 +722,7 @@ pub async fn sync_task(
                     }
                 }
                 total_count += page.node_count;
+                item_count += page.items.len();
                 complete &= page.faithful;
                 debug!(
                     page_items = page.items.len(),
@@ -669,22 +754,22 @@ pub async fn sync_task(
 
     // After a full fetch that we can vouch for, drop cached items the query no
     // longer returns (e.g. a PR that was merged and left an `is:open` query).
-    let PruneDecision { prune, stamp } = prune_decision(is_full, total_count, complete);
-    if is_full && !prune && !complete {
+    let PruneDecision {
+        prune,
+        stamp: full_fetch_done,
+    } = prune_decision(is_full, total_count, complete);
+    if is_full && !complete && total_count < SEARCH_RESULT_CAP {
         warn!("skipping prune: incomplete result set");
     }
-    let mut full_fetch_done = stamp;
     if prune {
-        match db::prune_query_items(&pool, query_id, &keep_keys).await {
-            Ok(deleted) => {
-                full_fetch_done = true;
-                // Only reload when rows were actually removed — the final per-page
-                // reload already reflects every upsert.
-                if deleted > 0 {
-                    debug!(deleted, "pruned items no longer matching query");
-                    reload().await;
-                }
+        match prune_corroborated(&pool, query_id, &keep_keys, &guard).await {
+            // Only reload when rows were actually removed — the final per-page
+            // reload already reflects every upsert.
+            Ok(deleted) if deleted > 0 => {
+                debug!(deleted, "pruned items no longer matching query");
+                reload().await;
             }
+            Ok(_) => {}
             Err(e) => {
                 let _ = tx
                     .send(AppMessage::Status(format!("prune error: {e}")))
@@ -707,11 +792,11 @@ pub async fn sync_task(
             .await;
         return;
     }
-    info!(total_count, "sync done");
+    info!(total_count, item_count, complete, "sync done");
     let _ = tx
         .send(AppMessage::SyncDone {
             query_id,
-            count: total_count,
+            count: item_count,
         })
         .await;
 }
@@ -761,7 +846,9 @@ pub struct MaintenanceConfig {
     /// Age (days) past which an item's `body` is cleared. Terminal-state items are
     /// cleared regardless of age.
     pub retention_days: u64,
-    /// Per-query cap on cached rows; read overflow beyond it is pruned.
+    /// Per-query cap on cached rows; read overflow beyond it is pruned. Floored at
+    /// `SEARCH_RESULT_CAP` by `run_maintenance` — a smaller cap would delete rows the
+    /// next sync re-inserts as unread.
     pub max_items_per_query: u64,
 }
 
@@ -773,11 +860,14 @@ pub fn effective_interval(secs: u64) -> u64 {
 /// Tunables for background sync scheduling. Built via [`SyncConfig::effective`] so
 /// the clamping happens once, at the front-end boundary.
 #[derive(Debug, Clone, Copy)]
+/// Fields are private so [`SyncConfig::effective`] is the only way to build one:
+/// `interval_secs` reaches `tokio::time::interval`, which panics on a zero duration,
+/// and the clamping is what rules that out.
 pub struct SyncConfig {
     /// Auto-refresh interval, which doubles as the cache-staleness threshold.
-    pub interval_secs: u64,
+    interval_secs: u64,
     /// How often an incremental sync is upgraded to a full (pruning) fetch.
-    pub full_fetch_interval_secs: u64,
+    full_fetch_interval_secs: u64,
 }
 
 impl SyncConfig {
@@ -874,6 +964,7 @@ async fn backoff_until(gh: &Octocrab, now: i64) -> i64 {
 /// Processes `SyncJob`s sequentially, skipping jobs whose cache is already fresh.
 /// Sends `BgSyncJobDone` after each job (regardless of outcome) so the UI counter
 /// stays accurate.
+#[allow(clippy::too_many_arguments)] // pool/gh/channels/sync/gate/pending/guard all needed
 pub async fn sync_worker_task(
     pool: SqlitePool,
     gh: Octocrab,
@@ -882,6 +973,7 @@ pub async fn sync_worker_task(
     sync: SyncConfig,
     gate: RateLimitGate,
     pending: SyncCoalescer,
+    guard: PruneGuard,
 ) {
     while let Some(job) = rx.recv().await {
         // Skip (don't hit the API) while rate-limited; the query stays stale and
@@ -904,6 +996,7 @@ pub async fn sync_worker_task(
                 },
                 tx.clone(),
                 gate.clone(),
+                guard.clone(),
             )
             .await;
         }
@@ -1002,10 +1095,17 @@ pub async fn refresh_timer_task(
 /// the rest or crash the task.
 async fn run_maintenance(pool: &SqlitePool, cfg: MaintenanceConfig) {
     // Clamp to sane floors: `retention_days = 0` would clear essentially every
-    // body, and `max_items_per_query = 0` would make the overflow subquery
-    // `LIMIT 0` and delete *all* read rows. Mirrors `effective_interval`.
+    // body. Mirrors `effective_interval`.
     let retention_days = cfg.retention_days.max(1) as i64;
-    let max_items = cfg.max_items_per_query.max(1) as i64;
+    // The per-query cap must stay above the search cap, and not merely above 0
+    // (`max_items_per_query = 0` would make the overflow subquery `LIMIT 0` and
+    // delete *every* read row). A cap below `SEARCH_RESULT_CAP` cannot be honoured
+    // anyway: rows deleted as overflow are still inside the query's live result set,
+    // so the next full fetch re-inserts them — and `upsert_item` doesn't restore
+    // `last_read_updated_at`, so they come back *unread*. Before pruning ran on a
+    // timer that flapped at most once per session; now it would flap every
+    // maintenance sweep, so rule the configuration out rather than document it.
+    let max_items = cfg.max_items_per_query.max(SEARCH_RESULT_CAP as u64) as i64;
     match db::clear_stale_bodies(pool, retention_days).await {
         Ok(n) => info!(cleared = n, "maintenance: cleared stale item bodies"),
         Err(e) => warn!(error = %e, "maintenance: clear_stale_bodies failed"),
@@ -1265,6 +1365,8 @@ impl Engine {
         // Coalesces background sync jobs: at most one queued/in-flight job per
         // query, so a long offline stretch can't pile up duplicates.
         let pending = SyncCoalescer::new();
+        // Requires two consecutive full fetches to agree before an item is pruned.
+        let guard = PruneGuard::new();
 
         // Spawn the sequential background sync worker.
         tokio::spawn(sync_worker_task(
@@ -1275,6 +1377,7 @@ impl Engine {
             sync,
             gate.clone(),
             pending.clone(),
+            guard.clone(),
         ));
         // Spawn the periodic refresh timer.
         tokio::spawn(refresh_timer_task(
@@ -1298,6 +1401,7 @@ impl Engine {
             sync,
             gate,
             pending,
+            guard,
         ));
 
         Ok((
@@ -1347,6 +1451,7 @@ async fn command_loop(
     sync: SyncConfig,
     gate: RateLimitGate,
     pending: SyncCoalescer,
+    guard: PruneGuard,
 ) {
     let stale_secs = sync.stale_secs();
     // Bounds concurrent single-item re-fetches (see the RefreshItem arm). Shared
@@ -1378,6 +1483,7 @@ async fn command_loop(
                     },
                     msg_tx.clone(),
                     gate.clone(),
+                    guard.clone(),
                 ));
             }
             EngineCommand::FullResync {
@@ -1400,6 +1506,7 @@ async fn command_loop(
                     },
                     msg_tx.clone(),
                     gate.clone(),
+                    guard.clone(),
                 ));
             }
             EngineCommand::SyncIfStale {
@@ -1410,6 +1517,7 @@ async fn command_loop(
                 let gh2 = gh.clone();
                 let tx2 = msg_tx.clone();
                 let gate2 = gate.clone();
+                let guard2 = guard.clone();
                 tokio::spawn(async move {
                     if db::is_cache_stale(&pool2, query_id, stale_secs)
                         .await
@@ -1428,6 +1536,7 @@ async fn command_loop(
                             },
                             tx2,
                             gate2,
+                            guard2,
                         )
                         .await;
                     }
@@ -1555,6 +1664,9 @@ async fn command_loop(
             EngineCommand::EditQuery { id, name, query } => {
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
+                // The query string changed, so "missing last time" says nothing about
+                // the new result set; start corroborating from scratch.
+                guard.forget(id);
                 tokio::spawn(async move {
                     match db::update_query(&pool2, id, name.as_deref(), &query).await {
                         Ok(()) => {
@@ -1599,6 +1711,9 @@ async fn command_loop(
             EngineCommand::DeleteQuery { query_id } => {
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
+                // Drop the prune baseline so a later query reusing this id doesn't
+                // inherit stale "missing" keys and delete on its first full fetch.
+                guard.forget(query_id);
                 tokio::spawn(async move {
                     if db::delete_query(&pool2, query_id).await.is_ok() {
                         let _ = tx2.send(AppMessage::QueryDeleted { query_id }).await;
@@ -1791,15 +1906,16 @@ mod tests {
     #[rstest]
     // An incremental fetch is never authoritative, so it neither prunes nor stamps.
     #[case::incremental(false, 10, true, false, false)]
-    // The normal full fetch: prune, and let the prune's success do the stamping.
-    #[case::full_and_complete(true, 10, true, true, false)]
-    // Lost data mid-walk: must not prune (it would delete live rows), and must not
-    // stamp either, so the next sync retries the full fetch promptly.
-    #[case::full_but_incomplete(true, 10, false, false, false)]
-    // Truncated by GitHub: pruning is impossible for this query, so stamp anyway
-    // rather than re-page the whole result set every cycle forever.
+    // The normal full fetch: prune, and stamp.
+    #[case::full_and_complete(true, 10, true, true, true)]
+    // Lost data mid-walk: must not prune (it would delete live rows), but must still
+    // stamp — a permanently-partial query (e.g. one spanning an SSO-restricted org)
+    // would otherwise re-page on every single background sync, forever.
+    #[case::full_but_incomplete(true, 10, false, false, true)]
+    // Truncated by GitHub: pruning is impossible for this query, so stamp rather than
+    // re-page the whole result set every cycle chasing it.
     #[case::truncated(true, SEARCH_RESULT_CAP, true, false, true)]
-    // Truncated *and* incomplete: still can't ever prune, so don't pay to retry.
+    // Truncated *and* incomplete: still can't ever prune, and still stamps.
     #[case::truncated_and_incomplete(true, SEARCH_RESULT_CAP, false, false, true)]
     fn prune_decision_cases(
         #[case] is_full: bool,
@@ -2019,6 +2135,128 @@ mod tests {
             resolve_since(&pool, qid, query, incremental_opts(1800)).await,
             None
         );
+    }
+
+    fn key(number: i64) -> ItemKey {
+        ("owner".to_string(), "repo".to_string(), number)
+    }
+
+    /// A minimal cached PR in owner/repo, matching `key`'s identity.
+    fn cached_pr(query_id: i64, number: i64) -> db::CachedItem {
+        db::CachedItem {
+            query_id,
+            kind: "pull_request".into(),
+            repo_owner: "owner".into(),
+            repo_name: "repo".into(),
+            repo_private: false,
+            number,
+            title: format!("PR {number}"),
+            url: format!("https://github.com/owner/repo/pull/{number}"),
+            author: Some("alice".into()),
+            author_avatar_url: None,
+            state: "open".into(),
+            updated_at: "2026-05-22T00:00:00Z".into(),
+            labels: "[]".into(),
+            comment_count: 0,
+            requested_reviewers: "[]".into(),
+            reviews: "[]".into(),
+            body: None,
+            assignees: "[]".into(),
+            is_draft: false,
+            created_at_item: None,
+            base_ref: None,
+            head_ref: None,
+            review_decision: None,
+            milestone: None,
+            last_read_updated_at: None,
+        }
+    }
+
+    /// The core of the guard: one absence is never enough. This is what stops the
+    /// pagination race (an item updated mid-walk moves past the cursor and is never
+    /// returned) from deleting a live row and its read marker.
+    #[test]
+    fn prune_guard_requires_two_consecutive_absences() {
+        let guard = PruneGuard::new();
+
+        // First time #2 is missing: nothing to corroborate against yet.
+        assert!(guard.corroborate(1, HashSet::from([key(2)])).is_empty());
+        // Still missing on the next full fetch → confirmed.
+        assert_eq!(guard.corroborate(1, HashSet::from([key(2)])), vec![key(2)]);
+    }
+
+    /// An item that reappears must be disarmed, not deleted on its next absence-by-
+    /// coincidence several fetches later.
+    #[test]
+    fn prune_guard_forgets_an_item_that_came_back() {
+        let guard = PruneGuard::new();
+        guard.corroborate(1, HashSet::from([key(2)]));
+        // #2 is back, so this fetch reports nothing missing.
+        assert!(guard.corroborate(1, HashSet::new()).is_empty());
+        // It goes missing again — that's a *first* absence again, not a second.
+        assert!(guard.corroborate(1, HashSet::from([key(2)])).is_empty());
+    }
+
+    /// Baselines are per query, so two queries can't corroborate each other.
+    #[test]
+    fn prune_guard_keeps_queries_independent() {
+        let guard = PruneGuard::new();
+        guard.corroborate(1, HashSet::from([key(2)]));
+        assert!(
+            guard.corroborate(2, HashSet::from([key(2)])).is_empty(),
+            "query 2 has its own baseline"
+        );
+    }
+
+    /// Editing or deleting a query clears its baseline, so the next full fetch starts
+    /// over rather than deleting against a result set that no longer applies.
+    #[test]
+    fn prune_guard_forget_clears_the_baseline() {
+        let guard = PruneGuard::new();
+        guard.corroborate(1, HashSet::from([key(2)]));
+        guard.forget(1);
+        assert!(guard.corroborate(1, HashSet::from([key(2)])).is_empty());
+    }
+
+    /// End-to-end against a real cache: an item absent from the keep-set survives the
+    /// first full fetch and is deleted by the second.
+    #[tokio::test]
+    async fn prune_corroborated_defers_then_deletes() {
+        let (pool, _file) = test_pool().await;
+        let qid = db::upsert_query(&pool, "repo:owner/repo is:pr", "pull_request", None)
+            .await
+            .expect("q");
+        for n in 1..=2 {
+            db::upsert_item(&pool, &cached_pr(qid, n))
+                .await
+                .expect("upsert");
+        }
+        let guard = PruneGuard::new();
+        let keep = vec![("owner".to_string(), "repo".to_string(), 1)];
+
+        // #2 is missing, but one absence isn't proof.
+        assert_eq!(
+            prune_corroborated(&pool, qid, &keep, &guard)
+                .await
+                .expect("prune"),
+            0
+        );
+        assert_eq!(db::fetch_items(&pool, qid).await.expect("fetch").len(), 2);
+
+        // Missing again → deleted.
+        assert_eq!(
+            prune_corroborated(&pool, qid, &keep, &guard)
+                .await
+                .expect("prune"),
+            1
+        );
+        let remaining: Vec<i64> = db::fetch_items(&pool, qid)
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|i| i.number)
+            .collect();
+        assert_eq!(remaining, vec![1]);
     }
 
     /// While the worker isn't draining (e.g. offline, jobs stuck in flight),

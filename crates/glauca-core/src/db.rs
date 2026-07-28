@@ -287,23 +287,20 @@ pub async fn updated_since(
     Ok(row.since)
 }
 
-/// Delete cached items for `query_id` whose (repo_owner, repo_name, number) key
-/// is absent from `keep` (the authoritative full-fetch result set). Returns the
-/// number of rows deleted. Used only after an untruncated full fetch, so items
-/// that no longer match the query are dropped instead of lingering as ghosts.
+/// Item identity within a query's cache: (repo_owner, repo_name, number).
+pub type ItemKey = (String, String, i64);
+
+/// Cached rows for `query_id` whose key is absent from `keep` (a full fetch's result
+/// set) — i.e. candidates for pruning, paired with their row id.
 ///
-/// Read state is lost on departure: `upsert_item` never writes
-/// `last_read_updated_at`, so an item that leaves the query and later matches
-/// again comes back as unread. Unlike `prune_query_overflow` — which reasons at
-/// length about avoiding exactly that, and protects the newest rows — this
-/// function has no such protection, because deleting rows that no longer match is
-/// its whole purpose. The behaviour is intended: a re-requested review or a
-/// reopened issue is new actionable work, so surfacing it as unread is correct.
-pub async fn prune_query_items(
+/// Kept separate from [`delete_items`] so the caller can require corroboration before
+/// deleting: one absence does not prove an item left the query (see
+/// `engine::PruneGuard`).
+pub async fn items_missing_from(
     pool: &SqlitePool,
     query_id: i64,
-    keep: &[(String, String, i64)],
-) -> Result<u64> {
+    keep: &[ItemKey],
+) -> Result<Vec<(i64, ItemKey)>> {
     use std::collections::HashSet;
     let keep_set: HashSet<(&str, &str, i64)> = keep
         .iter()
@@ -317,19 +314,31 @@ pub async fn prune_query_items(
     .fetch_all(pool)
     .await?;
 
-    let stale_ids: Vec<i64> = existing
+    Ok(existing
         .into_iter()
         .filter(|r| !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number)))
-        .map(|r| r.id)
-        .collect();
+        .map(|r| (r.id, (r.repo_owner, r.repo_name, r.number)))
+        .collect())
+}
 
-    if stale_ids.is_empty() {
+/// Delete cached items by row id. Returns the number of rows deleted.
+///
+/// Read state is lost on deletion: `upsert_item` never writes
+/// `last_read_updated_at`, so an item that leaves a query and later matches again
+/// comes back as unread. Unlike `prune_query_overflow` — which reasons at length
+/// about avoiding exactly that, and protects the newest rows — pruning has no such
+/// protection, because deleting rows that no longer match is its whole purpose. The
+/// behaviour is intended: a re-requested review or a reopened issue is new actionable
+/// work, so surfacing it as unread is correct. What is *not* intended is deleting a
+/// row that still matches, which is why callers corroborate first.
+pub async fn delete_items(pool: &SqlitePool, ids: &[i64]) -> Result<u64> {
+    if ids.is_empty() {
         return Ok(0);
     }
 
     // Chunk to stay under SQLite's bound-variable limit on large prunes.
     let mut deleted = 0u64;
-    for chunk in stale_ids.chunks(900) {
+    for chunk in ids.chunks(900) {
         let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> =
             sqlx::QueryBuilder::new("DELETE FROM items WHERE id IN (");
         let mut sep = qb.separated(", ");
@@ -984,8 +993,19 @@ mod tests {
         assert!(since.contains('T') && since.ends_with('Z'), "{since}");
     }
 
+    /// Delete every cached row for `query_id` that is absent from `keep`, the way
+    /// pruning worked before corroboration was introduced. Only a test helper —
+    /// production goes through `engine::prune_corroborated`.
+    async fn prune_all_missing(pool: &SqlitePool, query_id: i64, keep: &[ItemKey]) -> u64 {
+        let missing = items_missing_from(pool, query_id, keep)
+            .await
+            .expect("missing");
+        let ids: Vec<i64> = missing.into_iter().map(|(id, _)| id).collect();
+        delete_items(pool, &ids).await.expect("delete")
+    }
+
     #[tokio::test]
-    async fn prune_removes_only_items_absent_from_keep() {
+    async fn items_missing_from_reports_only_items_absent_from_keep() {
         let (pool, _file) = test_pool().await;
         let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await
@@ -1001,9 +1021,13 @@ mod tests {
             ("owner".to_string(), "repo".to_string(), 1),
             ("owner".to_string(), "repo".to_string(), 3),
         ];
-        let deleted = prune_query_items(&pool, qid, &keep).await.expect("prune");
-        assert_eq!(deleted, 1);
+        let missing = items_missing_from(&pool, qid, &keep)
+            .await
+            .expect("missing");
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].1.2, 2, "only #2 is absent from keep");
 
+        assert_eq!(prune_all_missing(&pool, qid, &keep).await, 1);
         let mut remaining: Vec<i64> = fetch_items(&pool, qid)
             .await
             .expect("fetch")
@@ -1024,9 +1048,22 @@ mod tests {
             .await
             .expect("upsert");
 
-        let deleted = prune_query_items(&pool, qid, &[]).await.expect("prune");
-        assert_eq!(deleted, 1);
+        assert_eq!(prune_all_missing(&pool, qid, &[]).await, 1);
         assert_eq!(fetch_items(&pool, qid).await.expect("fetch").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn delete_items_is_a_noop_for_an_empty_id_list() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+        upsert_item(&pool, &make_item(qid, 1, "PR 1"))
+            .await
+            .expect("upsert");
+
+        assert_eq!(delete_items(&pool, &[]).await.expect("delete"), 0);
+        assert_eq!(fetch_items(&pool, qid).await.expect("fetch").len(), 1);
     }
 
     #[tokio::test]

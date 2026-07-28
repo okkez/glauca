@@ -184,12 +184,16 @@ async function updateBanner() {
     banner.hidden = true;
     return;
   }
+  const current = state.itemsByQuery.get(e.rootQueryId) || [];
   let changes;
   try {
-    changes = await invoke("count_item_changes", { current: state.itemsByQuery.get(e.rootQueryId) || [], fresh });
+    changes = await invoke("count_item_changes", { current, fresh });
   } catch {
-    // Banner is display-only; fall back to a coarse count.
-    changes = { updated: fresh.length, removed: 0 };
+    // Banner is display-only, so a coarse count is fine — but `removed` must not be
+    // hardcoded to 0. A sync that pruned everything leaves `fresh` empty, and calling
+    // that "no changes" would discard the held-back list and keep the stale rows on
+    // screen: the exact bug the removed count exists to prevent.
+    changes = { updated: fresh.length, removed: Math.max(0, current.length - fresh.length) };
   }
   // The selection may have moved while the count was in flight; a stale
   // resolution must not repaint the banner for a query no longer shown

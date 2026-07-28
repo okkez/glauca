@@ -148,7 +148,13 @@ impl Conditions {
             // locally equivalent — `team-review-requested:` also matches a user of
             // that name. Acceptable for a substring filter; distinguishing them
             // would need a type discriminator stored per reviewer.
-            self.review_requested.push(val.to_string());
+            //
+            // GitHub spells this qualifier `org/team-slug`, but only the bare slug is
+            // cached, so keep just the last path segment. Without this the *canonical*
+            // form a user copies out of their saved query would match nothing —
+            // exactly the silent failure this qualifier was added to fix.
+            let slug = val.rsplit('/').next().unwrap_or(val);
+            self.review_requested.push(slug.to_string());
         } else {
             self.text_tokens.push(lower.to_string());
         }
@@ -751,6 +757,10 @@ mod tests {
     #[case::team_requested("team-review-requested:my-team", &["bob", "my-team"], true)]
     #[case::team_not_requested("team-review-requested:other-team", &["bob", "my-team"], false)]
     #[case::team_negated("-team-review-requested:my-team", &["bob", "my-team"], false)]
+    // GitHub's canonical `org/team` spelling must work: only the bare slug is cached,
+    // so the org prefix is dropped rather than silently matching nothing.
+    #[case::team_org_qualified("team-review-requested:my-org/my-team", &["my-team"], true)]
+    #[case::team_org_qualified_no_match("team-review-requested:my-org/other", &["my-team"], false)]
     fn matches_review_requested(
         #[case] q: &str,
         #[case] reviewers: &[&str],
