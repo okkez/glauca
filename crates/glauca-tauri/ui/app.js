@@ -162,10 +162,20 @@ function isUnread(it) {
   return it.last_read_updated_at == null || it.updated_at > it.last_read_updated_at;
 }
 
-// Show/hide the "N updated" banner based on held-back background items for the
-// currently-selected query. Clicking it applies the pending items. The count
-// delegates to core's count_changed (via count_changed_items) so the definition
-// matches the TUI/GUI.
+// Banner text for a ChangeCounts. Mirrors core's `ChangeCounts::banner_label` so
+// the three front-ends word it identically.
+function changesLabel(c) {
+  if (c.updated && c.removed) return `${c.updated} updated, ${c.removed} no longer match`;
+  if (c.updated) return `${c.updated} updated`;
+  if (c.removed) return `${c.removed} no longer match`;
+  return "";
+}
+
+// Show/hide the change banner based on held-back background items for the
+// currently-selected query. Clicking it applies the pending items. The diff
+// delegates to core's count_changes (via count_item_changes) so the definition
+// matches the TUI/GUI — including counting removals, so a sync that only pruned
+// items no longer matching the query isn't mistaken for "nothing changed".
 async function updateBanner() {
   const banner = $("banner");
   const e = state.entries[state.selectedEntry];
@@ -174,25 +184,26 @@ async function updateBanner() {
     banner.hidden = true;
     return;
   }
-  let n;
+  let changes;
   try {
-    n = await invoke("count_changed_items", { current: state.itemsByQuery.get(e.rootQueryId) || [], fresh });
+    changes = await invoke("count_item_changes", { current: state.itemsByQuery.get(e.rootQueryId) || [], fresh });
   } catch {
-    n = fresh.length; // banner is display-only; fall back to a coarse count
+    // Banner is display-only; fall back to a coarse count.
+    changes = { updated: fresh.length, removed: 0 };
   }
   // The selection may have moved while the count was in flight; a stale
   // resolution must not repaint the banner for a query no longer shown
   // (previewEntry already re-ran updateBanner for the new one).
   const cur = state.entries[state.selectedEntry];
   if (!cur || cur.rootQueryId !== e.rootQueryId) return;
-  if (n === 0) {
+  if (changes.updated + changes.removed === 0) {
     // Nothing user-visible changed; drop the held-back items instead of
-    // showing a "0 updated" banner (the GUI clears pending the same way).
+    // showing an empty banner (the GUI clears pending the same way).
     state.pending.delete(e.rootQueryId);
     banner.hidden = true;
     return;
   }
-  banner.textContent = `${n} updated in background — click to refresh`;
+  banner.textContent = `${changesLabel(changes)} in background — click to refresh`;
   banner.hidden = false;
   banner.onclick = () => applyPending(e.rootQueryId);
 }

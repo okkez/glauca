@@ -48,7 +48,7 @@ pub(crate) use state::{
 use glauca_core::actions::{CustomAction, CustomActions};
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
-use glauca_core::logic::{group_range, is_item_unread, move_group_down, query_label};
+use glauca_core::logic::{ChangeCounts, group_range, is_item_unread, move_group_down, query_label};
 use glauca_core::notify::ItemTracker;
 use settings::TuiSettings;
 
@@ -126,8 +126,9 @@ pub struct App {
     /// Freshly-synced items for the currently-viewed query, held back because
     /// they came from a background sync. Applied on explicit action (`u`).
     pub pending_items: Option<Vec<ItemEntry>>,
-    /// How many of `pending_items` are new/updated vs the displayed list.
-    pub pending_count: usize,
+    /// How `pending_items` differs from the displayed list (new/updated and
+    /// removed), which drives the banner text.
+    pub pending_changes: ChangeCounts,
     pub filter: SingleLineInput,
     /// Active filter stream filter applied before the inline filter (if any).
     pub stream_filter: Option<String>,

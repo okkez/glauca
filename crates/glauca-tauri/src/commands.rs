@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use glauca_core::actions::CustomActions;
 use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
 use glauca_core::filter::{FilterQuery, StreamFilter};
-use glauca_core::logic::{compute_unread_counts, count_changed, expand_me};
+use glauca_core::logic::{ChangeCounts, compute_unread_counts, count_changes, expand_me};
 use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -246,12 +246,13 @@ pub async fn filter_items(
         .collect())
 }
 
-/// Count how many items in `fresh` are new or changed vs `current`, delegating to
-/// `glauca_core::logic::count_changed` so the "N updated" banner uses the exact
-/// definition the TUI/GUI use instead of a JS re-implementation.
+/// Diff `fresh` against `current`, delegating to `glauca_core::logic::count_changes`
+/// so the change banner uses the exact definition the TUI/GUI use instead of a JS
+/// re-implementation. Removals are part of the result, so a sync that only pruned
+/// items no longer matching the query is not mistaken for "nothing changed".
 #[tauri::command]
-pub async fn count_changed_items(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> usize {
-    count_changed(&current, &fresh)
+pub async fn count_item_changes(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> ChangeCounts {
+    count_changes(&current, &fresh)
 }
 
 #[tauri::command]

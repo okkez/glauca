@@ -108,7 +108,7 @@ impl GlaucaApp {
             stream_filter: None,
             body_refresh_requested: HashSet::new(),
             pending_items: None,
-            pending_count: 0,
+            pending_changes: ChangeCounts::default(),
             syncing: false,
             bg_sync_pending: 0,
             status: None,

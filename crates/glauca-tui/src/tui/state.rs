@@ -102,7 +102,7 @@ impl App {
             item_cursor: 0,
             unread_counts: HashMap::new(),
             pending_items: None,
-            pending_count: 0,
+            pending_changes: ChangeCounts::default(),
             filter: SingleLineInput::new(),
             stream_filter: None,
             new_query_input: SingleLineInput::new(),
@@ -245,7 +245,7 @@ impl App {
     /// Drop any held-back background-sync results / banner.
     pub(crate) fn clear_pending(&mut self) {
         self.pending_items = None;
-        self.pending_count = 0;
+        self.pending_changes = ChangeCounts::default();
     }
 
     /// Apply the stashed background-sync results to the visible list (the `u`
@@ -254,7 +254,7 @@ impl App {
         let Some(items) = self.pending_items.take() else {
             return;
         };
-        self.pending_count = 0;
+        self.pending_changes = ChangeCounts::default();
         if let Some(qid) = self.selected_root_query_id() {
             self.recompute_unread_counts_for_query(qid, &items);
         }
@@ -291,6 +291,30 @@ mod tests {
 
         // Cursor should clamp to 1 (last index in the 2-item filtered list).
         assert_eq!(app.item_cursor, 1);
+    }
+
+    /// Applying a background sync that *removed* items must not leave the cursor
+    /// past the end, and must invalidate the memoized filter cache. Removals only
+    /// reach this path now that `count_changes` counts them, so this locks in that
+    /// the shrinking case is handled.
+    #[test]
+    fn apply_pending_items_clamps_cursor_after_removal() {
+        let mut app = make_app_with_items(&["Alpha", "Beta", "Gamma"]);
+        assert_eq!(app.filtered_items().len(), 3); // populates the filter cache
+        app.item_cursor = 2; // points to "Gamma", which is about to disappear
+
+        app.pending_items = Some(vec![make_item(1, "Alpha"), make_item(2, "Beta")]);
+        app.pending_changes = ChangeCounts {
+            updated: 0,
+            removed: 1,
+        };
+        app.apply_pending_items();
+
+        assert_eq!(app.items.len(), 2);
+        assert_eq!(app.item_cursor, 1);
+        assert!(app.pending_changes.is_empty());
+        assert!(app.pending_items.is_none());
+        assert_eq!(app.filtered_items().len(), 2);
     }
 
     #[test]
