@@ -329,14 +329,9 @@ pub const PRUNE_STRIKES: i64 = 2;
 /// delete the ones that have reached `strikes_required` consecutive absences. Returns
 /// the number of rows deleted.
 ///
-/// Corroboration is the point: a single absence can mean the item left the query, but
-/// it can also mean the paged walk raced an update that moved the item past the
-/// cursor, or that GitHub's search index briefly lagged. `upsert_items` zeroes the
-/// counter, so any search that returns the item again disarms it.
-///
-/// `strikes_required` is [`PRUNE_STRIKES`] for automatic syncs and `1` for a user's
-/// explicit full resync, which is a deliberate "clean this up now" and should not need
-/// pressing twice.
+/// `upsert_items` zeroes the counter, so any search that returns the item again
+/// disarms it, and the threshold is only ever reached by *consecutive* absences.
+/// `strikes_required` comes from `engine::PruneTrust`.
 ///
 /// Read state is lost on deletion: `upsert_item` never writes
 /// `last_read_updated_at`, so an item that leaves a query and later matches again
@@ -409,43 +404,38 @@ pub async fn prune_missing_items(
     // another query's `upsert_items`, a read-marking update, or the maintenance
     // sweep. Taking the write lock up front makes the 30s timeout apply as intended.
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let current_stamp = sqlx::query!(
-        r#"SELECT last_full_fetch_at FROM queries WHERE id = ?"#,
-        query_id,
-    )
-    .fetch_one(&mut *tx)
-    .await?
-    .last_full_fetch_at;
-    if current_stamp.as_deref() != observed_stamp {
+    if last_full_fetch_at(&mut *tx, query_id).await?.as_deref() != observed_stamp {
         debug!("skipping prune: a concurrent full fetch finished first");
         tx.rollback().await?;
         return Ok(0);
     }
 
-    let mut deleted = 0u64;
-    // Chunk to stay under SQLite's bound-variable limit on large prunes.
-    for chunk in missing_ids.chunks(900) {
-        let mut bump: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "UPDATE items SET missing_count = missing_count + 1 WHERE id IN (",
-        );
-        let mut sep = bump.separated(", ");
-        for id in chunk {
-            sep.push_bind(*id);
-        }
-        bump.push(")");
-        bump.build().execute(&mut *tx).await?;
+    // Bind the id list once as JSON and let SQLite's json_each expand it, rather than
+    // building `IN (?, ?, …)` by hand: that would need chunking under the
+    // bound-variable limit, and a hand-built `QueryBuilder` opts out of sqlx's
+    // compile-time checking for the two statements that do the actual deleting.
+    let ids = serde_json::to_string(&missing_ids)?;
+    sqlx::query!(
+        r#"
+        UPDATE items SET missing_count = missing_count + 1
+        WHERE id IN (SELECT value FROM json_each(?))
+        "#,
+        ids,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let deleted = sqlx::query!(
+        r#"
+        DELETE FROM items
+        WHERE missing_count >= ? AND id IN (SELECT value FROM json_each(?))
+        "#,
+        strikes_required,
+        ids,
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
 
-        let mut cull: sqlx::QueryBuilder<sqlx::Sqlite> =
-            sqlx::QueryBuilder::new("DELETE FROM items WHERE missing_count >= ");
-        cull.push_bind(strikes_required);
-        cull.push(" AND id IN (");
-        let mut sep = cull.separated(", ");
-        for id in chunk {
-            sep.push_bind(*id);
-        }
-        cull.push(")");
-        deleted += cull.build().execute(&mut *tx).await?.rows_affected();
-    }
     tx.commit().await?;
     Ok(deleted)
 }
@@ -795,14 +785,18 @@ pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64)
 
 /// When `query_id` was last full fetched, or `None` if never.
 ///
-/// Read before a full walk so [`prune_missing_items`] can tell whether a *concurrent*
-/// full fetch finished in the meantime.
-pub async fn last_full_fetch_at(pool: &SqlitePool, query_id: i64) -> Result<Option<String>> {
+/// Generic over the executor because [`prune_missing_items`] must re-read this *inside*
+/// its transaction for the concurrency check to mean anything, while everyone else
+/// reads it from the pool.
+pub async fn last_full_fetch_at<'e, E>(exec: E, query_id: i64) -> Result<Option<String>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let row = sqlx::query!(
         r#"SELECT last_full_fetch_at FROM queries WHERE id = ?"#,
         query_id,
     )
-    .fetch_one(pool)
+    .fetch_one(exec)
     .await?;
     Ok(row.last_full_fetch_at)
 }
@@ -845,18 +839,7 @@ pub async fn is_full_fetch_due(
     query_id: i64,
     max_age_secs: i64,
 ) -> Result<bool> {
-    let row = sqlx::query!(
-        r#"
-        SELECT last_full_fetch_at
-        FROM queries
-        WHERE id = ?
-        "#,
-        query_id,
-    )
-    .fetch_one(pool)
-    .await?;
-
-    match row.last_full_fetch_at {
+    match last_full_fetch_at(pool, query_id).await? {
         None => Ok(true),
         Some(ts) => older_than(pool, &ts, max_age_secs).await,
     }
@@ -1566,14 +1549,7 @@ mod tests {
         let deleted = prune_query_overflow(&pool, qid, 2).await.expect("prune");
         assert_eq!(deleted, 2, "only the two read overflow rows are deleted");
 
-        let mut nums: Vec<i64> = fetch_items(&pool, qid)
-            .await
-            .expect("fetch")
-            .into_iter()
-            .map(|i| i.number)
-            .collect();
-        nums.sort();
         // #3 survives despite being overflow, because it is unread.
-        assert_eq!(nums, vec![3, 4, 5]);
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![3, 4, 5]);
     }
 }

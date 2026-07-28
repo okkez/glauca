@@ -110,19 +110,26 @@ struct Conditions {
 }
 
 impl Conditions {
+    /// Record a qualifier's value, unless it is empty.
+    ///
+    /// A qualifier typed without a value (`label:`) is a half-typed token from the
+    /// type-ahead filter, not a constraint, and storing it would do the opposite of
+    /// nothing: every qualifier matches with `contains`, and `contains("")` is true, so
+    /// an empty value matches every item that has the field at all.
+    ///
+    /// The test is on the *value*, deliberately, not on the token's shape. A plain word
+    /// ending in `:` (`fix:`, `wip:`) strips no known prefix and must still reach
+    /// `text_tokens` and filter as text.
+    fn push_value(target: &mut Vec<String>, val: &str) {
+        if !val.is_empty() {
+            target.push(val.to_string());
+        }
+    }
+
     /// Parse one token (already lowercased, `-` stripped) into this set.
     fn add_token(&mut self, lower: &str) {
-        // A qualifier with no value yet (`label:`, `team-review-requested:`) is a
-        // half-typed token from the type-ahead filter, not a constraint. It has to be
-        // dropped rather than stored: every qualifier below matches with `contains`,
-        // and `contains("")` is true, so an empty value would silently match *every*
-        // item that has the field at all — turning a partially-typed filter into no
-        // filter, which is precisely backwards.
-        if lower.ends_with(':') {
-            return;
-        }
         if let Some(val) = lower.strip_prefix("state:") {
-            self.states.push(val.to_string());
+            Self::push_value(&mut self.states, val);
         } else if let Some(val) = lower.strip_prefix("is:") {
             // `is:` is overloaded: kind (pr/issue), draft, repo visibility,
             // else a state value (open/closed/merged/…).
@@ -132,24 +139,24 @@ impl Conditions {
                 "draft" => self.is_draft = Some(true),
                 "public" => self.is_private = Some(false),
                 "private" => self.is_private = Some(true),
-                _ => self.states.push(val.to_string()),
+                _ => Self::push_value(&mut self.states, val),
             }
         } else if let Some(val) = lower.strip_prefix("author:") {
-            self.authors.push(val.to_string());
+            Self::push_value(&mut self.authors, val);
         } else if let Some(val) = lower.strip_prefix("assignee:") {
-            self.assignees.push(val.to_string());
+            Self::push_value(&mut self.assignees, val);
         } else if let Some(val) = lower.strip_prefix("label:") {
-            self.labels.push(val.to_string());
+            Self::push_value(&mut self.labels, val);
         } else if let Some(val) = lower.strip_prefix("milestone:") {
-            self.milestones.push(val.to_string());
+            Self::push_value(&mut self.milestones, val);
         } else if let Some(val) = lower.strip_prefix("repo:") {
-            self.repos.push(val.to_string());
+            Self::push_value(&mut self.repos, val);
         } else if let Some(val) = lower.strip_prefix("base:") {
-            self.base_refs.push(val.to_string());
+            Self::push_value(&mut self.base_refs, val);
         } else if let Some(val) = lower.strip_prefix("head:") {
-            self.head_refs.push(val.to_string());
+            Self::push_value(&mut self.head_refs, val);
         } else if let Some(val) = lower.strip_prefix("review-requested:") {
-            self.review_requested.push(val.to_string());
+            Self::push_value(&mut self.review_requested, val);
         } else if let Some(val) = lower.strip_prefix("team-review-requested:") {
             // A team slug is stored in `requested_reviewers` in the same shape as a
             // user login (see `github::node_to_cached_item`), so matching is
@@ -161,21 +168,19 @@ impl Conditions {
             // GitHub spells this qualifier `org/team-slug`, but only the bare slug is
             // cached, so keep just the last path segment. Without this the *canonical*
             // form a user copies out of their saved query would match nothing —
-            // exactly the silent failure this qualifier was added to fix.
-            //
-            // A trailing slash (`my-org/`, easy to hit mid-edit) leaves an empty
-            // segment; keep the raw value then, because reviewer matching is
-            // `contains`, and `contains("")` would match every item that has any
-            // requested reviewer at all. The raw value still contains a `/`, so it
-            // matches nothing — the right answer for an incomplete qualifier.
+            // exactly the silent failure this qualifier was added to fix. A trailing
+            // slash (`my-org/`) leaves that segment empty; fall back to the raw value,
+            // which still contains a `/` and so matches nothing — for a half-typed
+            // *value* that is the honest answer, where a missing value constrains
+            // nothing at all.
             let slug = val
                 .rsplit('/')
                 .next()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(val);
-            self.review_requested.push(slug.to_string());
+            Self::push_value(&mut self.review_requested, slug);
         } else {
-            self.text_tokens.push(lower.to_string());
+            Self::push_value(&mut self.text_tokens, lower);
         }
     }
 
@@ -822,6 +827,19 @@ mod tests {
 
         assert!(q.matches(&unlabelled));
         assert!(q.matches(&labelled));
+    }
+
+    /// A plain word that happens to end in `:` is not a qualifier — it has no known
+    /// prefix, so it must reach `text_tokens` and keep filtering. Dropping it because
+    /// of the token's *shape* would silently unfilter the list.
+    #[test]
+    fn text_token_ending_in_colon_still_filters() {
+        let q = FilterQuery::parse("fix:");
+        let hit = item("fix: crash on start", "alice", "open", &[], "o/r");
+        let miss = item("unrelated title", "alice", "open", &[], "o/r");
+
+        assert!(q.matches(&hit));
+        assert!(!q.matches(&miss));
     }
 
     #[test]

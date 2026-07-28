@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE items SET missing_count = missing_count + 1\n        WHERE id IN (SELECT value FROM json_each(?))\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bea776ec8ddb7e27bdcd8f55e88bc787465629222e16b355747c0b98b791f44e"
+}

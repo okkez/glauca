@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        DELETE FROM items\n        WHERE missing_count >= ? AND id IN (SELECT value FROM json_each(?))\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "11dea97cda4a77465adb976275437aaab0a9357add08afe704d1881968fae0a2"
+}

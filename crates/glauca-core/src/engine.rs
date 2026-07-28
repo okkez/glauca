@@ -438,6 +438,8 @@ pub struct SyncOpts {
     /// Age (seconds) past which an `incremental` sync is upgraded to a full fetch
     /// so pruning can run. Ignored when `incremental` is false (already full).
     pub full_fetch_interval_secs: i64,
+    /// How far this sync's absences are trusted when pruning. See [`PruneTrust`].
+    pub prune_trust: PruneTrust,
 }
 
 /// Overlap subtracted from `last_fetched_at` when building the incremental
@@ -467,15 +469,33 @@ fn may_prune(is_full: bool, total_count: usize, complete: bool) -> bool {
     is_full && total_count < SEARCH_RESULT_CAP && complete
 }
 
-/// How many consecutive absences this sync requires before deleting a row.
+/// How far a single absence from one fetch is trusted to mean "this item left the
+/// query".
 ///
-/// `incremental: false` is only ever set by `FullResync` — the user's explicit "clean
-/// this up now" — so that path deletes on the first absence rather than making them
-/// press `S` twice. Every automatic sync corroborates. The trade is deliberate: a
-/// forced resync that happens to race a mid-walk update can cost one row its read
-/// marker, which is the user's call to make and not the timer's.
-fn strikes_required(incremental: bool) -> i64 {
-    if incremental { db::PRUNE_STRIKES } else { 1 }
+/// Stated per sync rather than inferred from `incremental`: that flag is about fetch
+/// *scope* (and `resolve_since` promotes incremental walks to full ones freely), so
+/// reading a deletion policy out of it would mean the next `incremental: false`
+/// construction site added for some non-user reason silently acquires
+/// delete-on-first-absence. This is the only safety property in the prune path, so it
+/// gets said out loud.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PruneTrust {
+    /// Automatic sync: require `db::PRUNE_STRIKES` consecutive absences, so a paged
+    /// walk that raced an update can't destroy a live row's read marker.
+    Corroborate,
+    /// The user explicitly asked for a full resync. Delete on the first absence rather
+    /// than making them press `S` twice; if that races a mid-walk update it costs one
+    /// row its read marker, which is their call to make and not the timer's.
+    Immediate,
+}
+
+impl PruneTrust {
+    fn strikes_required(self) -> i64 {
+        match self {
+            PruneTrust::Corroborate => db::PRUNE_STRIKES,
+            PruneTrust::Immediate => 1,
+        }
+    }
 }
 
 /// Resolve the `updated:>=` threshold for one sync. `Some(ts)` narrows the fetch to
@@ -540,16 +560,15 @@ pub async fn sync_task(
     // `last_full_fetch_at` as it stands *before* the walk. Handed to the prune so it
     // can detect a concurrent full fetch finishing first — see `prune_missing_items`.
     let stamp_before = if is_full {
-        match db::last_full_fetch_at(&pool, query_id).await {
-            Ok(stamp) => stamp,
-            Err(e) => {
-                // Falling back to `None` will mismatch a non-NULL current stamp and so
-                // skip this cycle's prune — the safe direction, but log it rather than
-                // leaving a query that mysteriously never prunes.
+        db::last_full_fetch_at(&pool, query_id)
+            .await
+            .unwrap_or_else(|e| {
+                // `None` will mismatch a non-NULL current stamp and so skip this
+                // cycle's prune — the safe direction, but log it rather than leaving a
+                // query that mysteriously never prunes.
                 warn!(error = %e, "could not read last_full_fetch_at; prune may be skipped");
                 None
-            }
-        }
+            })
     } else {
         None
     };
@@ -604,12 +623,8 @@ pub async fn sync_task(
             }
             Err(github::SearchError::Other(e)) => {
                 warn!(error = %e, "sync failed");
-                // Record the *attempt* so a query that reliably fails mid-walk doesn't
-                // re-page on every single sync forever: `last_full_fetch_at` staying
-                // unset would keep promoting each one to a full fetch, and this error
-                // path (unlike a rate limit) has no backoff of its own.
-                // `last_fetched_at` is untouched, so the cheap incremental retry still
-                // happens next cycle.
+                // Record the failed attempt so the full walk isn't retried every sync;
+                // see `mark_full_fetch_attempted`.
                 if is_full && let Err(e) = db::mark_full_fetch_attempted(&pool, query_id).await {
                     warn!(error = %e, "failed to record full-fetch attempt");
                 }
@@ -690,7 +705,7 @@ pub async fn sync_task(
             &pool,
             query_id,
             &keep_keys,
-            strikes_required(opts.incremental),
+            opts.prune_trust.strikes_required(),
             stamp_before.as_deref(),
         )
         .await
@@ -974,6 +989,7 @@ pub async fn sync_worker_task(
                     background: true,
                     incremental: true,
                     full_fetch_interval_secs: sync.full_fetch_secs(),
+                    prune_trust: PruneTrust::Corroborate,
                 },
                 tx.clone(),
                 gate.clone(),
@@ -1450,6 +1466,7 @@ async fn command_loop(
                         background: false,
                         incremental: true,
                         full_fetch_interval_secs: sync.full_fetch_secs(),
+                        prune_trust: PruneTrust::Corroborate,
                     },
                     msg_tx.clone(),
                     gate.clone(),
@@ -1472,6 +1489,8 @@ async fn command_loop(
                         incremental: false,
                         // Ignored: the fetch is already full.
                         full_fetch_interval_secs: sync.full_fetch_secs(),
+                        // The user asked for this explicitly, so one press is enough.
+                        prune_trust: PruneTrust::Immediate,
                     },
                     msg_tx.clone(),
                     gate.clone(),
@@ -1500,6 +1519,7 @@ async fn command_loop(
                                 background: false,
                                 incremental: true,
                                 full_fetch_interval_secs: sync.full_fetch_secs(),
+                                prune_trust: PruneTrust::Corroborate,
                             },
                             tx2,
                             gate2,
@@ -1884,16 +1904,6 @@ mod tests {
     }
 
     #[rstest]
-    // Automatic syncs corroborate before deleting…
-    #[case::automatic(true, db::PRUNE_STRIKES)]
-    // …but `FullResync` (`incremental: false`, the `S` key) is an explicit request and
-    // must take effect on the first press.
-    #[case::forced_resync(false, 1)]
-    fn strikes_required_cases(#[case] incremental: bool, #[case] want: i64) {
-        assert_eq!(strikes_required(incremental), want);
-    }
-
-    #[rstest]
     // A cap below the search cap can't be honoured — the rows it deletes are still in
     // the query's live result set and come back unread on the next full fetch.
     #[case::cap_raised_to_search_cap(90, 200, 90, SEARCH_RESULT_CAP as u64)]
@@ -2023,6 +2033,7 @@ mod tests {
             background: true,
             incremental: true,
             full_fetch_interval_secs,
+            prune_trust: PruneTrust::Corroborate,
         }
     }
 
@@ -2055,6 +2066,7 @@ mod tests {
             background: false,
             incremental: false,
             full_fetch_interval_secs: 1800,
+            prune_trust: PruneTrust::Immediate,
         };
         assert_eq!(
             resolve_since(&pool, qid, "repo:o/a is:pr", opts).await,
