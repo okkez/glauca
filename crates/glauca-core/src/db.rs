@@ -151,14 +151,21 @@ pub async fn update_query(
     name: Option<&str>,
     query: &str,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
     sqlx::query!(
         "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL, last_full_fetch_at = NULL WHERE id = ?",
         name,
         query,
         id,
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    // Strikes accumulated against the *old* query say nothing about the new one, so
+    // corroboration starts over rather than deleting on the first fetch.
+    sqlx::query!("UPDATE items SET missing_count = 0 WHERE query_id = ?", id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -290,17 +297,36 @@ pub async fn updated_since(
 /// Item identity within a query's cache: (repo_owner, repo_name, number).
 pub type ItemKey = (String, String, i64);
 
-/// Cached rows for `query_id` whose key is absent from `keep` (a full fetch's result
-/// set) — i.e. candidates for pruning, paired with their row id.
+/// How many consecutive full fetches must fail to return an item before it is
+/// deleted. Two means "missing twice in a row"; see the `missing_count` migration for
+/// why one absence isn't proof.
+pub const PRUNE_STRIKES: i64 = 2;
+
+/// Record that this full fetch didn't return the cached rows absent from `keep`, and
+/// delete the ones that have now been missing [`PRUNE_STRIKES`] times running.
+/// Returns the number of rows deleted.
 ///
-/// Kept separate from [`delete_items`] so the caller can require corroboration before
-/// deleting: one absence does not prove an item left the query (see
-/// `engine::PruneGuard`).
-pub async fn items_missing_from(
+/// Corroboration is the point: a single absence can mean the item left the query, but
+/// it can also mean the paged walk raced an update that moved the item past the
+/// cursor, or that GitHub's search index briefly lagged. `upsert_item` zeroes the
+/// counter, so any sync that returns the item again disarms it.
+///
+/// Read state is lost on deletion: `upsert_item` never writes
+/// `last_read_updated_at`, so an item that leaves a query and later matches again
+/// comes back as unread. Unlike `prune_query_overflow` — which reasons at length
+/// about avoiding exactly that, and protects the newest rows — pruning has no such
+/// protection, because deleting rows that no longer match is its whole purpose. The
+/// behaviour is intended: a re-requested review or a reopened issue is new actionable
+/// work, so surfacing it as unread is correct. What is *not* intended is deleting a
+/// row that still matches, which is what the strike count guards against.
+///
+/// Caller must only pass `keep` from an untruncated, complete full fetch — see
+/// `engine::may_prune`.
+pub async fn prune_missing_items(
     pool: &SqlitePool,
     query_id: i64,
     keep: &[ItemKey],
-) -> Result<Vec<(i64, ItemKey)>> {
+) -> Result<u64> {
     use std::collections::HashSet;
     let keep_set: HashSet<(&str, &str, i64)> = keep
         .iter()
@@ -314,40 +340,44 @@ pub async fn items_missing_from(
     .fetch_all(pool)
     .await?;
 
-    Ok(existing
+    let missing_ids: Vec<i64> = existing
         .into_iter()
         .filter(|r| !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number)))
-        .map(|r| (r.id, (r.repo_owner, r.repo_name, r.number)))
-        .collect())
-}
-
-/// Delete cached items by row id. Returns the number of rows deleted.
-///
-/// Read state is lost on deletion: `upsert_item` never writes
-/// `last_read_updated_at`, so an item that leaves a query and later matches again
-/// comes back as unread. Unlike `prune_query_overflow` — which reasons at length
-/// about avoiding exactly that, and protects the newest rows — pruning has no such
-/// protection, because deleting rows that no longer match is its whole purpose. The
-/// behaviour is intended: a re-requested review or a reopened issue is new actionable
-/// work, so surfacing it as unread is correct. What is *not* intended is deleting a
-/// row that still matches, which is why callers corroborate first.
-pub async fn delete_items(pool: &SqlitePool, ids: &[i64]) -> Result<u64> {
-    if ids.is_empty() {
+        .map(|r| r.id)
+        .collect();
+    if missing_ids.is_empty() {
         return Ok(0);
     }
 
-    // Chunk to stay under SQLite's bound-variable limit on large prunes.
+    // Increment then delete in one transaction, so a crash between the two can't
+    // leave a strike recorded against a row that was about to be deleted anyway
+    // (harmless) or, worse, delete without having counted (impossible here).
+    let mut tx = pool.begin().await?;
     let mut deleted = 0u64;
-    for chunk in ids.chunks(900) {
-        let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> =
-            sqlx::QueryBuilder::new("DELETE FROM items WHERE id IN (");
-        let mut sep = qb.separated(", ");
+    // Chunk to stay under SQLite's bound-variable limit on large prunes.
+    for chunk in missing_ids.chunks(900) {
+        let mut bump: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "UPDATE items SET missing_count = missing_count + 1 WHERE id IN (",
+        );
+        let mut sep = bump.separated(", ");
         for id in chunk {
             sep.push_bind(*id);
         }
-        qb.push(")");
-        deleted += qb.build().execute(pool).await?.rows_affected();
+        bump.push(")");
+        bump.build().execute(&mut *tx).await?;
+
+        let mut cull: sqlx::QueryBuilder<sqlx::Sqlite> =
+            sqlx::QueryBuilder::new("DELETE FROM items WHERE missing_count >= ");
+        cull.push_bind(PRUNE_STRIKES);
+        cull.push(" AND id IN (");
+        let mut sep = cull.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        cull.push(")");
+        deleted += cull.build().execute(&mut *tx).await?.rows_affected();
     }
+    tx.commit().await?;
     Ok(deleted)
 }
 
@@ -529,7 +559,10 @@ where
             base_ref            = excluded.base_ref,
             head_ref            = excluded.head_ref,
             review_decision     = excluded.review_decision,
-            milestone           = excluded.milestone
+            milestone           = excluded.milestone,
+            -- Any sync that returns this item proves it still matches, so clear the
+            -- prune strikes it may have accumulated (see `prune_missing_items`).
+            missing_count       = 0
             -- `last_read_updated_at` is intentionally NOT updated: it records the
             -- `updated_at` the user had read up to. `updated_at` above IS refreshed,
             -- so once a re-sync advances it past `last_read_updated_at` the item
@@ -686,7 +719,7 @@ pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64)
 /// fetched (NULL) or the last one is older than `max_age_secs`.
 ///
 /// Only a full fetch is an authoritative result set, so only a full fetch may
-/// prune rows that left the query (`engine::prune_corroborated`). This is therefore what
+/// prune rows that left the query ([`prune_missing_items`]). This is therefore what
 /// bounds how long a stale row can linger; see `engine::resolve_since`.
 pub async fn is_full_fetch_due(
     pool: &SqlitePool,
@@ -985,77 +1018,143 @@ mod tests {
         assert!(since.contains('T') && since.ends_with('Z'), "{since}");
     }
 
-    /// Delete every cached row for `query_id` that is absent from `keep`, the way
-    /// pruning worked before corroboration was introduced. Only a test helper —
-    /// production goes through `engine::prune_corroborated`.
-    async fn prune_all_missing(pool: &SqlitePool, query_id: i64, keep: &[ItemKey]) -> u64 {
-        let missing = items_missing_from(pool, query_id, keep)
-            .await
-            .expect("missing");
-        let ids: Vec<i64> = missing.into_iter().map(|(id, _)| id).collect();
-        delete_items(pool, &ids).await.expect("delete")
-    }
-
-    #[tokio::test]
-    async fn items_missing_from_reports_only_items_absent_from_keep() {
-        let (pool, _file) = test_pool().await;
-        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
-            .await
-            .expect("upsert query");
-        for n in 1..=3 {
-            upsert_item(&pool, &make_item(qid, n, &format!("PR {n}")))
-                .await
-                .expect("upsert");
-        }
-
-        // Keep only #1 and #3 (make_item uses owner="owner", repo="repo").
-        let keep = vec![
-            ("owner".to_string(), "repo".to_string(), 1),
-            ("owner".to_string(), "repo".to_string(), 3),
-        ];
-        let missing = items_missing_from(&pool, qid, &keep)
-            .await
-            .expect("missing");
-        assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0].1.2, 2, "only #2 is absent from keep");
-
-        assert_eq!(prune_all_missing(&pool, qid, &keep).await, 1);
-        let mut remaining: Vec<i64> = fetch_items(&pool, qid)
+    /// Numbers still cached for `query_id`, sorted.
+    async fn remaining_numbers(pool: &SqlitePool, query_id: i64) -> Vec<i64> {
+        let mut ns: Vec<i64> = fetch_items(pool, query_id)
             .await
             .expect("fetch")
             .into_iter()
             .map(|i| i.number)
             .collect();
-        remaining.sort();
-        assert_eq!(remaining, vec![1, 3]);
+        ns.sort();
+        ns
     }
 
-    #[tokio::test]
-    async fn prune_with_empty_keep_deletes_all() {
-        let (pool, _file) = test_pool().await;
-        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+    /// A query whose cache holds `numbers`, all with zero strikes.
+    async fn query_with_items(pool: &SqlitePool, numbers: &[i64]) -> i64 {
+        let qid = upsert_query(pool, "repo:owner/r is:pr", "pull_request", None)
             .await
             .expect("upsert query");
-        upsert_item(&pool, &make_item(qid, 1, "PR 1"))
+        for n in numbers {
+            upsert_item(pool, &make_item(qid, *n, &format!("PR {n}")))
+                .await
+                .expect("upsert");
+        }
+        qid
+    }
+
+    fn keep(numbers: &[i64]) -> Vec<ItemKey> {
+        numbers
+            .iter()
+            .map(|n| ("owner".to_string(), "repo".to_string(), *n))
+            .collect()
+    }
+
+    /// The corroboration rule: one absence only records a strike, the second deletes.
+    /// This is what stops the pagination race (an item updated mid-walk moves past the
+    /// cursor and is never returned) from destroying a live row and its read marker.
+    #[tokio::test]
+    async fn prune_requires_two_consecutive_absences() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2, 3]).await;
+
+        // #2 absent once → strike recorded, nothing deleted.
+        assert_eq!(
+            prune_missing_items(&pool, qid, &keep(&[1, 3]))
+                .await
+                .expect("prune"),
+            0
+        );
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 2, 3]);
+
+        // Absent again → deleted.
+        assert_eq!(
+            prune_missing_items(&pool, qid, &keep(&[1, 3]))
+                .await
+                .expect("prune"),
+            1
+        );
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 3]);
+    }
+
+    /// An item that comes back must be disarmed by the upsert, not deleted by a later
+    /// unrelated absence. This is the property that makes the strike count safe to
+    /// persist: it can only ever reach the threshold on *consecutive* misses.
+    #[tokio::test]
+    async fn prune_strikes_reset_when_an_item_comes_back() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2]).await;
+
+        // Strike one against #2.
+        prune_missing_items(&pool, qid, &keep(&[1]))
+            .await
+            .expect("prune");
+        // #2 is returned by the next fetch, which resets its counter.
+        upsert_item(&pool, &make_item(qid, 2, "PR 2"))
             .await
             .expect("upsert");
 
-        assert_eq!(prune_all_missing(&pool, qid, &[]).await, 1);
-        assert_eq!(fetch_items(&pool, qid).await.expect("fetch").len(), 0);
+        // Absent again — that's a *first* strike again, so it survives.
+        assert_eq!(
+            prune_missing_items(&pool, qid, &keep(&[1]))
+                .await
+                .expect("prune"),
+            0
+        );
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 2]);
     }
 
+    /// Strikes live on the row, so one query's misses can never delete another's.
     #[tokio::test]
-    async fn delete_items_is_a_noop_for_an_empty_id_list() {
+    async fn prune_strikes_are_per_row() {
         let (pool, _file) = test_pool().await;
-        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+        let qa = query_with_items(&pool, &[1]).await;
+        let qb = upsert_query(&pool, "repo:owner/other is:pr", "pull_request", None)
             .await
             .expect("upsert query");
-        upsert_item(&pool, &make_item(qid, 1, "PR 1"))
+        upsert_item(&pool, &make_item(qb, 1, "PR 1"))
             .await
             .expect("upsert");
 
-        assert_eq!(delete_items(&pool, &[]).await.expect("delete"), 0);
-        assert_eq!(fetch_items(&pool, qid).await.expect("fetch").len(), 1);
+        // Two strikes against query A's copy deletes only that copy.
+        for _ in 0..2 {
+            prune_missing_items(&pool, qa, &[]).await.expect("prune");
+        }
+        assert_eq!(remaining_numbers(&pool, qa).await, Vec::<i64>::new());
+        assert_eq!(remaining_numbers(&pool, qb).await, vec![1]);
+    }
+
+    /// Editing a query resets its strikes: absences recorded against the *old* query
+    /// say nothing about the new one's result set.
+    #[tokio::test]
+    async fn editing_a_query_resets_prune_strikes() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1]).await;
+        prune_missing_items(&pool, qid, &[]).await.expect("prune");
+
+        update_query(&pool, qid, None, "repo:owner/r is:merged")
+            .await
+            .expect("update");
+
+        // Would be the second strike without the reset.
+        assert_eq!(
+            prune_missing_items(&pool, qid, &[]).await.expect("prune"),
+            0
+        );
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn prune_is_a_noop_when_nothing_is_missing() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2]).await;
+        assert_eq!(
+            prune_missing_items(&pool, qid, &keep(&[1, 2]))
+                .await
+                .expect("prune"),
+            0
+        );
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 2]);
     }
 
     #[tokio::test]

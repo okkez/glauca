@@ -6,7 +6,7 @@
 -- returned again: its cached row keeps a stale `state` / `requested_reviewers`
 -- snapshot and lingers as a ghost. Only a full fetch is an authoritative result
 -- set, so only a full fetch may prune (`engine::sync_task`,
--- `engine::prune_corroborated`) — hence the engine upgrades an incremental sync to a
+-- `db::prune_query_items`) — hence the engine upgrades an incremental sync to a
 -- full one whenever this timestamp is older than the configured interval.
 --
 -- Deliberately not backfilled from `last_fetched_at`: NULL means "never full

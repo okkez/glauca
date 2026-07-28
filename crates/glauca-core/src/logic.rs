@@ -27,7 +27,7 @@ pub struct ChangeCounts {
     /// Items new to the list, or whose `updated_at` advanced.
     pub updated: usize,
     /// Items on screen but absent from the fresh list — they no longer match the
-    /// query and were pruned from the cache (`engine::prune_corroborated`).
+    /// query and were pruned from the cache (`db::prune_missing_items`).
     ///
     /// Counting these is what makes a removal-only background sync visible. A
     /// front-end that looked at `updated` alone would see zero changes, discard the

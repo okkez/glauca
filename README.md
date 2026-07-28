@@ -205,6 +205,12 @@ instead and drops such items from the cache. Lower it to have them disappear
 sooner; raise it to spend less API quota on queries with many results. For a query
 whose results fit one page this costs no extra requests at all.
 
+An item has to be missing from **two** such fetches in a row before it is dropped,
+so expect it to disappear within two intervals rather than one. One absence isn't
+proof: a paged fetch can race an update that moves an item out from under the
+cursor, and GitHub's search index sometimes lags writes — deleting on the first
+miss would throw away that item's read state for nothing.
+
 Read/unread state lives on the cached row, so an item that leaves a query and later
 matches it again comes back marked unread — a re-requested review or a reopened
 issue reappears as new work rather than as something you had already read.

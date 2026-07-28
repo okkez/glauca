@@ -51,8 +51,3 @@ pub fn make_item(query_id: i64, number: i64, title: &str) -> CachedItem {
         last_read_updated_at: None,
     }
 }
-
-/// The `(repo_owner, repo_name, number)` key of a [`make_item`] row.
-pub fn item_key(number: i64) -> crate::db::ItemKey {
-    ("owner".to_string(), "repo".to_string(), number)
-}
