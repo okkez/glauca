@@ -256,6 +256,22 @@ pub struct SearchPageResult {
     pub items: Vec<CachedItem>,
     pub has_next_page: bool,
     pub end_cursor: Option<String>,
+    /// Whether this page is a faithful view of what GitHub returned: every node
+    /// parsed into an item, and the response carried no errors alongside its data.
+    ///
+    /// A page can be lossy without failing: `nodes` elements are nullable, so a
+    /// per-node error yields a `null` (plus a top-level `errors` entry) in an
+    /// otherwise-200 response, and `node_to_cached_item` also drops any node
+    /// missing a required field. Dropping an item is harmless for upserting — it
+    /// just isn't refreshed this cycle — but it is *not* harmless for pruning: the
+    /// missing key would look like an item that left the query. `sync_task` must
+    /// therefore refuse to prune against a non-faithful page.
+    pub faithful: bool,
+    /// Raw `nodes` length, before parse failures were dropped. `sync_task` compares
+    /// the total against `SEARCH_RESULT_CAP`, which must count what GitHub actually
+    /// returned — using the parsed count would let dropped nodes pull a truncated
+    /// result set under the cap and enable a prune that deletes live rows.
+    pub node_count: usize,
 }
 
 /// Append `sort:updated-desc` to `query` if no `sort:` qualifier is already present.
@@ -337,17 +353,52 @@ pub async fn search_page(
     };
 
     let conn = data.search;
-    let items = conn
-        .nodes
-        .iter()
-        .filter_map(|node| node_to_cached_item(node, query_id))
-        .collect();
+    let (items, faithful) = parse_nodes(&conn.nodes, query_id, &resp.errors);
 
     Ok(SearchPageResult {
         items,
         has_next_page: conn.page_info.has_next_page,
         end_cursor: conn.page_info.end_cursor,
+        faithful,
+        node_count: conn.nodes.len(),
     })
+}
+
+/// Parse a page's `nodes` into items, and report whether the page is a *faithful*
+/// view of what GitHub returned (see [`SearchPageResult::faithful`]).
+///
+/// Split out from `search_page` so the faithfulness accounting is testable without
+/// an HTTP mock. A partial failure is HTTP 200 with `data` *and* `errors` —
+/// typically a nullable `nodes` element the resolver couldn't produce — and an
+/// unparseable node is dropped just as quietly. Neither is fatal for upserting, but
+/// both are logged: silently serving a short page is how a transient upstream hiccup
+/// would otherwise turn into deleted rows.
+fn parse_nodes(
+    nodes: &[serde_json::Value],
+    query_id: i64,
+    errors: &[GqlError],
+) -> (Vec<CachedItem>, bool) {
+    let items: Vec<CachedItem> = nodes
+        .iter()
+        .filter_map(|node| node_to_cached_item(node, query_id))
+        .collect();
+
+    let dropped = nodes.len() - items.len();
+    let faithful = dropped == 0 && errors.is_empty();
+    if !faithful {
+        let detail = errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        warn!(
+            dropped,
+            node_count = nodes.len(),
+            errors = %detail,
+            "incomplete search page; will not prune against it"
+        );
+    }
+    (items, faithful)
 }
 
 /// Re-fetch a single PR/Issue by repo + number, returning it tagged with
@@ -603,6 +654,74 @@ mod tests {
         }))
         .unwrap();
         assert!(!is_rate_limited(&ok));
+    }
+
+    // ── parse_nodes: faithfulness accounting ─────────────────────────────────────
+
+    /// A minimal well-formed search node.
+    fn ok_node(number: i64) -> serde_json::Value {
+        serde_json::json!({
+            "__typename": "Issue",
+            "number": number,
+            "title": "Bug report",
+            "state": "OPEN",
+            "url": format!("https://github.com/owner/repo/issues/{number}"),
+            "updatedAt": "2026-05-23T10:00:00Z",
+            "author": { "__typename": "User", "login": "alice" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo" },
+            "comments": { "totalCount": 0 }
+        })
+    }
+
+    fn gql_error(message: &str) -> GqlError {
+        GqlError {
+            err_type: None,
+            message: message.to_string(),
+        }
+    }
+
+    /// Every node parsed and no errors → the page is a faithful view of the query's
+    /// results, so `sync_task` may prune against it.
+    #[test]
+    fn parse_nodes_faithful_when_all_parse_and_no_errors() {
+        let nodes = vec![ok_node(1), ok_node(2)];
+        let (items, faithful) = parse_nodes(&nodes, 7, &[]);
+        assert_eq!(items.len(), 2);
+        assert!(faithful);
+    }
+
+    /// A `null` node — GitHub's shape for a per-node resolver failure — is dropped
+    /// silently. That must mark the page unfaithful: treating the missing key as "the
+    /// item left the query" would delete a live row and its read marker.
+    #[test]
+    fn parse_nodes_unfaithful_when_a_node_is_null() {
+        let nodes = vec![ok_node(1), serde_json::Value::Null, ok_node(3)];
+        let (items, faithful) = parse_nodes(&nodes, 7, &[gql_error("Something went wrong")]);
+        assert_eq!(items.len(), 2, "the null node is dropped");
+        assert!(!faithful);
+    }
+
+    /// A node missing a required field is dropped by `node_to_cached_item` even
+    /// without any top-level error, so the drop count alone must flip the flag.
+    #[test]
+    fn parse_nodes_unfaithful_when_a_node_is_malformed() {
+        let mut bad = ok_node(2);
+        bad.as_object_mut().unwrap().remove("updatedAt");
+        let nodes = vec![ok_node(1), bad];
+        let (items, faithful) = parse_nodes(&nodes, 7, &[]);
+        assert_eq!(items.len(), 1);
+        assert!(!faithful);
+    }
+
+    /// Errors alongside a full set of parsed nodes still mean a partial response;
+    /// don't prune against it.
+    #[test]
+    fn parse_nodes_unfaithful_when_errors_present_despite_all_nodes_parsing() {
+        let nodes = vec![ok_node(1)];
+        let (items, faithful) = parse_nodes(&nodes, 7, &[gql_error("upstream hiccup")]);
+        assert_eq!(items.len(), 1);
+        assert!(!faithful);
     }
 
     #[test]

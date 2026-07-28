@@ -427,8 +427,10 @@ pub async fn load_items_task(
 }
 
 /// How a sync runs. `background` drives the front-end's deferred-refresh banner;
-/// `incremental` narrows the fetch to items updated since the last fetch (a full
-/// fetch when false, or when the query was never fetched).
+/// `incremental` *permits* narrowing the fetch to items updated since the last one,
+/// but does not guarantee it — `resolve_since` still promotes the fetch to a full
+/// one when the query was never fetched, constrains `updated:` itself, or is due a
+/// pruning full fetch. `incremental: false` forces a full fetch unconditionally.
 #[derive(Clone, Copy)]
 pub struct SyncOpts {
     pub background: bool,
@@ -448,6 +450,51 @@ const INCREMENTAL_OVERLAP_SECS: i64 = 600;
 /// cap may be truncated, so we must not prune in that case (we can't tell which
 /// items truly fell out of the query vs. were cut off).
 const SEARCH_RESULT_CAP: usize = 1000;
+
+/// What to do after a fetch walk finishes: whether to prune, and whether the fetch
+/// earns its `last_full_fetch_at` stamp. See [`prune_decision`].
+struct PruneDecision {
+    prune: bool,
+    stamp: bool,
+}
+
+/// Decide whether a finished fetch may prune, and whether it counts as a completed
+/// full fetch for scheduling purposes.
+///
+/// Only a full fetch is authoritative, so an incremental one never prunes. Beyond
+/// that, two conditions disqualify pruning — for opposite reasons, which is why they
+/// produce different `stamp` values:
+///
+/// - **Truncated** (`total_count >= SEARCH_RESULT_CAP`): GitHub may have cut the
+///   result set off, so we can't tell a dropped item from a cut-off one. Pruning is
+///   *impossible* for this query and no later attempt would do better, so still
+///   stamp — otherwise the query would re-page its entire result set every cycle
+///   chasing a prune that can never run.
+/// - **Incomplete** (`!complete`): this particular walk lost data (an unparseable
+///   node, a partial GraphQL error, a page walk that couldn't continue). Pruning
+///   would delete live rows and their read markers. Don't stamp, so the next sync
+///   retries the full fetch promptly.
+///
+/// Truncation is checked first: a truncated *and* incomplete fetch still can't ever
+/// prune, so re-fetching it early would be pointless work.
+fn prune_decision(is_full: bool, total_count: usize, complete: bool) -> PruneDecision {
+    if !is_full {
+        return PruneDecision {
+            prune: false,
+            stamp: false,
+        };
+    }
+    if total_count >= SEARCH_RESULT_CAP {
+        return PruneDecision {
+            prune: false,
+            stamp: true,
+        };
+    }
+    PruneDecision {
+        prune: complete,
+        stamp: false, // the prune itself sets this on success
+    }
+}
 
 /// Resolve the `updated:>=` threshold for one sync. `Some(ts)` narrows the fetch to
 /// items updated since `ts`; `None` means a full fetch — the authoritative result
@@ -515,7 +562,16 @@ pub async fn sync_task(
     let reload = || load_items_task(pool.clone(), query_id, opts.background, tx.clone());
 
     let mut after: Option<String> = None;
+    // Counts raw `nodes`, not parsed items: this feeds the `SEARCH_RESULT_CAP`
+    // comparison, which must reflect what GitHub returned. Counting parsed items
+    // would let dropped nodes pull a truncated set under the cap.
     let mut total_count = 0usize;
+    // Whether `keep_keys` may be trusted as the complete result set. Cleared by any
+    // page that lost nodes (parse failure or partial GraphQL error) and by a walk
+    // that ended without exhausting the pages — in either case a key could be
+    // missing for a reason other than "left the query", and pruning would delete a
+    // live row along with its read marker.
+    let mut complete = true;
 
     loop {
         let result = github::search_page(
@@ -581,18 +637,29 @@ pub async fn sync_task(
                         return;
                     }
                 }
-                total_count += page.items.len();
-                debug!(page_items = page.items.len(), total_count, "fetched page");
+                total_count += page.node_count;
+                complete &= page.faithful;
+                debug!(
+                    page_items = page.items.len(),
+                    page_nodes = page.node_count,
+                    total_count,
+                    complete,
+                    "fetched page"
+                );
 
                 // Reload from DB after each page so the UI shows results immediately.
                 reload().await;
 
                 // Stop when GitHub reports no further pages, or defensively if
-                // it claims another page but hands back no cursor to fetch it.
+                // it claims another page but hands back no cursor to fetch it —
+                // the latter leaves the result set unfinished, so it must not be
+                // treated as authoritative for pruning.
                 if !has_next {
                     break;
                 }
                 let Some(cursor) = cursor else {
+                    warn!("search reported another page but no cursor; stopping walk");
+                    complete = false;
                     break;
                 };
                 after = Some(cursor);
@@ -600,17 +667,14 @@ pub async fn sync_task(
         }
     }
 
-    // After an untruncated full fetch, drop cached items the query no longer
-    // returns (e.g. a PR that was merged and left an `is:open` query). Skipped
-    // when the result hit the cap, since the set may be truncated.
-    //
-    // A full fetch only earns its `last_full_fetch_at` stamp if it did the pruning
-    // it exists for. Hitting the cap means pruning is *impossible* (not merely
-    // skipped), so stamp anyway — otherwise such a query would re-page its whole
-    // result set every cycle for a prune that can never run. A prune *error*, by
-    // contrast, leaves the stamp untouched so the next sync retries the full fetch.
-    let mut full_fetch_done = is_full && total_count >= SEARCH_RESULT_CAP;
-    if is_full && total_count < SEARCH_RESULT_CAP {
+    // After a full fetch that we can vouch for, drop cached items the query no
+    // longer returns (e.g. a PR that was merged and left an `is:open` query).
+    let PruneDecision { prune, stamp } = prune_decision(is_full, total_count, complete);
+    if is_full && !prune && !complete {
+        warn!("skipping prune: incomplete result set");
+    }
+    let mut full_fetch_done = stamp;
+    if prune {
         match db::prune_query_items(&pool, query_id, &keep_keys).await {
             Ok(deleted) => {
                 full_fetch_done = true;
@@ -732,12 +796,20 @@ impl SyncConfig {
 
     /// Cache-staleness threshold: a query is stale once it is this old.
     pub fn stale_secs(&self) -> i64 {
-        self.interval_secs as i64
+        Self::to_secs(self.interval_secs)
     }
 
     /// Age past which an incremental sync is upgraded to a full fetch.
     pub fn full_fetch_secs(&self) -> i64 {
-        self.full_fetch_interval_secs as i64
+        Self::to_secs(self.full_fetch_interval_secs)
+    }
+
+    /// Saturate rather than cast: a configured value above `i64::MAX` would wrap
+    /// *negative*, and the DB reads a negative threshold as "always overdue" — so a
+    /// nonsensically large setting would silently mean the exact opposite of what it
+    /// says. Saturating keeps an absurd value merely absurd.
+    fn to_secs(secs: u64) -> i64 {
+        i64::try_from(secs).unwrap_or(i64::MAX)
     }
 }
 
@@ -998,8 +1070,10 @@ pub enum EngineCommand {
     LoadCached {
         query_id: i64,
     },
-    /// Unconditional GitHub sync for a root query (incremental: only items
-    /// updated since the last fetch).
+    /// Unconditional GitHub sync for a root query. Normally incremental (only items
+    /// updated since the last fetch), but promoted to a pruning full fetch when one
+    /// is due — see `resolve_since`. Foreground, so a prune applies live rather than
+    /// waiting behind the banner.
     Sync {
         query_id: i64,
         query_str: String,
@@ -1010,7 +1084,9 @@ pub enum EngineCommand {
         query_id: i64,
         query_str: String,
     },
-    /// GitHub sync only if the query's cache is stale (sends `SyncStarted` if it runs).
+    /// GitHub sync only if the query's cache is stale (sends `SyncStarted` if it
+    /// runs). Incremental like `Sync`, and promoted to a full fetch on the same
+    /// terms.
     SyncIfStale {
         query_id: i64,
         query_str: String,
@@ -1713,6 +1789,31 @@ mod tests {
     }
 
     #[rstest]
+    // An incremental fetch is never authoritative, so it neither prunes nor stamps.
+    #[case::incremental(false, 10, true, false, false)]
+    // The normal full fetch: prune, and let the prune's success do the stamping.
+    #[case::full_and_complete(true, 10, true, true, false)]
+    // Lost data mid-walk: must not prune (it would delete live rows), and must not
+    // stamp either, so the next sync retries the full fetch promptly.
+    #[case::full_but_incomplete(true, 10, false, false, false)]
+    // Truncated by GitHub: pruning is impossible for this query, so stamp anyway
+    // rather than re-page the whole result set every cycle forever.
+    #[case::truncated(true, SEARCH_RESULT_CAP, true, false, true)]
+    // Truncated *and* incomplete: still can't ever prune, so don't pay to retry.
+    #[case::truncated_and_incomplete(true, SEARCH_RESULT_CAP, false, false, true)]
+    fn prune_decision_cases(
+        #[case] is_full: bool,
+        #[case] total_count: usize,
+        #[case] complete: bool,
+        #[case] want_prune: bool,
+        #[case] want_stamp: bool,
+    ) {
+        let d = prune_decision(is_full, total_count, complete);
+        assert_eq!(d.prune, want_prune, "prune");
+        assert_eq!(d.stamp, want_stamp, "stamp");
+    }
+
+    #[rstest]
     // `0` is the escape hatch: every sync becomes a full fetch, i.e. due as often
     // as a sync can happen.
     #[case::zero_means_every_sync(60, 0, 60, 60)]
@@ -1726,6 +1827,9 @@ mod tests {
         DEFAULT_SYNC_INTERVAL_SECS as i64,
         DEFAULT_FULL_FETCH_INTERVAL_SECS as i64
     )]
+    // An absurd value saturates instead of wrapping negative, which the DB would
+    // read as "always overdue" — the opposite of what the setting asks for.
+    #[case::saturates_instead_of_wrapping(u64::MAX, u64::MAX, i64::MAX, i64::MAX)]
     fn sync_config_clamps_full_fetch_to_interval(
         #[case] interval: u64,
         #[case] full_fetch: u64,

@@ -203,7 +203,7 @@ async function updateBanner() {
     banner.hidden = true;
     return;
   }
-  banner.textContent = `${changesLabel(changes)} in background — click to refresh`;
+  banner.textContent = `${changesLabel(changes)} — click to refresh`;
   banner.hidden = false;
   banner.onclick = () => applyPending(e.rootQueryId);
 }

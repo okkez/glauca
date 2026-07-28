@@ -36,10 +36,14 @@ pub struct ChangeCounts {
 }
 
 impl ChangeCounts {
+    /// Every change, of either kind. The Tauri front-end mirrors this sum in JS to
+    /// decide whether to show the banner, so keep the two definitions in step.
     pub fn total(&self) -> usize {
         self.updated + self.removed
     }
 
+    /// Nothing changed, so no banner should be shown and the held-back list can be
+    /// dropped. This is the check front-ends gate on.
     pub fn is_empty(&self) -> bool {
         self.total() == 0
     }

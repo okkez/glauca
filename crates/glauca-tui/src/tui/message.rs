@@ -1,5 +1,5 @@
 //! Handling of `AppMessage`s drained from the engine in the run loop: applying
-//! loaded items (with the background "N updated" banner), left-pane entry
+//! loaded items (with the background change banner), left-pane entry
 //! add/update/delete/reorder confirmations, sync status, and comment loads.
 
 use super::*;

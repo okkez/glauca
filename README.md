@@ -205,6 +205,10 @@ instead and drops such items from the cache. Lower it to have them disappear
 sooner; raise it to spend less API quota on queries with many results. For a query
 whose results fit one page this costs no extra requests at all.
 
+Read/unread state lives on the cached row, so an item that leaves a query and later
+matches it again comes back marked unread — a re-requested review or a reopened
+issue reappears as new work rather than as something you had already read.
+
 ### Custom actions
 
 Both frontends can run user-defined commands against the selected PR/Issue. Press `x`
