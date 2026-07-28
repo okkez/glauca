@@ -71,7 +71,9 @@ fn fuzzy_hit(needle: &str, haystacks: &[&str]) -> bool {
 ///     only — whitespace-separated values are not supported)
 ///   - `repo:<owner/name>` — filter by repository (substring)
 ///   - `base:<branch>` / `head:<branch>` — filter PRs by base/head branch
-///   - `review-requested:<login>` — filter by requested reviewer login
+///   - `review-requested:<login>` / `team-review-requested:<slug>` — filter by a
+///     requested reviewer. Teams and users share one list, so the two are
+///     interchangeable here (unlike on GitHub, where they are distinct).
 ///   - `-<token>` — negate any token above, GitHub-style: the item must NOT
 ///     match it (`-label:bug`, `-is:draft`, `-wip`). A lone `-` is a plain
 ///     text token, not a negation.
@@ -138,6 +140,14 @@ impl Conditions {
         } else if let Some(val) = lower.strip_prefix("head:") {
             self.head_refs.push(val.to_string());
         } else if let Some(val) = lower.strip_prefix("review-requested:") {
+            self.review_requested.push(val.to_string());
+        } else if let Some(val) = lower.strip_prefix("team-review-requested:") {
+            // A team slug is stored in `requested_reviewers` in the same shape as a
+            // user login (see `github::node_to_cached_item`), so matching is
+            // identical to `review-requested:`. That makes the two qualifiers
+            // locally equivalent — `team-review-requested:` also matches a user of
+            // that name. Acceptable for a substring filter; distinguishing them
+            // would need a type discriminator stored per reviewer.
             self.review_requested.push(val.to_string());
         } else {
             self.text_tokens.push(lower.to_string());
@@ -736,6 +746,11 @@ mod tests {
     #[case::requested_carol("review-requested:carol", &["bob", "carol"], true)]
     #[case::unrequested_login("review-requested:dave", &["bob", "carol"], false)]
     #[case::no_reviewers("review-requested:bob", &[], false)]
+    // Team slugs live in the same `requested_reviewers` list as user logins, so
+    // `team-review-requested:` matches them (and, unavoidably, users too).
+    #[case::team_requested("team-review-requested:my-team", &["bob", "my-team"], true)]
+    #[case::team_not_requested("team-review-requested:other-team", &["bob", "my-team"], false)]
+    #[case::team_negated("-team-review-requested:my-team", &["bob", "my-team"], false)]
     fn matches_review_requested(
         #[case] q: &str,
         #[case] reviewers: &[&str],

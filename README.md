@@ -115,7 +115,9 @@ Glauca has two distinct filtering layers:
   [GitHub search qualifier](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests)
   works (`created:`, `language:`, `involves:`, `linked:`, …).
 - **Filter streams** (and the inline filter) run locally against the cached items, so they
-  only understand the subset of qualifiers below. Unknown qualifiers match nothing.
+  only understand the subset of qualifiers below. An unrecognized qualifier is not an
+  error: it is treated as plain text and fuzzy-matched like any other search term, so
+  `nonsense:value` usually matches nothing but is not guaranteed to.
 
 Supported local filter qualifiers (all conditions are ANDed; matching is a
 case-insensitive substring unless noted):
@@ -135,6 +137,7 @@ case-insensitive substring unless noted):
 | `repo:<owner/name>` | repository |
 | `base:<branch>` / `head:<branch>` | PR base / head branch |
 | `review-requested:<login>` | a requested reviewer login |
+| `team-review-requested:<slug>` | a requested reviewer team. Teams and users share one list locally, so this and `review-requested:` are interchangeable (unlike on GitHub) |
 
 `@me` is expanded to the current user in both layers.
 
