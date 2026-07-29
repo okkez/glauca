@@ -1190,9 +1190,15 @@ mod tests {
         keep: &[ItemKey],
         last_full_fetch_before_walk: Option<&str>,
     ) -> u64 {
-        prune_missing_items(pool, query_id, keep, PRUNE_STRIKES, last_full_fetch_before_walk)
-            .await
-            .expect("prune")
+        prune_missing_items(
+            pool,
+            query_id,
+            keep,
+            PRUNE_STRIKES,
+            last_full_fetch_before_walk,
+        )
+        .await
+        .expect("prune")
     }
 
     /// An automatic sync's prune of a query that has never been full fetched (so the
