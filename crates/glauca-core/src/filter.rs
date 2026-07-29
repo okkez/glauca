@@ -173,11 +173,10 @@ impl Conditions {
             // which still contains a `/` and so matches nothing — for a half-typed
             // *value* that is the honest answer, where a missing value constrains
             // nothing at all.
-            let slug = val
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(val);
+            let slug = match val.rsplit_once('/') {
+                Some((_org, slug)) if !slug.is_empty() => slug,
+                _ => val,
+            };
             Self::push_value(&mut self.review_requested, slug);
         } else {
             Self::push_value(&mut self.text_tokens, lower);

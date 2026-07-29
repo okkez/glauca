@@ -684,45 +684,40 @@ mod tests {
 
     /// Every node parsed and no errors → the page is a faithful view of the query's
     /// results, so `sync_task` may prune against it.
-    #[test]
-    fn parse_nodes_faithful_when_all_parse_and_no_errors() {
-        let nodes = vec![ok_node(1), ok_node(2)];
-        let (items, faithful) = parse_nodes(&nodes, 7, &[]);
-        assert_eq!(items.len(), 2);
-        assert!(faithful);
+    /// A node that `node_to_cached_item` will reject (missing a required field).
+    fn malformed_node(number: i64) -> serde_json::Value {
+        let mut node = ok_node(number);
+        node.as_object_mut().unwrap().remove("updatedAt");
+        node
     }
 
-    /// A `null` node — GitHub's shape for a per-node resolver failure — is dropped
-    /// silently. That must mark the page unfaithful: treating the missing key as "the
-    /// item left the query" would delete a live row and its read marker.
-    #[test]
-    fn parse_nodes_unfaithful_when_a_node_is_null() {
-        let nodes = vec![ok_node(1), serde_json::Value::Null, ok_node(3)];
-        let (items, faithful) = parse_nodes(&nodes, 7, &[gql_error("Something went wrong")]);
-        assert_eq!(items.len(), 2, "the null node is dropped");
-        assert!(!faithful);
-    }
-
-    /// A node missing a required field is dropped by `node_to_cached_item` even
-    /// without any top-level error, so the drop count alone must flip the flag.
-    #[test]
-    fn parse_nodes_unfaithful_when_a_node_is_malformed() {
-        let mut bad = ok_node(2);
-        bad.as_object_mut().unwrap().remove("updatedAt");
-        let nodes = vec![ok_node(1), bad];
-        let (items, faithful) = parse_nodes(&nodes, 7, &[]);
-        assert_eq!(items.len(), 1);
-        assert!(!faithful);
-    }
-
-    /// Errors alongside a full set of parsed nodes still mean a partial response;
-    /// don't prune against it.
-    #[test]
-    fn parse_nodes_unfaithful_when_errors_present_despite_all_nodes_parsing() {
-        let nodes = vec![ok_node(1)];
-        let (items, faithful) = parse_nodes(&nodes, 7, &[gql_error("upstream hiccup")]);
-        assert_eq!(items.len(), 1);
-        assert!(!faithful);
+    #[rstest]
+    #[case::all_parse_no_errors(vec![ok_node(1), ok_node(2)], vec![], 2, true)]
+    // A `null` node is GitHub's shape for a per-node resolver failure: dropped
+    // silently, and unfaithful on that basis alone — treating the missing key as "the
+    // item left the query" would delete a live row and its read marker.
+    #[case::null_node(vec![ok_node(1), serde_json::Value::Null, ok_node(3)], vec![], 2, false)]
+    // A node missing a required field is dropped the same way.
+    #[case::malformed_node(vec![ok_node(1), malformed_node(2)], vec![], 1, false)]
+    // Errors alongside a *full* set of parsed nodes still mean a partial response.
+    #[case::errors_only(vec![ok_node(1)], vec!["upstream hiccup"], 1, false)]
+    // How a partial failure actually arrives: the null node and the error explaining it.
+    #[case::null_node_with_error(
+        vec![ok_node(1), serde_json::Value::Null],
+        vec!["Something went wrong"],
+        1,
+        false
+    )]
+    fn parse_nodes_faithfulness(
+        #[case] nodes: Vec<serde_json::Value>,
+        #[case] errors: Vec<&str>,
+        #[case] want_items: usize,
+        #[case] want_faithful: bool,
+    ) {
+        let errors: Vec<GqlError> = errors.into_iter().map(gql_error).collect();
+        let (items, faithful) = parse_nodes(&nodes, 7, &errors);
+        assert_eq!(items.len(), want_items, "parsed items");
+        assert_eq!(faithful, want_faithful, "faithful");
     }
 
     #[test]
@@ -929,7 +924,10 @@ mod tests {
     #[case::explicit_lower_bound("is:pr updated:>2026-01-01", true)]
     #[case::explicit_range("is:pr updated:2026-01-01..2026-02-01", true)]
     #[case::no_updated_qualifier("is:pr is:open", false)]
-    #[case::similar_but_different("is:pr team-review-requested:o/t", false)]
+    #[case::unrelated_qualifier_with_a_colon("is:pr team-review-requested:o/t", false)]
+    // `contains("updated:")` must not degrade to `contains("updated")`: this is both
+    // what `apply_default_sort` appends and something a user may write themselves.
+    #[case::sort_by_updated_is_not_a_constraint("is:pr sort:updated-desc", false)]
     fn constrains_updated_cases(#[case] q: &str, #[case] expected: bool) {
         assert_eq!(constrains_updated(q), expected);
     }

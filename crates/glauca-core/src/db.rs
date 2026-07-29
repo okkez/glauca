@@ -178,10 +178,10 @@ pub async fn update_query(
     .await?;
     if query_changed {
         // Rows the new query does return are reset to 0 by `upsert_items`.
-        let armed = PRUNE_STRIKES - 1;
+        let armed_missing_count = PRUNE_STRIKES - 1;
         sqlx::query!(
             "UPDATE items SET missing_count = ? WHERE query_id = ?",
-            armed,
+            armed_missing_count,
             id
         )
         .execute(&mut *tx)
@@ -333,14 +333,14 @@ pub const PRUNE_STRIKES: i64 = 2;
 /// disarms it, and the threshold is only ever reached by *consecutive* absences.
 /// `strikes_required` comes from `engine::PruneTrust`.
 ///
-/// Read state is lost on deletion: `upsert_item` never writes
-/// `last_read_updated_at`, so an item that leaves a query and later matches again
-/// comes back as unread. Unlike `prune_query_overflow` — which reasons at length
-/// about avoiding exactly that, and protects the newest rows — pruning has no such
-/// protection, because deleting rows that no longer match is its whole purpose. The
-/// behaviour is intended: a re-requested review or a reopened issue is new actionable
-/// work, so surfacing it as unread is correct. What is *not* intended is deleting a
-/// row that still matches, which is what the strike count guards against.
+/// Read state is lost on deletion: `last_read_updated_at` lives on the row, and a
+/// re-insert always arrives with it unset (see `upsert_item`), so an item that leaves a
+/// query and later matches again comes back as unread. Unlike `prune_query_overflow` —
+/// which reasons at length about avoiding exactly that, and protects the newest rows —
+/// pruning has no such protection, because deleting rows that no longer match is its
+/// whole purpose. The behaviour is intended: a re-requested review or a reopened issue
+/// is new actionable work, so surfacing it as unread is correct. What is *not* intended
+/// is deleting a row that still matches, which is what the strike count guards against.
 ///
 /// `observed_stamp` is `last_full_fetch_at` as read *before* this walk began. If it has
 /// moved by now, a concurrent full fetch finished first and this walk's absences are
@@ -349,15 +349,13 @@ pub const PRUNE_STRIKES: i64 = 2;
 /// (Foreground `Sync`/`SyncIfStale` don't go through `SyncCoalescer`, so they really can
 /// overlap a background sync of the same query.)
 ///
-/// The check narrows that race rather than closing it, and knowingly so. `sync_task`
-/// stamps via `mark_fetched` *after* this returns, so a second walk committing inside
-/// that gap still sees the old value; `datetime('now')` has one-second resolution, so
-/// two walks finishing in the same second are indistinguishable; and two walks that
-/// both started before the query's first-ever full fetch both observe `NULL`. Closing
-/// these needs check-and-claim in one transaction — stamping here and demoting
-/// `mark_fetched` to `last_fetched_at` — which is worth doing if the race is ever
-/// observed. Each requires overlapping full walks *and* a transiently-absent row, and
-/// the cost when it happens is one row's read marker, so it is not worth the churn now.
+/// TODO: fold the stamp check and the stamp write into one transaction (check-and-claim
+/// here, demoting `mark_fetched` to `last_fetched_at`). The current check narrows the
+/// race rather than closing it: `sync_task` stamps *after* this returns, so a second
+/// walk committing inside that gap still sees the old value; `datetime('now')` has
+/// one-second resolution; and two walks predating a query's first full fetch both
+/// observe `NULL`. Deferred because each needs overlapping full walks *and* a
+/// transiently-absent row, and costs one row's read marker when it fires.
 ///
 /// Caller must only pass `keep` from an untruncated, complete full fetch — see
 /// `engine::may_prune`.
@@ -1084,16 +1082,32 @@ mod tests {
             .await
             .expect("upsert query");
 
-        // Never full fetched → due.
-        assert!(is_full_fetch_due(&pool, qid, 300).await.expect("due check"));
+        assert!(
+            is_full_fetch_due(&pool, qid, 300).await.expect("due check"),
+            "a query that was never full fetched is due"
+        );
 
-        // An incremental sync must not satisfy the full-fetch deadline, or ghosts
-        // would never be pruned.
         mark_fetched(&pool, qid, false).await.expect("mark fetched");
-        assert!(is_full_fetch_due(&pool, qid, 300).await.expect("due check"));
+        assert!(
+            is_full_fetch_due(&pool, qid, 300).await.expect("due check"),
+            "an incremental sync must not satisfy the full-fetch deadline, or ghosts \
+             would never be pruned"
+        );
 
         mark_fetched(&pool, qid, true).await.expect("mark fetched");
-        assert!(!is_full_fetch_due(&pool, qid, 300).await.expect("due check"));
+        assert!(
+            !is_full_fetch_due(&pool, qid, 300).await.expect("due check"),
+            "a full fetch satisfies it"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_fetch_due_again_once_the_interval_passes() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:open", "issue", None)
+            .await
+            .expect("upsert query");
+        mark_fetched(&pool, qid, true).await.expect("mark fetched");
 
         // A negative threshold makes the age comparison true without waiting or
         // time-travelling the clock: "older than -1 seconds" is always the case.
@@ -1132,9 +1146,13 @@ mod tests {
         ns
     }
 
+    /// The search string `query_with_items` saves. Named so a test can say "unchanged"
+    /// without duplicating the literal.
+    const CACHED_QUERY: &str = "repo:owner/r is:pr";
+
     /// A query whose cache holds `numbers`, all with zero strikes.
     async fn query_with_items(pool: &SqlitePool, numbers: &[i64]) -> i64 {
-        let qid = upsert_query(pool, "repo:owner/r is:pr", "pull_request", None)
+        let qid = upsert_query(pool, CACHED_QUERY, "pull_request", None)
             .await
             .expect("upsert query");
         for n in numbers {
@@ -1152,10 +1170,36 @@ mod tests {
             .collect()
     }
 
-    /// An automatic sync's prune: corroborating threshold, and the stamp it observed
-    /// before its walk (`None` — these tests never call `mark_fetched`).
+    /// The next search returned `numbers`, which clears their strikes.
+    async fn search_returned(pool: &SqlitePool, query_id: i64, numbers: &[i64]) {
+        let items: Vec<CachedItem> = numbers
+            .iter()
+            .map(|n| make_item(query_id, *n, &format!("PR {n}")))
+            .collect();
+        upsert_items(pool, &items).await.expect("upsert");
+    }
+
+    /// Prune as a fetch that observed `observed_stamp` before its walk would.
+    async fn prune_observing(
+        pool: &SqlitePool,
+        query_id: i64,
+        keep: &[ItemKey],
+        observed_stamp: Option<&str>,
+    ) -> u64 {
+        prune_missing_items(pool, query_id, keep, PRUNE_STRIKES, observed_stamp)
+            .await
+            .expect("prune")
+    }
+
+    /// An automatic sync's prune of a query that has never been full fetched (so the
+    /// stamp it observed is `None`).
     async fn auto_prune(pool: &SqlitePool, query_id: i64, keep: &[ItemKey]) -> u64 {
-        prune_missing_items(pool, query_id, keep, PRUNE_STRIKES, None)
+        prune_observing(pool, query_id, keep, None).await
+    }
+
+    /// A user's explicit resync: `PruneTrust::Immediate`, i.e. delete on first absence.
+    async fn forced_prune(pool: &SqlitePool, query_id: i64, keep: &[ItemKey]) -> u64 {
+        prune_missing_items(pool, query_id, keep, 1, None)
             .await
             .expect("prune")
     }
@@ -1184,10 +1228,7 @@ mod tests {
         let (pool, _file) = test_pool().await;
         let qid = query_with_items(&pool, &[1, 2]).await;
 
-        let deleted = prune_missing_items(&pool, qid, &keep(&[1]), 1, None)
-            .await
-            .expect("prune");
-        assert_eq!(deleted, 1);
+        assert_eq!(forced_prune(&pool, qid, &keep(&[1])).await, 1);
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
     }
 
@@ -1202,9 +1243,7 @@ mod tests {
         // Strike one against #2.
         auto_prune(&pool, qid, &keep(&[1])).await;
         // #2 is returned by the next search, which resets its counter.
-        upsert_items(&pool, &[make_item(qid, 2, "PR 2")])
-            .await
-            .expect("upsert");
+        search_returned(&pool, qid, &[2]).await;
 
         // Absent again — that's a *first* strike again, so it survives.
         assert_eq!(auto_prune(&pool, qid, &keep(&[1])).await, 0);
@@ -1237,26 +1276,24 @@ mod tests {
         let qid = query_with_items(&pool, &[1, 2]).await;
 
         // Walk A observed no stamp, pruned (strike 1), and marked the query fetched.
-        assert_eq!(auto_prune(&pool, qid, &keep(&[1])).await, 0);
+        assert_eq!(prune_observing(&pool, qid, &keep(&[1]), None).await, 0);
         mark_fetched(&pool, qid, true).await.expect("mark");
 
         // Walk B started before that and also observed no stamp — its absence is not an
         // independent observation, so it must not count a second strike.
-        let deleted = prune_missing_items(&pool, qid, &keep(&[1]), PRUNE_STRIKES, None)
-            .await
-            .expect("prune");
-        assert_eq!(deleted, 0);
+        assert_eq!(prune_observing(&pool, qid, &keep(&[1]), None).await, 0);
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 2]);
 
         // A later walk that observed the current stamp counts normally.
         let stamp = last_full_fetch_at(&pool, qid).await.expect("stamp");
-        let deleted = prune_missing_items(&pool, qid, &keep(&[1]), PRUNE_STRIKES, stamp.as_deref())
-            .await
-            .expect("prune");
-        assert_eq!(deleted, 1);
+        assert_eq!(
+            prune_observing(&pool, qid, &keep(&[1]), stamp.as_deref()).await,
+            1
+        );
     }
 
-    /// Strikes live on the row, so one query's misses can never delete another's.
+    /// Strikes live on the row, so one query's misses neither delete another query's
+    /// copy of the same item nor count towards its threshold.
     #[tokio::test]
     async fn prune_strikes_are_per_row() {
         let (pool, _file) = test_pool().await;
@@ -1273,6 +1310,14 @@ mod tests {
             auto_prune(&pool, qa, &[]).await;
         }
         assert_eq!(remaining_numbers(&pool, qa).await, Vec::<i64>::new());
+        assert_eq!(remaining_numbers(&pool, qb).await, vec![1]);
+
+        // B's row inherited none of those strikes: its own first absence is strike one.
+        assert_eq!(
+            auto_prune(&pool, qb, &[]).await,
+            0,
+            "query B's row must start from zero strikes"
+        );
         assert_eq!(remaining_numbers(&pool, qb).await, vec![1]);
     }
 
@@ -1302,9 +1347,8 @@ mod tests {
     async fn renaming_a_query_does_not_arm_prune_strikes() {
         let (pool, _file) = test_pool().await;
         let qid = query_with_items(&pool, &[1]).await;
-        let unchanged = "repo:owner/r is:pr";
 
-        update_query(&pool, qid, Some("New display name"), unchanged)
+        update_query(&pool, qid, Some("New display name"), CACHED_QUERY)
             .await
             .expect("rename");
 

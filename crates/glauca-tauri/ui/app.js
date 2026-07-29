@@ -170,8 +170,8 @@ function isUnread(it) {
 async function updateBanner() {
   const banner = $("banner");
   const e = state.entries[state.selectedEntry];
-  const fresh = e ? state.pending.get(e.rootQueryId) : null;
-  if (!e || !fresh) {
+  const fresh = e && state.pending.get(e.rootQueryId);
+  if (!fresh) {
     banner.hidden = true;
     return;
   }

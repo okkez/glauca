@@ -22,12 +22,13 @@ pub fn is_item_unread(updated_at: &str, last_read_updated_at: Option<&str>) -> b
 /// What a freshly synced list changed relative to the list currently on screen.
 /// Items are keyed by (repo_owner, repo_name, number). Drives the deferred-refresh
 /// banner shown when a background sync's results are held back from the view.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChangeCounts {
     /// Items new to the list, or whose `updated_at` advanced.
     pub updated: usize,
-    /// Items on screen but absent from the fresh list — they no longer match the
-    /// query and were pruned from the cache (`db::prune_missing_items`).
+    /// Items on screen but absent from the fresh list. Usually they stopped matching
+    /// the query and were pruned (`db::prune_missing_items`), though the cache-size
+    /// sweep (`db::prune_query_overflow`) can remove rows too.
     ///
     /// Counting these is what makes a removal-only background sync visible. A
     /// front-end that looked at `updated` alone would see zero changes, discard the
@@ -65,8 +66,8 @@ impl ChangeCounts {
 /// Note the deliberate asymmetry with [`crate::notify::ItemTracker`]: desktop
 /// notifications count only the `updated` side, so a removal never fires one.
 ///
-/// Known limitation: the diff key is (owner, repo, number) plus `updated_at`, so a
-/// field that changes *without* `updated_at` advancing is not counted and the
+/// TODO(known limitation): the diff key is (owner, repo, number) plus `updated_at`, so
+/// a field that changes *without* `updated_at` advancing is not counted and the
 /// held-back list is discarded. The cached row is already correct by then; the view
 /// catches up on the next foreground load. Applying silently when `is_empty()` is
 /// deliberately not done — `MarkItemRead` is fire-and-forget, so an in-flight fresh

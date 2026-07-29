@@ -478,7 +478,7 @@ fn may_prune(is_full: bool, total_count: usize, complete: bool) -> bool {
 /// construction site added for some non-user reason silently acquires
 /// delete-on-first-absence. This is the only safety property in the prune path, so it
 /// gets said out loud.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy)]
 pub enum PruneTrust {
     /// Automatic sync: require `db::PRUNE_STRIKES` consecutive absences, so a paged
     /// walk that raced an update can't destroy a live row's read marker.
@@ -518,12 +518,14 @@ async fn resolve_since(
     query_str: &str,
     opts: SyncOpts,
 ) -> Option<String> {
-    let want_incremental = opts.incremental
-        && !github::constrains_updated(query_str)
-        && !db::is_full_fetch_due(pool, query_id, opts.full_fetch_interval_secs)
+    // Phrased as the reasons to fetch in full, matching the list above; the
+    // equivalent `want_incremental` form needs three nested negations to read.
+    let must_fetch_full = !opts.incremental
+        || github::constrains_updated(query_str)
+        || db::is_full_fetch_due(pool, query_id, opts.full_fetch_interval_secs)
             .await
             .unwrap_or(true);
-    if !want_incremental {
+    if must_fetch_full {
         return None;
     }
     db::updated_since(pool, query_id, INCREMENTAL_OVERLAP_SECS)
@@ -552,14 +554,14 @@ pub async fn sync_task(
     // particular, an incremental sync is periodically upgraded to a full one so the
     // prune below can drop items that silently stopped matching the query.
     let since = resolve_since(&pool, query_id, &query_str, opts).await;
-    // A full fetch (no `since`) is the authoritative result set, so we collect
-    // its keys to prune items that no longer match the query. Skipped for
-    // incremental fetches (a partial set can't tell us what fell out).
+    // Only a full fetch (no `since`) can tell us what fell out, so only then do we
+    // collect keys to prune against. Being full is necessary but not sufficient — a
+    // truncated or lossy walk is disqualified too; see `may_prune`.
     let is_full = since.is_none();
-    let mut keep_keys: Vec<(String, String, i64)> = Vec::new();
+    let mut keep_keys: Vec<db::ItemKey> = Vec::new();
     // `last_full_fetch_at` as it stands *before* the walk. Handed to the prune so it
     // can detect a concurrent full fetch finishing first — see `prune_missing_items`.
-    let stamp_before = if is_full {
+    let last_full_fetch_before_walk = if is_full {
         db::last_full_fetch_at(&pool, query_id)
             .await
             .unwrap_or_else(|e| {
@@ -578,13 +580,11 @@ pub async fn sync_task(
     let reload = || load_items_task(pool.clone(), query_id, opts.background, tx.clone());
 
     let mut after: Option<String> = None;
-    // Counts raw `nodes`, not parsed items: this feeds the `SEARCH_RESULT_CAP`
-    // comparison, which must reflect what GitHub returned. Counting parsed items
-    // would let dropped nodes pull a truncated set under the cap.
-    let mut total_count = 0usize;
-    // Items actually cached, which is what the UI's "Synced N items" should say —
-    // reporting `total_count` there would include nodes we failed to parse.
-    let mut item_count = 0usize;
+    // Raw `nodes` feed the `SEARCH_RESULT_CAP` comparison, which must reflect what
+    // GitHub returned; cached items are what the UI's "Synced N items" reports. They
+    // differ whenever a node failed to parse.
+    let mut total_node_count = 0usize;
+    let mut total_item_count = 0usize;
     // Whether `keep_keys` may be trusted as the complete result set. Cleared by any
     // page that lost nodes (parse failure or partial GraphQL error) and by a walk
     // that ended without exhausting the pages — in either case a key could be
@@ -601,7 +601,9 @@ pub async fn sync_task(
             after.as_deref(),
         )
         .await;
-        match result {
+        // Both failures end the walk, so take them as guards and keep the page
+        // handling — the bulk of this loop — at one level of indentation.
+        let page = match result {
             Err(github::SearchError::RateLimited) => {
                 // Pause background sync until the limit resets; surface a notice
                 // rather than a hard error so the UI doesn't look broken.
@@ -621,92 +623,88 @@ pub async fn sync_task(
                     .await;
                 return;
             }
-            Err(github::SearchError::Other(e)) => {
-                warn!(error = %e, "sync failed");
+            Err(github::SearchError::Other(api_err)) => {
+                warn!(error = %api_err, "sync failed");
                 // Record the failed attempt so the full walk isn't retried every sync;
                 // see `mark_full_fetch_attempted`.
-                if is_full && let Err(e) = db::mark_full_fetch_attempted(&pool, query_id).await {
-                    warn!(error = %e, "failed to record full-fetch attempt");
+                if is_full && let Err(db_err) = db::mark_full_fetch_attempted(&pool, query_id).await
+                {
+                    warn!(error = %db_err, "failed to record full-fetch attempt");
                 }
                 let _ = tx
                     .send(AppMessage::SyncError {
                         query_id,
-                        error: format!("GitHub API error: {e}"),
+                        error: format!("GitHub API error: {api_err}"),
                         background: opts.background,
                     })
                     .await;
                 return;
             }
-            Ok(page) => {
-                let has_next = page.has_next_page;
-                let cursor = page.end_cursor.clone();
+            Ok(page) => page,
+        };
 
-                if is_full {
-                    keep_keys.extend(page.items.iter().map(|item| {
-                        (item.repo_owner.clone(), item.repo_name.clone(), item.number)
-                    }));
-                }
-                // Upsert this page's items into SQLite in one transaction.
-                if let Err(e) = db::upsert_items(&pool, &page.items).await {
-                    let _ = tx
-                        .send(AppMessage::SyncError {
-                            query_id,
-                            error: format!("db write error: {e}"),
-                            background: opts.background,
-                        })
-                        .await;
-                    return;
-                }
-                total_count += page.node_count;
-                item_count += page.items.len();
-                complete &= page.faithful;
-                debug!(
-                    page_items = page.items.len(),
-                    page_nodes = page.node_count,
-                    total_count,
-                    complete,
-                    "fetched page"
-                );
-
-                // Reload from DB after each page so the UI shows results immediately.
-                // A page that produced no items wrote nothing, so re-reading the whole
-                // list would ship an identical snapshot — skip it. That matters in
-                // steady state, where most incremental syncs find nothing at all and
-                // would otherwise re-read (and re-diff) every cached row every minute.
-                if !page.items.is_empty() {
-                    reload().await;
-                }
-
-                // Stop when GitHub reports no further pages, or defensively if
-                // it claims another page but hands back no cursor to fetch it —
-                // the latter leaves the result set unfinished, so it must not be
-                // treated as authoritative for pruning.
-                if !has_next {
-                    break;
-                }
-                let Some(cursor) = cursor else {
-                    warn!("search reported another page but no cursor; stopping walk");
-                    complete = false;
-                    break;
-                };
-                after = Some(cursor);
-            }
+        if is_full {
+            keep_keys.extend(
+                page.items
+                    .iter()
+                    .map(|item| (item.repo_owner.clone(), item.repo_name.clone(), item.number)),
+            );
         }
+        // Upsert this page's items into SQLite in one transaction.
+        if let Err(e) = db::upsert_items(&pool, &page.items).await {
+            let _ = tx
+                .send(AppMessage::SyncError {
+                    query_id,
+                    error: format!("db write error: {e}"),
+                    background: opts.background,
+                })
+                .await;
+            return;
+        }
+        total_node_count += page.node_count;
+        total_item_count += page.items.len();
+        complete &= page.faithful;
+        debug!(
+            page_items = page.items.len(),
+            page_nodes = page.node_count,
+            total_node_count,
+            complete,
+            "fetched page"
+        );
+
+        // Reload from DB after each page so the UI shows results immediately.
+        // A page that produced no items wrote nothing, so re-reading the whole
+        // list would ship an identical snapshot — skip it. That matters in
+        // steady state, where most incremental syncs find nothing at all and
+        // would otherwise re-read (and re-diff) every cached row every minute.
+        if !page.items.is_empty() {
+            reload().await;
+        }
+
+        // Stop when GitHub reports no further pages, or defensively if
+        // it claims another page but hands back no cursor to fetch it —
+        // the latter leaves the result set unfinished, so it must not be
+        // treated as authoritative for pruning.
+        if !page.has_next_page {
+            break;
+        }
+        let Some(cursor) = page.end_cursor else {
+            warn!("search reported another page but no cursor; stopping walk");
+            complete = false;
+            break;
+        };
+        after = Some(cursor);
     }
 
     // After a full fetch that we can vouch for, drop cached items the query no
     // longer returns (e.g. a PR that was merged and left an `is:open` query).
-    let truncated = total_count >= SEARCH_RESULT_CAP;
-    if is_full && !truncated && !complete {
-        warn!("skipping prune: incomplete result set");
-    }
-    if may_prune(is_full, total_count, complete) {
+    if may_prune(is_full, total_node_count, complete) {
         match db::prune_missing_items(
             &pool,
             query_id,
             &keep_keys,
             opts.prune_trust.strikes_required(),
-            stamp_before.as_deref(),
+            last_full_fetch_before_walk.as_deref(),
         )
         .await
         {
@@ -723,6 +721,11 @@ pub async fn sync_task(
                     .await;
             }
         }
+    } else if is_full && total_node_count < SEARCH_RESULT_CAP {
+        // Reaching here with a full, untruncated fetch leaves only one disqualifier,
+        // so `may_prune`'s rule doesn't have to be restated to name it. Truncation is
+        // not worth a warning: it's a property of the query, not of this attempt.
+        warn!("skipping prune: incomplete result set");
     }
 
     // Mark the query as freshly fetched only after all pages are done. Invariant: no
@@ -749,11 +752,11 @@ pub async fn sync_task(
             .await;
         return;
     }
-    info!(total_count, item_count, complete, "sync done");
+    info!(total_node_count, total_item_count, complete, "sync done");
     let _ = tx
         .send(AppMessage::SyncDone {
             query_id,
-            count: item_count,
+            count: total_item_count,
         })
         .await;
 }
@@ -817,10 +820,12 @@ impl MaintenanceConfig {
     /// `retention_days = 0` would clear essentially every body. `max_items_per_query`
     /// below `SEARCH_RESULT_CAP` cannot be honoured at all: the rows it deletes as
     /// overflow are still inside the query's live result set, so the next full fetch
-    /// re-inserts them — and `upsert_item` doesn't restore `last_read_updated_at`, so
-    /// they come back *unread*. Before pruning ran on a timer that flapped at most
-    /// once per session; now it would flap every sweep, so the configuration is ruled
-    /// out rather than documented.
+    /// re-inserts them, unread (see `db::upsert_item`).
+    ///
+    /// Back when a full fetch happened at most once per session, that delete/re-insert
+    /// flap happened at most once too. Now that full fetches are on a timer it would
+    /// repeat every `full_fetch_interval_secs`, so the setting is ruled out rather
+    /// than documented.
     pub fn effective(retention_days: u64, max_items_per_query: u64) -> Self {
         let effective = Self {
             retention_days: retention_days.max(1),
@@ -1068,9 +1073,8 @@ pub async fn refresh_timer_task(
     gate: RateLimitGate,
     pending: SyncCoalescer,
 ) {
-    // `SyncConfig` rather than a bare `u64`: its constructor is what guarantees the
-    // interval is non-zero (`tokio::time::interval` panics otherwise) and what
-    // converts to the DB's `i64` threshold without wrapping negative.
+    // `SyncConfig` rather than a bare `u64`, for the invariants its constructor
+    // enforces — see [`SyncConfig`].
     let mut interval =
         tokio::time::interval(tokio::time::Duration::from_secs(sync.interval_secs()));
     interval.tick().await; // skip the immediate first tick
@@ -1944,7 +1948,7 @@ mod tests {
     // An absurd value saturates instead of wrapping negative, which the DB would
     // read as "always overdue" — the opposite of what the setting asks for.
     #[case::saturates_instead_of_wrapping(u64::MAX, u64::MAX, i64::MAX, i64::MAX)]
-    fn sync_config_clamps_full_fetch_to_interval(
+    fn sync_config_effective_cases(
         #[case] interval: u64,
         #[case] full_fetch: u64,
         #[case] want_stale: i64,
@@ -2083,12 +2087,13 @@ mod tests {
             .expect("q");
         db::mark_fetched(&pool, qid, true).await.expect("mark");
 
-        let since = resolve_since(&pool, qid, "repo:o/a is:pr", incremental_opts(1800))
-            .await
-            .expect("incremental since");
-        // RFC3339 UTC shape: "YYYY-MM-DDTHH:MM:SSZ".
-        assert_eq!(since.len(), 20, "{since}");
-        assert!(since.contains('T') && since.ends_with('Z'), "{since}");
+        // The threshold's RFC3339 shape is `db::updated_since`'s concern, tested there.
+        assert!(
+            resolve_since(&pool, qid, "repo:o/a is:pr", incremental_opts(1800))
+                .await
+                .is_some(),
+            "a recent full fetch must let the next sync narrow itself"
+        );
     }
 
     /// Regression test for the ghost bug: once the full-fetch deadline passes, an

@@ -252,10 +252,11 @@ pub async fn filter_items(
 /// wording lives only in `ChangeCounts::banner_label` and can't drift between the
 /// three front-ends. `total` is likewise pre-computed so the "is there anything to
 /// show?" test is core's `is_empty`, not a re-derivation in JS.
+/// What the banner needs to know about a background sync's results: whether to show
+/// anything, and what to say. The per-kind breakdown stays in core — the JS has no use
+/// for it, and shipping it would invite a second place to format the wording.
 #[derive(serde::Serialize)]
 pub struct ItemChanges {
-    pub updated: usize,
-    pub removed: usize,
     pub total: usize,
     pub label: String,
 }
@@ -268,8 +269,6 @@ pub struct ItemChanges {
 pub async fn count_item_changes(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> ItemChanges {
     let counts: ChangeCounts = count_changes(&current, &fresh);
     ItemChanges {
-        updated: counts.updated,
-        removed: counts.removed,
         total: counts.total(),
         label: counts.banner_label(),
     }
