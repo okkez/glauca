@@ -213,7 +213,7 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
         }
 
         // Apply held-back background updates to the visible list.
-        KeyCode::Char('u') if app.pending_count > 0 => {
+        KeyCode::Char('u') if !app.pending_changes.is_empty() => {
             return Action::ApplyPending;
         }
 

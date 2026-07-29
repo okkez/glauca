@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE queries\n        SET last_fetched_at    = datetime('now'),\n            last_full_fetch_at = CASE WHEN ? THEN datetime('now') ELSE last_full_fetch_at END\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "d2301586fc5bcc777ed2ef16875bd93c55581ff05d260991855c06c9fccc891e"
+}

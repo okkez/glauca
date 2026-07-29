@@ -1,0 +1,20 @@
+-- How many consecutive full fetches have failed to return this item.
+--
+-- A single absence is not proof that an item left its query. Search results are
+-- paged with a cursor over a live, `updated-desc`-sorted index, so an item updated
+-- mid-walk moves toward page 1 — past a cursor that has already gone by — and is
+-- never returned; GitHub's search index also lags writes, so an item can drop out
+-- briefly and come back. Deleting on the first absence costs the user that row's
+-- `last_read_updated_at`, so it returns as unread on the next sync.
+--
+-- Pruning therefore requires corroboration: a full fetch increments this for every
+-- cached row it didn't return, and only rows at or above `PRUNE_STRIKES` are
+-- deleted. `upsert_items` resets it to 0, so an item any later search returns
+-- disarms itself for free. The single-item refresh (`upsert_item`) deliberately does
+-- not: fetching an item by repo and number says nothing about whether the query
+-- still returns it.
+--
+-- Kept on the row rather than in process memory so it survives restart: a debounce
+-- scoped to one process would never fire for a session shorter than two full-fetch
+-- intervals, which for a terminal tool is the common case.
+ALTER TABLE items ADD COLUMN missing_count INTEGER NOT NULL DEFAULT 0;

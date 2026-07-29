@@ -18,7 +18,7 @@ use std::time::Duration;
 use glauca_core::actions::{CustomAction, CustomActions};
 use glauca_core::engine::{EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
-use glauca_core::logic::reviewer_overlays;
+use glauca_core::logic::{ChangeCounts, reviewer_overlays};
 use glauca_core::notify::ItemTracker;
 use glauca_core::types::{CommentEntry, ItemAction, ItemEntry, LeftPaneEntry};
 use gpui::*;
@@ -204,11 +204,11 @@ pub(crate) struct GlaucaApp {
 
     /// Freshly-synced items for the currently-viewed query, held back from the
     /// list because they arrived from a background sync. Applied on explicit
-    /// action (clicking the "N updated" banner). `None` when nothing is pending.
+    /// action (clicking the change banner). `None` when nothing is pending.
     pending_items: Option<Vec<ItemEntry>>,
-    /// How many of `pending_items` are new/updated vs the displayed list (the
-    /// number shown in the banner).
-    pending_count: usize,
+    /// How `pending_items` differs from the displayed list (new/updated and
+    /// removed), which drives the banner text.
+    pending_changes: ChangeCounts,
 
     /// Whether a manual GitHub sync is in progress for the selected query.
     syncing: bool,

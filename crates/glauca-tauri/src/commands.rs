@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use glauca_core::actions::CustomActions;
 use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
 use glauca_core::filter::{FilterQuery, StreamFilter};
-use glauca_core::logic::{compute_unread_counts, count_changed, expand_me};
+use glauca_core::logic::{ChangeCounts, compute_unread_counts, count_changes, expand_me};
 use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -246,12 +246,30 @@ pub async fn filter_items(
         .collect())
 }
 
-/// Count how many items in `fresh` are new or changed vs `current`, delegating to
-/// `glauca_core::logic::count_changed` so the "N updated" banner uses the exact
-/// definition the TUI/GUI use instead of a JS re-implementation.
+/// What the banner needs to know about a background sync's results: whether to show
+/// anything, and what to say.
+///
+/// Carries the rendered `label` rather than leaving the JS to format one, so the
+/// wording lives only in `ChangeCounts::banner_label` and can't drift between the
+/// three front-ends. `total` is likewise pre-computed so the "is there anything to
+/// show?" test is core's `is_empty`, not a re-derivation in JS.
+#[derive(serde::Serialize)]
+pub struct ItemChanges {
+    pub total: usize,
+    pub label: String,
+}
+
+/// Diff `fresh` against `current`, delegating to `glauca_core::logic::count_changes`
+/// so the change banner uses the exact definition the TUI/GUI use instead of a JS
+/// re-implementation. Removals are part of the result, so a sync that only pruned
+/// items no longer matching the query is not mistaken for "nothing changed".
 #[tauri::command]
-pub async fn count_changed_items(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> usize {
-    count_changed(&current, &fresh)
+pub async fn count_item_changes(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> ItemChanges {
+    let counts: ChangeCounts = count_changes(&current, &fresh);
+    ItemChanges {
+        total: counts.total(),
+        label: counts.banner_label(),
+    }
 }
 
 #[tauri::command]

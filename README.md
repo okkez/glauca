@@ -115,7 +115,9 @@ Glauca has two distinct filtering layers:
   [GitHub search qualifier](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests)
   works (`created:`, `language:`, `involves:`, `linked:`, …).
 - **Filter streams** (and the inline filter) run locally against the cached items, so they
-  only understand the subset of qualifiers below. Unknown qualifiers match nothing.
+  only understand the subset of qualifiers below. An unrecognized qualifier is not an
+  error: it is treated as plain text and fuzzy-matched like any other search term, so
+  `nonsense:value` usually matches nothing but is not guaranteed to.
 
 Supported local filter qualifiers (all conditions are ANDed; matching is a
 case-insensitive substring unless noted):
@@ -135,6 +137,7 @@ case-insensitive substring unless noted):
 | `repo:<owner/name>` | repository |
 | `base:<branch>` / `head:<branch>` | PR base / head branch |
 | `review-requested:<login>` | a requested reviewer login |
+| `team-review-requested:<slug>` | a requested reviewer team. Teams and users share one list locally, so this and `review-requested:` are interchangeable (unlike on GitHub) |
 
 `@me` is expanded to the current user in both layers.
 
@@ -183,6 +186,7 @@ pane_sizes = [200.0, 600.0, 400.0]  # left / center / right pane widths
 theme = "system"                     # "system" | "light" | "dark"
 notifications_enabled = false        # toggle desktop notifications
 sync_interval_secs = 60              # background sync interval, in seconds
+full_fetch_interval_secs = 1800      # how often a sync re-fetches in full (see below)
 ```
 
 The TUI reads `~/.config/glauca/tui.toml`:
@@ -190,7 +194,31 @@ The TUI reads `~/.config/glauca/tui.toml`:
 ```toml
 notifications_enabled = false        # toggle desktop notifications
 sync_interval_secs = 60              # background sync interval, in seconds
+full_fetch_interval_secs = 1800      # how often a sync re-fetches in full (see below)
 ```
+
+A background sync normally fetches only what changed since the last one, which is
+cheap but cannot notice an item *leaving* a query (a PR that merges out of an
+`is:open` query, or stops matching `team-review-requested:` once someone reviews
+it). Every `full_fetch_interval_secs` a sync re-fetches the whole result set
+instead and drops such items from the cache. Lower it to have them disappear
+sooner; raise it to spend less API quota on queries with many results. For a query
+whose results fit one page this costs no extra requests at all.
+
+An item has to be missing from **two** such fetches in a row before it is dropped,
+so expect it to disappear within two intervals rather than one. One absence isn't
+proof: a paged fetch can race an update that moves an item out from under the
+cursor, and GitHub's search index sometimes lags writes — deleting on the first
+miss would throw away that item's read state for nothing. Two cases skip the wait,
+because there the cached rows are known-stale rather than possibly-transient: a
+full resync you ask for explicitly (`S`), and the first sync after you edit a
+query's search string. Both accept the trade above — if such a fetch happens to
+race an update, an item can be dropped and come back unread on the next sync.
+(Renaming a query doesn't count as an edit here; the results are unchanged.)
+
+Read/unread state lives on the cached row, so an item that leaves a query and later
+matches it again comes back marked unread — a re-requested review or a reopened
+issue reappears as new work rather than as something you had already read.
 
 ### Custom actions
 

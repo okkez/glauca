@@ -1,5 +1,5 @@
 //! Handling of `AppMessage`s drained from the engine in the run loop: applying
-//! loaded items (with the background "N updated" banner), left-pane entry
+//! loaded items (with the background change banner), left-pane entry
 //! add/update/delete/reorder confirmations, sync status, and comment loads.
 
 use super::*;
@@ -26,13 +26,15 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             let is_current = app.selected_root_query_id() == Some(query_id);
             if is_current && background {
                 // Don't change the list under the user; stash the fresh
-                // items and show a "N updated" banner (applied via `u`).
-                let n = glauca_core::logic::count_changed(&app.items, &items);
-                if n == 0 {
+                // items and show a change banner (applied via `u`). Removals
+                // count too, so a sync that only pruned items no longer
+                // matching the query still surfaces instead of being dropped.
+                let changes = glauca_core::logic::count_changes(&app.items, &items);
+                if changes.is_empty() {
                     app.clear_pending();
                 } else {
                     app.pending_items = Some(items);
-                    app.pending_count = n;
+                    app.pending_changes = changes;
                 }
             } else {
                 app.recompute_unread_counts_for_query(query_id, &items);

@@ -86,10 +86,10 @@ pub(super) fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::ItemList;
     let filter_mode = app.input_mode == InputMode::Filter;
 
-    // Layout: optional "N updated" banner (1 line) + filter bar (3 lines) + list.
+    // Layout: optional change banner (1 line) + filter bar (3 lines) + list.
     // The banner shows when a background sync brought results we held back; press
     // `u` to apply them.
-    let has_banner = app.pending_count > 0;
+    let has_banner = !app.pending_changes.is_empty();
     let split = if has_banner {
         Layout::default()
             .direction(Direction::Vertical)
@@ -107,8 +107,9 @@ pub(super) fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     };
     let (filter_area, list_area) = if has_banner {
         let banner = Paragraph::new(format!(
-            "{} {} updated — press u to refresh",
-            app.icons.refresh, app.pending_count
+            "{} {} — press u to refresh",
+            app.icons.refresh,
+            app.pending_changes.banner_label()
         ))
         .style(
             Style::default()

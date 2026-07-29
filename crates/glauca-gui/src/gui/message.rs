@@ -20,7 +20,7 @@ impl GlaucaApp {
     /// Drop any held-back background-sync results / banner.
     pub(crate) fn clear_pending(&mut self) {
         self.pending_items = None;
-        self.pending_count = 0;
+        self.pending_changes = ChangeCounts::default();
     }
 
     /// Apply the stashed background-sync results to the visible list (banner
@@ -29,7 +29,7 @@ impl GlaucaApp {
         let Some(items) = self.pending_items.take() else {
             return;
         };
-        self.pending_count = 0;
+        self.pending_changes = ChangeCounts::default();
         if let Some(qid) = self.selected_root_query_id() {
             self.recompute_unread(qid, &items);
         }
@@ -169,14 +169,16 @@ impl GlaucaApp {
                 let is_current = self.selected_root_query_id() == Some(query_id);
                 if is_current && background {
                     // Don't change the list under the user. Stash the fresh items
-                    // and surface a "N updated" banner; applied on explicit action.
+                    // and surface a change banner; applied on explicit action.
                     // Unread badges are deferred too, so nothing moves until then.
-                    let n = count_changed(&self.items, &items);
-                    if n == 0 {
+                    // Removals count as changes, so a sync that only pruned items
+                    // no longer matching the query still surfaces.
+                    let changes = count_changes(&self.items, &items);
+                    if changes.is_empty() {
                         self.clear_pending();
                     } else {
                         self.pending_items = Some(items);
-                        self.pending_count = n;
+                        self.pending_changes = changes;
                     }
                 } else {
                     self.recompute_unread(query_id, &items);

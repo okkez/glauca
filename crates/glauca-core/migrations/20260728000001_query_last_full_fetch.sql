@@ -1,0 +1,15 @@
+-- When a query was last fetched *in full* (not narrowed by `updated:>=`).
+--
+-- An incremental sync ANDs `updated:>=<since>` onto the user's query, so an item
+-- that silently left the result set (a teammate reviews and the PR stops matching
+-- `team-review-requested:`, a PR merges out of an `is:open` query) is never
+-- returned again: its cached row keeps a stale `state` / `requested_reviewers`
+-- snapshot and lingers as a ghost. Only a full fetch is an authoritative result
+-- set, so only a full fetch may prune (`engine::sync_task`,
+-- `db::prune_missing_items`) — hence the engine upgrades an incremental sync to a
+-- full one whenever this timestamp is older than the configured interval.
+--
+-- Deliberately not backfilled from `last_fetched_at`: NULL means "never full
+-- fetched", i.e. due, so every existing cache clears its accumulated ghosts on
+-- the first sync after this migration.
+ALTER TABLE queries ADD COLUMN last_full_fetch_at TEXT;

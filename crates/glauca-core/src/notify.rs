@@ -2,8 +2,9 @@
 //!
 //! Two pieces live here, both framework-independent (no ratatui/gpui/db deps):
 //! - [`ItemTracker`], a per-query session baseline that decides *how many* new
-//!   or updated items a background sync surfaced (matching the click-to-refresh
-//!   banner's `logic::count_changed` semantics), and
+//!   or updated items a background sync surfaced (matching the `updated` half of
+//!   the click-to-refresh banner's `logic::ChangeCounts`, and only that half —
+//!   see [`ItemTracker::observe`]), and
 //! - [`notify_updated_items`], the best-effort OS notification primitive.
 //!
 //! The *decision* to fire (the on/off toggle, the `background` flag) stays in
@@ -15,7 +16,7 @@ use std::collections::HashMap;
 use crate::types::ItemEntry;
 
 /// Item identity used to diff one sync against the previous one. Mirrors the
-/// key `logic::count_changed` uses: (repo_owner, repo_name, number).
+/// key `logic::count_changes` uses: (repo_owner, repo_name, number).
 type ItemKey = (String, String, i64);
 
 /// Per-query, in-memory baseline of the items last seen *this session*, used to
@@ -38,8 +39,14 @@ impl ItemTracker {
 
     /// Record the latest `items` for `query_id` and return how many are new or
     /// updated versus the previous snapshot — counting items whose key is
-    /// absent, or whose `updated_at` changed (same rule as
-    /// [`crate::logic::count_changed`]).
+    /// absent, or whose `updated_at` changed (the same rule as
+    /// [`crate::logic::ChangeCounts::updated`]).
+    ///
+    /// Only the fresh side is walked, so *removals are never counted* and a sync
+    /// that merely pruned items the query stopped matching cannot fire a
+    /// notification. That divergence from [`crate::logic::count_changes`] — which
+    /// does count removals, to drive the banner — is deliberate: a disappearing
+    /// item is not something to interrupt the user about.
     ///
     /// Returns `None` on the first observation of a query this session: that
     /// call only establishes the baseline, so callers must not notify on it.
@@ -90,8 +97,8 @@ impl ItemTracker {
 
 /// Show a best-effort OS desktop notification for new/updated items in a query.
 ///
-/// `count` follows the same new+updated semantics as the click-to-refresh
-/// banner, so the wording ("N updated") matches. Synchronous — on Linux it's a
+/// `count` follows the new+updated semantics of `ChangeCounts::updated` (removals
+/// excluded), so the wording ("N updated") matches. Synchronous — on Linux it's a
 /// blocking D-Bus round-trip — so callers should run it off their UI/event
 /// loop. Any error (no notification daemon, etc.) is intentionally non-fatal —
 /// a missing notification must never crash or stall the front-end — but it is
@@ -127,6 +134,23 @@ mod tests {
         let items = vec![item("o", "r", 1, "t1"), item("o", "r", 2, "t1")];
         // First load for the query never notifies, even with items present.
         assert_eq!(tracker.observe(7, &items), None);
+    }
+
+    /// A sync that only pruned items must not notify: `observe` walks the fresh
+    /// side only, so a shrinking list counts as zero changes. This is the property
+    /// that keeps `logic::count_changes` (which does count removals, for the
+    /// banner) from leaking into desktop notifications.
+    #[test]
+    fn removals_never_notify() {
+        let mut tracker = ItemTracker::new();
+        tracker.observe(7, &[item("o", "r", 1, "t1"), item("o", "r", 2, "t1")]);
+
+        let remaining = vec![item("o", "r", 1, "t1")];
+        assert_eq!(tracker.observe(7, &remaining), Some(0));
+        assert_eq!(
+            tracker.changed_count_to_notify(7, &remaining, true, true),
+            None
+        );
     }
 
     #[test]

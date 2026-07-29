@@ -19,30 +19,84 @@ pub fn is_item_unread(updated_at: &str, last_read_updated_at: Option<&str>) -> b
         .unwrap_or(true)
 }
 
-/// Count how many items in `fresh` differ from `current`: items that are new
-/// (not present in `current`) or whose `updated_at` changed. Used to show
-/// "N updated" when a background sync's results are held back from the view.
-/// Items keyed by (repo_owner, repo_name, number).
-pub fn count_changed(current: &[ItemEntry], fresh: &[ItemEntry]) -> usize {
-    let seen: std::collections::HashMap<(&str, &str, i64), &str> = current
+/// What a freshly synced list changed relative to the list currently on screen.
+/// Items are keyed by (repo_owner, repo_name, number). Drives the deferred-refresh
+/// banner shown when a background sync's results are held back from the view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChangeCounts {
+    /// Items new to the list, or whose `updated_at` advanced.
+    pub updated: usize,
+    /// Items on screen but absent from the fresh list. Usually they stopped matching
+    /// the query and were pruned (`db::prune_missing_items`), though the cache-size
+    /// sweep (`db::prune_query_overflow`) can remove rows too.
+    ///
+    /// Counting these is what makes a removal-only background sync visible. A
+    /// front-end that looked at `updated` alone would see zero changes, discard the
+    /// pruned list, and keep displaying the removed item forever.
+    pub removed: usize,
+}
+
+impl ChangeCounts {
+    /// Every change, of either kind.
+    pub fn total(&self) -> usize {
+        self.updated + self.removed
+    }
+
+    /// Nothing changed, so no banner should be shown and the held-back list can be
+    /// dropped. This is the check front-ends gate on.
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    /// Banner text for the deferred-refresh affordance: "3 updated",
+    /// "2 no longer match", or "3 updated, 2 no longer match". Empty when nothing
+    /// changed — callers show no banner then.
+    pub fn banner_label(&self) -> String {
+        match (self.updated, self.removed) {
+            (0, 0) => String::new(),
+            (u, 0) => format!("{u} updated"),
+            (0, r) => format!("{r} no longer match"),
+            (u, r) => format!("{u} updated, {r} no longer match"),
+        }
+    }
+}
+
+/// Diff `fresh` against `current`, counting new/updated items and removals.
+///
+/// Note the deliberate asymmetry with [`crate::notify::ItemTracker`]: desktop
+/// notifications count only the `updated` side, so a removal never fires one.
+///
+/// TODO(known limitation): the diff key is (owner, repo, number) plus `updated_at`, so
+/// a field that changes *without* `updated_at` advancing is not counted and the
+/// held-back list is discarded. The cached row is already correct by then; the view
+/// catches up on the next foreground load. Applying silently when `is_empty()` is
+/// deliberately not done — `MarkItemRead` is fire-and-forget, so an in-flight fresh
+/// list could resurrect an item the user just read as unread.
+pub fn count_changes(current: &[ItemEntry], fresh: &[ItemEntry]) -> ChangeCounts {
+    type Key<'a> = (&'a str, &'a str, i64);
+    fn key(it: &ItemEntry) -> Key<'_> {
+        (it.repo_owner.as_str(), it.repo_name.as_str(), it.number)
+    }
+
+    let seen: std::collections::HashMap<Key<'_>, &str> = current
         .iter()
-        .map(|it| {
-            (
-                (it.repo_owner.as_str(), it.repo_name.as_str(), it.number),
-                it.updated_at.as_str(),
-            )
-        })
+        .map(|it| (key(it), it.updated_at.as_str()))
         .collect();
-    fresh
+    let updated = fresh
         .iter()
-        .filter(|it| {
-            let key = (it.repo_owner.as_str(), it.repo_name.as_str(), it.number);
-            match seen.get(&key) {
-                None => true,                                         // newly appeared
-                Some(prev_updated) => *prev_updated != it.updated_at, // changed
-            }
+        .filter(|it| match seen.get(&key(it)) {
+            None => true,                                         // newly appeared
+            Some(prev_updated) => *prev_updated != it.updated_at, // changed
         })
-        .count()
+        .count();
+
+    let fresh_keys: std::collections::HashSet<Key<'_>> = fresh.iter().map(key).collect();
+    let removed = current
+        .iter()
+        .filter(|it| !fresh_keys.contains(&key(it)))
+        .count();
+
+    ChangeCounts { updated, removed }
 }
 
 /// Labels are stored as a JSON array string, e.g. '["bug","enhancement"]'.
@@ -399,30 +453,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn count_changed_counts_new_and_updated_only() {
-        let current = vec![
-            item_at(1, "2026-01-01T00:00:00Z"),
-            item_at(2, "2026-01-01T00:00:00Z"),
-        ];
-        let fresh = vec![
-            item_at(1, "2026-01-01T00:00:00Z"), // unchanged
-            item_at(2, "2026-06-01T00:00:00Z"), // updated
-            item_at(3, "2026-06-01T00:00:00Z"), // new
-        ];
-        assert_eq!(count_changed(&current, &fresh), 2);
+    /// `(number, updated_at)` pairs → items, for the table below.
+    fn items(spec: &[(i64, &str)]) -> Vec<ItemEntry> {
+        spec.iter().map(|(n, at)| item_at(*n, at)).collect()
     }
 
-    #[test]
-    fn count_changed_zero_when_identical() {
-        let items = vec![item_at(1, "2026-01-01T00:00:00Z")];
-        assert_eq!(count_changed(&items, &items), 0);
+    #[rstest]
+    #[case::identical(&[(1, "old")], &[(1, "old")], 0, 0)]
+    #[case::new_and_updated(
+        &[(1, "old"), (2, "old")],
+        // 1 unchanged, 2 updated, 3 new.
+        &[(1, "old"), (2, "new"), (3, "new")],
+        2, 0
+    )]
+    // Regression test: a sync whose only change is a removal must still be counted,
+    // or the front-ends discard the pruned list and keep showing the ghost.
+    #[case::removal_only(&[(1, "old"), (2, "old")], &[(1, "old")], 0, 1)]
+    #[case::update_and_removal(&[(1, "old"), (2, "old")], &[(1, "new")], 1, 1)]
+    #[case::empty_current(&[], &[(1, "old"), (2, "old")], 2, 0)]
+    #[case::empty_fresh(&[(1, "old"), (2, "old")], &[], 0, 2)]
+    fn count_changes_cases(
+        #[case] current: &[(i64, &str)],
+        #[case] fresh: &[(i64, &str)],
+        #[case] want_updated: usize,
+        #[case] want_removed: usize,
+    ) {
+        assert_eq!(
+            count_changes(&items(current), &items(fresh)),
+            ChangeCounts {
+                updated: want_updated,
+                removed: want_removed,
+            }
+        );
     }
 
-    #[test]
-    fn count_changed_counts_all_against_empty() {
-        let fresh = vec![item_at(1, "t"), item_at(2, "t")];
-        assert_eq!(count_changed(&[], &fresh), 2);
+    #[rstest]
+    #[case::updated_only(3, 0, "3 updated")]
+    #[case::removed_only(0, 2, "2 no longer match")]
+    #[case::both(3, 2, "3 updated, 2 no longer match")]
+    #[case::nothing(0, 0, "")]
+    fn banner_label_cases(#[case] updated: usize, #[case] removed: usize, #[case] want: &str) {
+        let counts = ChangeCounts { updated, removed };
+        assert_eq!(counts.banner_label(), want);
+        assert_eq!(counts.is_empty(), want.is_empty());
     }
 
     #[test]

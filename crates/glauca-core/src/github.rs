@@ -198,6 +198,16 @@ struct GqlError {
     message: String,
 }
 
+/// Join GraphQL error messages into one human-readable line, for the error text and
+/// the partial-response warning alike so both report failures the same way.
+fn error_detail(errors: &[GqlError]) -> String {
+    errors
+        .iter()
+        .map(|e| e.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// True when a GraphQL response carries a primary rate-limit error
 /// (`{"errors":[{"type":"RATE_LIMITED",...}]}`).
 fn is_rate_limited(resp: &GqlResponse) -> bool {
@@ -256,6 +266,22 @@ pub struct SearchPageResult {
     pub items: Vec<CachedItem>,
     pub has_next_page: bool,
     pub end_cursor: Option<String>,
+    /// Whether this page is a faithful view of what GitHub returned: every node
+    /// parsed into an item, and the response carried no errors alongside its data.
+    ///
+    /// A page can be lossy without failing: `nodes` elements are nullable, so a
+    /// per-node error yields a `null` (plus a top-level `errors` entry) in an
+    /// otherwise-200 response, and `node_to_cached_item` also drops any node
+    /// missing a required field. Dropping an item is harmless for upserting — it
+    /// just isn't refreshed this cycle — but it is *not* harmless for pruning: the
+    /// missing key would look like an item that left the query. `sync_task` must
+    /// therefore refuse to prune against a non-faithful page.
+    pub faithful: bool,
+    /// Raw `nodes` length, before parse failures were dropped. `sync_task` compares
+    /// the total against `SEARCH_RESULT_CAP`, which must count what GitHub actually
+    /// returned — using the parsed count would let dropped nodes pull a truncated
+    /// result set under the cap and enable a prune that deletes live rows.
+    pub node_count: usize,
 }
 
 /// Append `sort:updated-desc` to `query` if no `sort:` qualifier is already present.
@@ -270,6 +296,14 @@ pub(crate) fn apply_default_sort(query: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Whether `query` already constrains `updated:` itself. Such a query is never
+/// narrowed further by `apply_updated_since` (the user's choice is preserved), so
+/// the engine must treat its fetch as a *full* one — otherwise it would skip the
+/// prune for a result set it actually fetched in full. See `engine::resolve_since`.
+pub(crate) fn constrains_updated(query: &str) -> bool {
+    query.contains("updated:")
+}
+
 /// Append `updated:>=<since>` to `query` for an incremental fetch, unless the
 /// query already constrains `updated:` (then the user's choice is preserved) or
 /// `since` is `None` (a full fetch).
@@ -278,7 +312,7 @@ pub(crate) fn apply_updated_since<'a>(
     since: Option<&str>,
 ) -> std::borrow::Cow<'a, str> {
     match since {
-        Some(since) if !query.contains("updated:") => {
+        Some(since) if !constrains_updated(query) => {
             std::borrow::Cow::Owned(format!("{query} updated:>={since}"))
         }
         _ => std::borrow::Cow::Borrowed(query),
@@ -317,29 +351,55 @@ pub async fn search_page(
         return Err(SearchError::RateLimited);
     }
     let Some(data) = resp.data else {
-        let detail = resp
-            .errors
-            .iter()
-            .map(|e| e.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
+        let detail = error_detail(&resp.errors);
         return Err(SearchError::Other(anyhow::anyhow!(
             "GraphQL search returned no data: {detail}"
         )));
     };
 
     let conn = data.search;
-    let items = conn
-        .nodes
-        .iter()
-        .filter_map(|node| node_to_cached_item(node, query_id))
-        .collect();
+    let (items, faithful) = parse_nodes(&conn.nodes, query_id, &resp.errors);
 
     Ok(SearchPageResult {
         items,
         has_next_page: conn.page_info.has_next_page,
         end_cursor: conn.page_info.end_cursor,
+        faithful,
+        node_count: conn.nodes.len(),
     })
+}
+
+/// Parse a page's `nodes` into items, and report whether the page is a *faithful*
+/// view of what GitHub returned (see [`SearchPageResult::faithful`]).
+///
+/// Split out from `search_page` so the faithfulness accounting is testable without
+/// an HTTP mock. A partial failure is HTTP 200 with `data` *and* `errors` —
+/// typically a nullable `nodes` element the resolver couldn't produce — and an
+/// unparseable node is dropped just as quietly. Neither is fatal for upserting, but
+/// both are logged: silently serving a short page is how a transient upstream hiccup
+/// would otherwise turn into deleted rows.
+fn parse_nodes(
+    nodes: &[serde_json::Value],
+    query_id: i64,
+    errors: &[GqlError],
+) -> (Vec<CachedItem>, bool) {
+    let items: Vec<CachedItem> = nodes
+        .iter()
+        .filter_map(|node| node_to_cached_item(node, query_id))
+        .collect();
+
+    let dropped = nodes.len() - items.len();
+    let faithful = dropped == 0 && errors.is_empty();
+    if !faithful {
+        let detail = error_detail(errors);
+        warn!(
+            dropped,
+            node_count = nodes.len(),
+            errors = %detail,
+            "incomplete search page; will not prune against it"
+        );
+    }
+    (items, faithful)
 }
 
 /// Re-fetch a single PR/Issue by repo + number, returning it tagged with
@@ -597,6 +657,67 @@ mod tests {
         assert!(!is_rate_limited(&ok));
     }
 
+    // ── parse_nodes: faithfulness accounting ─────────────────────────────────────
+
+    /// A minimal well-formed search node.
+    fn ok_node(number: i64) -> serde_json::Value {
+        serde_json::json!({
+            "__typename": "Issue",
+            "number": number,
+            "title": "Bug report",
+            "state": "OPEN",
+            "url": format!("https://github.com/owner/repo/issues/{number}"),
+            "updatedAt": "2026-05-23T10:00:00Z",
+            "author": { "__typename": "User", "login": "alice" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo" },
+            "comments": { "totalCount": 0 }
+        })
+    }
+
+    fn gql_error(message: &str) -> GqlError {
+        GqlError {
+            err_type: None,
+            message: message.to_string(),
+        }
+    }
+
+    /// A node that `node_to_cached_item` will reject (missing a required field).
+    fn malformed_node(number: i64) -> serde_json::Value {
+        let mut node = ok_node(number);
+        node.as_object_mut().unwrap().remove("updatedAt");
+        node
+    }
+
+    #[rstest]
+    #[case::all_parse_no_errors(vec![ok_node(1), ok_node(2)], vec![], 2, true)]
+    // A `null` node is GitHub's shape for a per-node resolver failure: dropped
+    // silently, and unfaithful on that basis alone — treating the missing key as "the
+    // item left the query" would delete a live row and its read marker.
+    #[case::null_node(vec![ok_node(1), serde_json::Value::Null, ok_node(3)], vec![], 2, false)]
+    // A node missing a required field is dropped the same way.
+    #[case::malformed_node(vec![ok_node(1), malformed_node(2)], vec![], 1, false)]
+    // Errors alongside a *full* set of parsed nodes still mean a partial response.
+    #[case::errors_only(vec![ok_node(1)], vec!["upstream hiccup"], 1, false)]
+    // How a partial failure actually arrives: the null node and the error explaining it.
+    #[case::null_node_with_error(
+        vec![ok_node(1), serde_json::Value::Null],
+        vec!["Something went wrong"],
+        1,
+        false
+    )]
+    fn parse_nodes_faithfulness(
+        #[case] nodes: Vec<serde_json::Value>,
+        #[case] errors: Vec<&str>,
+        #[case] want_items: usize,
+        #[case] want_faithful: bool,
+    ) {
+        let errors: Vec<GqlError> = errors.into_iter().map(gql_error).collect();
+        let (items, faithful) = parse_nodes(&nodes, 7, &errors);
+        assert_eq!(items.len(), want_items, "parsed items");
+        assert_eq!(faithful, want_faithful, "faithful");
+    }
+
     #[test]
     fn node_to_cached_item_issue() {
         let node = serde_json::json!({
@@ -795,6 +916,18 @@ mod tests {
         #[case] expected: &str,
     ) {
         assert_eq!(apply_updated_since(q, since), expected);
+    }
+
+    #[rstest]
+    #[case::explicit_lower_bound("is:pr updated:>2026-01-01", true)]
+    #[case::explicit_range("is:pr updated:2026-01-01..2026-02-01", true)]
+    #[case::no_updated_qualifier("is:pr is:open", false)]
+    #[case::unrelated_qualifier_with_a_colon("is:pr team-review-requested:o/t", false)]
+    // `contains("updated:")` must not degrade to `contains("updated")`: this is both
+    // what `apply_default_sort` appends and something a user may write themselves.
+    #[case::sort_by_updated_is_not_a_constraint("is:pr sort:updated-desc", false)]
+    fn constrains_updated_cases(#[case] q: &str, #[case] expected: bool) {
+        assert_eq!(constrains_updated(q), expected);
     }
 
     // ── node_to_cached_item: None cases ──────────────────────────────────────────

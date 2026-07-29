@@ -71,7 +71,9 @@ fn fuzzy_hit(needle: &str, haystacks: &[&str]) -> bool {
 ///     only — whitespace-separated values are not supported)
 ///   - `repo:<owner/name>` — filter by repository (substring)
 ///   - `base:<branch>` / `head:<branch>` — filter PRs by base/head branch
-///   - `review-requested:<login>` — filter by requested reviewer login
+///   - `review-requested:<login>` / `team-review-requested:<slug>` — filter by a
+///     requested reviewer. Teams and users share one list, so the two are
+///     interchangeable here (unlike on GitHub, where they are distinct).
 ///   - `-<token>` — negate any token above, GitHub-style: the item must NOT
 ///     match it (`-label:bug`, `-is:draft`, `-wip`). A lone `-` is a plain
 ///     text token, not a negation.
@@ -108,10 +110,26 @@ struct Conditions {
 }
 
 impl Conditions {
+    /// Record a qualifier's value, unless it is empty.
+    ///
+    /// A qualifier typed without a value (`label:`) is a half-typed token from the
+    /// type-ahead filter, not a constraint, and storing it would do the opposite of
+    /// nothing: every qualifier matches with `contains`, and `contains("")` is true, so
+    /// an empty value matches every item that has the field at all.
+    ///
+    /// The test is on the *value*, deliberately, not on the token's shape. A plain word
+    /// ending in `:` (`fix:`, `wip:`) strips no known prefix and must still reach
+    /// `text_tokens` and filter as text.
+    fn push_value(target: &mut Vec<String>, val: &str) {
+        if !val.is_empty() {
+            target.push(val.to_string());
+        }
+    }
+
     /// Parse one token (already lowercased, `-` stripped) into this set.
     fn add_token(&mut self, lower: &str) {
         if let Some(val) = lower.strip_prefix("state:") {
-            self.states.push(val.to_string());
+            Self::push_value(&mut self.states, val);
         } else if let Some(val) = lower.strip_prefix("is:") {
             // `is:` is overloaded: kind (pr/issue), draft, repo visibility,
             // else a state value (open/closed/merged/…).
@@ -121,26 +139,47 @@ impl Conditions {
                 "draft" => self.is_draft = Some(true),
                 "public" => self.is_private = Some(false),
                 "private" => self.is_private = Some(true),
-                _ => self.states.push(val.to_string()),
+                _ => Self::push_value(&mut self.states, val),
             }
         } else if let Some(val) = lower.strip_prefix("author:") {
-            self.authors.push(val.to_string());
+            Self::push_value(&mut self.authors, val);
         } else if let Some(val) = lower.strip_prefix("assignee:") {
-            self.assignees.push(val.to_string());
+            Self::push_value(&mut self.assignees, val);
         } else if let Some(val) = lower.strip_prefix("label:") {
-            self.labels.push(val.to_string());
+            Self::push_value(&mut self.labels, val);
         } else if let Some(val) = lower.strip_prefix("milestone:") {
-            self.milestones.push(val.to_string());
+            Self::push_value(&mut self.milestones, val);
         } else if let Some(val) = lower.strip_prefix("repo:") {
-            self.repos.push(val.to_string());
+            Self::push_value(&mut self.repos, val);
         } else if let Some(val) = lower.strip_prefix("base:") {
-            self.base_refs.push(val.to_string());
+            Self::push_value(&mut self.base_refs, val);
         } else if let Some(val) = lower.strip_prefix("head:") {
-            self.head_refs.push(val.to_string());
+            Self::push_value(&mut self.head_refs, val);
         } else if let Some(val) = lower.strip_prefix("review-requested:") {
-            self.review_requested.push(val.to_string());
+            Self::push_value(&mut self.review_requested, val);
+        } else if let Some(val) = lower.strip_prefix("team-review-requested:") {
+            // A team slug is stored in `requested_reviewers` in the same shape as a
+            // user login (see `github::node_to_cached_item`), so matching is
+            // identical to `review-requested:`. That makes the two qualifiers
+            // locally equivalent — `team-review-requested:` also matches a user of
+            // that name. Acceptable for a substring filter; distinguishing them
+            // would need a type discriminator stored per reviewer.
+            //
+            // GitHub spells this qualifier `org/team-slug`, but only the bare slug is
+            // cached, so keep just the last path segment. Without this the *canonical*
+            // form a user copies out of their saved query would match nothing —
+            // exactly the silent failure this qualifier was added to fix. A trailing
+            // slash (`my-org/`) leaves that segment empty; fall back to the raw value,
+            // which still contains a `/` and so matches nothing — for a half-typed
+            // *value* that is the honest answer, where a missing value constrains
+            // nothing at all.
+            let slug = match val.rsplit_once('/') {
+                Some((_org, slug)) if !slug.is_empty() => slug,
+                _ => val,
+            };
+            Self::push_value(&mut self.review_requested, slug);
         } else {
-            self.text_tokens.push(lower.to_string());
+            Self::push_value(&mut self.text_tokens, lower);
         }
     }
 
@@ -736,6 +775,23 @@ mod tests {
     #[case::requested_carol("review-requested:carol", &["bob", "carol"], true)]
     #[case::unrequested_login("review-requested:dave", &["bob", "carol"], false)]
     #[case::no_reviewers("review-requested:bob", &[], false)]
+    // Team slugs live in the same `requested_reviewers` list as user logins, so
+    // `team-review-requested:` matches them (and, unavoidably, users too).
+    #[case::team_requested("team-review-requested:my-team", &["bob", "my-team"], true)]
+    #[case::team_not_requested("team-review-requested:other-team", &["bob", "my-team"], false)]
+    #[case::team_negated("-team-review-requested:my-team", &["bob", "my-team"], false)]
+    // GitHub's canonical `org/team` spelling must work: only the bare slug is cached,
+    // so the org prefix is dropped rather than silently matching nothing.
+    #[case::team_org_qualified("team-review-requested:my-org/my-team", &["my-team"], true)]
+    #[case::team_org_qualified_no_match("team-review-requested:my-org/other", &["my-team"], false)]
+    // A trailing slash must not degenerate into `contains("")`, which would match
+    // every item that has any requested reviewer.
+    #[case::team_trailing_slash_matches_nothing("team-review-requested:my-org/", &["my-team"], false)]
+    #[case::team_bare_slash_matches_nothing("team-review-requested:/", &["my-team"], false)]
+    // A value-less qualifier is dropped, so it constrains nothing rather than acting
+    // as a hidden "has any requested reviewer" filter.
+    #[case::team_no_value_is_not_a_constraint("team-review-requested:", &[], true)]
+    #[case::review_requested_no_value_is_not_a_constraint("review-requested:", &[], true)]
     fn matches_review_requested(
         #[case] q: &str,
         #[case] reviewers: &[&str],
@@ -745,6 +801,44 @@ mod tests {
             FilterQuery::parse(q).matches(&pr_with_reviewers(reviewers)),
             expected
         );
+    }
+
+    /// Dropping a value-less qualifier must not drop the tokens typed alongside it —
+    /// the half-typed one stops constraining, the rest keep working.
+    #[test]
+    fn value_less_qualifier_leaves_sibling_conditions_intact() {
+        let q = FilterQuery::parse("is:pr label:");
+        let pr = item("Some PR", "alice", "open", &[], "o/r");
+        let mut issue = item("Some issue", "alice", "open", &[], "o/r");
+        issue.kind = "issue".into();
+
+        assert!(q.matches(&pr), "is:pr must still apply");
+        assert!(!q.matches(&issue), "is:pr must still exclude issues");
+    }
+
+    /// `label:` alone would otherwise become `contains("")` — true for any item that
+    /// has at least one label — quietly turning a partial filter into a wrong one.
+    #[test]
+    fn value_less_label_does_not_filter_by_having_labels() {
+        let q = FilterQuery::parse("label:");
+        let unlabelled = item("No labels", "alice", "open", &[], "o/r");
+        let labelled = item("Labelled", "alice", "open", &["bug"], "o/r");
+
+        assert!(q.matches(&unlabelled));
+        assert!(q.matches(&labelled));
+    }
+
+    /// A plain word that happens to end in `:` is not a qualifier — it has no known
+    /// prefix, so it must reach `text_tokens` and keep filtering. Dropping it because
+    /// of the token's *shape* would silently unfilter the list.
+    #[test]
+    fn text_token_ending_in_colon_still_filters() {
+        let q = FilterQuery::parse("fix:");
+        let hit = item("fix: crash on start", "alice", "open", &[], "o/r");
+        let miss = item("unrelated title", "alice", "open", &[], "o/r");
+
+        assert!(q.matches(&hit));
+        assert!(!q.matches(&miss));
     }
 
     #[test]

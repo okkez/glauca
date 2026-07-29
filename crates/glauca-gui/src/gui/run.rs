@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use glauca_core::db;
-use glauca_core::engine::{Engine, MaintenanceConfig};
+use glauca_core::engine::{Engine, MaintenanceConfig, SyncConfig};
 use glauca_core::github;
 use gpui::*;
 use gpui_component::Root;
@@ -31,11 +31,11 @@ pub(crate) fn run() -> Result<()> {
         Engine::start(
             pool,
             gh,
-            settings.sync_interval_secs,
-            MaintenanceConfig {
-                retention_days: settings.retention_days,
-                max_items_per_query: settings.max_items_per_query,
-            },
+            SyncConfig::effective(
+                settings.sync_interval_secs,
+                settings.full_fetch_interval_secs,
+            ),
+            MaintenanceConfig::effective(settings.retention_days, settings.max_items_per_query),
         )
         .await
     })?;

@@ -217,11 +217,11 @@ impl GlaucaApp {
                     .border_color(cx.theme().border)
                     .child(Input::new(&self.filter_input)),
             )
-            // "N updated" banner: shown when a background sync brought fresh
-            // results for this query that we held back. Click to apply them.
-            .when(self.pending_count > 0, |this| {
+            // Change banner: shown when a background sync brought fresh results
+            // for this query that we held back. Click to apply them.
+            .when(!self.pending_changes.is_empty(), |this| {
                 let view = cx.entity();
-                let n = self.pending_count;
+                let label = self.pending_changes.banner_label();
                 // Solid attention color (amber) with its matching foreground so the
                 // banner clearly stands out instead of blending into the pane.
                 let bg = cx.theme().warning;
@@ -248,9 +248,7 @@ impl GlaucaApp {
                         .on_click(move |_, _window, cx| {
                             view.update(cx, |this, cx| this.apply_pending(cx));
                         })
-                        .child(SharedString::from(format!(
-                            "↻  {n} updated — click to refresh"
-                        ))),
+                        .child(SharedString::from(format!("↻  {label} — click to refresh"))),
                 )
             })
             .child(self.render_items(cx))

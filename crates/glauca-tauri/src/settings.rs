@@ -14,6 +14,13 @@ fn default_sync_interval_secs() -> u64 {
     glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
 }
 
+/// Default when the settings file omits `full_fetch_interval_secs`. Shares the core
+/// constant with the other front-ends; clamped to at least the sync interval by
+/// `SyncConfig::effective`.
+fn default_full_fetch_interval_secs() -> u64 {
+    glauca_core::engine::DEFAULT_FULL_FETCH_INTERVAL_SECS
+}
+
 /// Default when the settings file omits `retention_days`. Shares the core
 /// constant with the other front-ends. See `db::clear_stale_bodies`.
 fn default_retention_days() -> u64 {
@@ -39,6 +46,12 @@ pub struct TauriSettings {
     /// `DEFAULT_SYNC_INTERVAL_SECS`; the engine clamps it to a sane minimum.
     #[serde(default = "default_sync_interval_secs")]
     pub sync_interval_secs: u64,
+    /// How often an incremental background sync is upgraded to a full fetch, which
+    /// is what prunes items that silently stopped matching the query. Lower it to
+    /// drop such items sooner, raise it to spend less API quota on large queries.
+    /// Defaults to `DEFAULT_FULL_FETCH_INTERVAL_SECS`.
+    #[serde(default = "default_full_fetch_interval_secs")]
+    pub full_fetch_interval_secs: u64,
     /// UI theme preference: "system" | "light" | "dark".
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -56,7 +69,9 @@ pub struct TauriSettings {
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
     /// Per-query cap on cached rows; read overflow beyond it is pruned. Defaults
-    /// to `DEFAULT_MAX_ITEMS_PER_QUERY`.
+    /// to `DEFAULT_MAX_ITEMS_PER_QUERY`, and is raised to GitHub search's
+    /// ~1000-result cap if set lower (a smaller cap deletes rows the next sync
+    /// re-inserts as unread).
     #[serde(default = "default_max_items_per_query")]
     pub max_items_per_query: u64,
 }
@@ -65,6 +80,7 @@ impl Default for TauriSettings {
     fn default() -> Self {
         Self {
             sync_interval_secs: default_sync_interval_secs(),
+            full_fetch_interval_secs: default_full_fetch_interval_secs(),
             theme: default_theme(),
             notifications_enabled: false,
             pane_sizes: None,

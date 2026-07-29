@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE items SET missing_count = ? WHERE query_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "fbe851eb4d8e73fb1fe33aac46ad255535bd4e6500ee234f935525c4a1e72ee9"
+}
