@@ -9,8 +9,10 @@
 --
 -- Pruning therefore requires corroboration: a full fetch increments this for every
 -- cached row it didn't return, and only rows at or above `PRUNE_STRIKES` are
--- deleted. `upsert_item` resets it to 0, so an item that comes back — or that any
--- later sync returns at all — disarms itself for free.
+-- deleted. `upsert_items` resets it to 0, so an item any later search returns
+-- disarms itself for free. The single-item refresh (`upsert_item`) deliberately does
+-- not: fetching an item by repo and number says nothing about whether the query
+-- still returns it.
 --
 -- Kept on the row rather than in process memory so it survives restart: a debounce
 -- scoped to one process would never fire for a session shorter than two full-fetch

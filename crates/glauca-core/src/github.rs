@@ -682,8 +682,6 @@ mod tests {
         }
     }
 
-    /// Every node parsed and no errors → the page is a faithful view of the query's
-    /// results, so `sync_task` may prune against it.
     /// A node that `node_to_cached_item` will reject (missing a required field).
     fn malformed_node(number: i64) -> serde_json::Value {
         let mut node = ok_node(number);
