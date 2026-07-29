@@ -893,7 +893,7 @@ impl SyncConfig {
     }
 
     /// Age past which an incremental sync is upgraded to a full fetch.
-    pub fn full_fetch_secs(&self) -> i64 {
+    pub fn full_fetch_interval_secs(&self) -> i64 {
         Self::to_secs(self.full_fetch_interval_secs)
     }
 
@@ -993,7 +993,7 @@ pub async fn sync_worker_task(
                 SyncOpts {
                     background: true,
                     incremental: true,
-                    full_fetch_interval_secs: sync.full_fetch_secs(),
+                    full_fetch_interval_secs: sync.full_fetch_interval_secs(),
                     prune_trust: PruneTrust::Corroborate,
                 },
                 tx.clone(),
@@ -1469,7 +1469,7 @@ async fn command_loop(
                     SyncOpts {
                         background: false,
                         incremental: true,
-                        full_fetch_interval_secs: sync.full_fetch_secs(),
+                        full_fetch_interval_secs: sync.full_fetch_interval_secs(),
                         prune_trust: PruneTrust::Corroborate,
                     },
                     msg_tx.clone(),
@@ -1492,7 +1492,7 @@ async fn command_loop(
                         background: false,
                         incremental: false,
                         // Ignored: the fetch is already full.
-                        full_fetch_interval_secs: sync.full_fetch_secs(),
+                        full_fetch_interval_secs: sync.full_fetch_interval_secs(),
                         // The user asked for this explicitly, so one press is enough.
                         prune_trust: PruneTrust::Immediate,
                     },
@@ -1522,7 +1522,7 @@ async fn command_loop(
                             SyncOpts {
                                 background: false,
                                 incremental: true,
-                                full_fetch_interval_secs: sync.full_fetch_secs(),
+                                full_fetch_interval_secs: sync.full_fetch_interval_secs(),
                                 prune_trust: PruneTrust::Corroborate,
                             },
                             tx2,
@@ -1956,7 +1956,7 @@ mod tests {
     ) {
         let cfg = SyncConfig::effective(interval, full_fetch);
         assert_eq!(cfg.stale_secs(), want_stale);
-        assert_eq!(cfg.full_fetch_secs(), want_full_fetch);
+        assert_eq!(cfg.full_fetch_interval_secs(), want_full_fetch);
     }
 
     fn custom_action(command: Vec<&str>) -> crate::actions::CustomAction {

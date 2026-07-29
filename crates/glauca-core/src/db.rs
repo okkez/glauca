@@ -346,7 +346,7 @@ pub const PRUNE_STRIKES: i64 = 2;
 /// is new actionable work, so surfacing it as unread is correct. What is *not* intended
 /// is deleting a row that still matches, which is what the strike count guards against.
 ///
-/// `observed_stamp` is `last_full_fetch_at` as read *before* this walk began. If it has
+/// `last_full_fetch_before_walk` is `last_full_fetch_at` as read *before* this walk began. If it has
 /// moved by now, a concurrent full fetch finished first and this walk's absences are
 /// not an independent observation — counting them would let two overlapping walks land
 /// both strikes against one transient, deleting a live row. Nothing is pruned then.
@@ -368,7 +368,7 @@ pub async fn prune_missing_items(
     query_id: i64,
     keep: &[ItemKey],
     strikes_required: i64,
-    observed_stamp: Option<&str>,
+    last_full_fetch_before_walk: Option<&str>,
 ) -> Result<u64> {
     use std::collections::HashSet;
     let keep_set: HashSet<(&str, &str, i64)> = keep
@@ -406,7 +406,7 @@ pub async fn prune_missing_items(
     // another query's `upsert_items`, a read-marking update, or the maintenance
     // sweep. Taking the write lock up front makes the 30s timeout apply as intended.
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    if last_full_fetch_at(&mut *tx, query_id).await?.as_deref() != observed_stamp {
+    if last_full_fetch_at(&mut *tx, query_id).await?.as_deref() != last_full_fetch_before_walk {
         debug!("skipping prune: a concurrent full fetch finished first");
         tx.rollback().await?;
         return Ok(0);
@@ -1183,14 +1183,14 @@ mod tests {
         upsert_items(pool, &items).await.expect("upsert");
     }
 
-    /// Prune as a fetch that observed `observed_stamp` before its walk would.
+    /// Prune as a fetch that observed `last_full_fetch_before_walk` before its walk would.
     async fn prune_observing(
         pool: &SqlitePool,
         query_id: i64,
         keep: &[ItemKey],
-        observed_stamp: Option<&str>,
+        last_full_fetch_before_walk: Option<&str>,
     ) -> u64 {
-        prune_missing_items(pool, query_id, keep, PRUNE_STRIKES, observed_stamp)
+        prune_missing_items(pool, query_id, keep, PRUNE_STRIKES, last_full_fetch_before_walk)
             .await
             .expect("prune")
     }
