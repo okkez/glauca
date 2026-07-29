@@ -145,17 +145,17 @@ pub async fn swap_filter_stream_positions(
 /// Update an existing query's display name and/or search string.
 /// Passing `None` for `name` clears the display name (falls back to query string).
 ///
-/// Resets both fetch timestamps: the cache is stale, and the edited query needs a
-/// fresh full fetch to prune items the *old* query matched but the new one doesn't.
+/// When the *search string* actually changed, resets both fetch timestamps — the cache
+/// is stale, and the edited query needs a fresh full fetch to prune items the *old*
+/// query matched but the new one doesn't — and arms every cached row one strike short
+/// of deletion, so that first fetch drops whatever it no longer returns instead of
+/// making the user stare at the old result set for another full-fetch interval.
 ///
-/// When the *search string* actually changed, also arms every cached row one strike
-/// short of deletion, so the first fetch under the new definition drops whatever it no
-/// longer returns instead of making the user stare at the old result set for another
-/// full-fetch interval. Renames must not do this: the result set is unchanged, so the
-/// transient absences corroboration exists to absorb (pagination races, search-index
-/// lag) are fully live and a single one would cost a live row its read marker. The
-/// front-ends submit name and query together from one form, so telling the two cases
-/// apart has to happen here.
+/// Renames must not do any of that: the result set is unchanged, so the cache is
+/// exactly as fresh as it was, and the transient absences corroboration exists to
+/// absorb (pagination races, search-index lag) are fully live — a single one would
+/// cost a live row its read marker. The front-ends submit name and query together
+/// from one form, so telling the two cases apart has to happen here.
 pub async fn update_query(
     pool: &SqlitePool,
     id: i64,
@@ -168,15 +168,15 @@ pub async fn update_query(
         .await?;
     let query_changed = previous.as_deref() != Some(query);
 
-    sqlx::query!(
-        "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL, last_full_fetch_at = NULL WHERE id = ?",
-        name,
-        query,
-        id,
-    )
-    .execute(&mut *tx)
-    .await?;
     if query_changed {
+        sqlx::query!(
+            "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL, last_full_fetch_at = NULL WHERE id = ?",
+            name,
+            query,
+            id,
+        )
+        .execute(&mut *tx)
+        .await?;
         // Rows the new query does return are reset to 0 by `upsert_items`.
         let armed_missing_count = PRUNE_STRIKES - 1;
         sqlx::query!(
@@ -186,6 +186,10 @@ pub async fn update_query(
         )
         .execute(&mut *tx)
         .await?;
+    } else {
+        sqlx::query!("UPDATE queries SET name = ? WHERE id = ?", name, id)
+            .execute(&mut *tx)
+            .await?;
     }
     tx.commit().await?;
     Ok(())
@@ -1357,6 +1361,25 @@ mod tests {
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
         // …and the second one deletes, so the counter is still working.
         assert_eq!(auto_prune(&pool, qid, &[]).await, 1);
+    }
+
+    /// Renaming must not reset the fetch timestamps either: the search string is
+    /// unchanged, so the cache is exactly as fresh as it was, and a spurious reset
+    /// buys nothing but a full re-page of an unchanged result set on the next sync.
+    #[tokio::test]
+    async fn renaming_a_query_keeps_fetch_timestamps() {
+        let (pool, _file) = test_pool().await;
+        let id = upsert_query(&pool, "is:pr is:open", "pull_request", None)
+            .await
+            .expect("upsert");
+        mark_fetched(&pool, id, true).await.expect("mark fetched");
+
+        update_query(&pool, id, Some("New display name"), "is:pr is:open")
+            .await
+            .expect("rename");
+
+        assert!(!is_cache_stale(&pool, id, 300).await.unwrap());
+        assert!(!is_full_fetch_due(&pool, id, 300).await.unwrap());
     }
 
     /// The arming must not outlive the first post-edit fetch: a row the new query does
