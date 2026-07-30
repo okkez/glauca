@@ -5,9 +5,19 @@ use sqlx::{
 };
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, info};
 
 pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
+    // `create_if_missing` below creates the file but not its directory, and the path
+    // can now come from `--db-path` / `GLAUCA_DB_PATH` rather than only the data dir
+    // — so make the parent here instead of in each front-end's startup. The empty
+    // check matters for a bare relative path like `cache.db`, where `parent()` is
+    // `Some("")` and `create_dir_all("")` fails.
+    if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    info!(path = %db_path.display(), "opening cache");
+
     let options = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
@@ -41,6 +51,33 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
     let pool = SqlitePool::connect_with(options).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(pool)
+}
+
+/// Env var that overrides the cache path at runtime. Deliberately not `DATABASE_URL`:
+/// that one is sqlx's compile-time query-verification target (pointed at
+/// `crates/glauca-core/dev.db` by `mise.toml` for the whole repo) and has no runtime
+/// effect, so reusing it would silently redirect every in-repo `cargo run` to the
+/// empty dev schema.
+const DB_PATH_ENV: &str = "GLAUCA_DB_PATH";
+
+/// Resolve the cache path: an explicit CLI override wins, then [`DB_PATH_ENV`], then
+/// [`default_db_path`].
+pub fn resolve_db_path(cli_override: Option<PathBuf>) -> PathBuf {
+    resolve_db_path_with(cli_override, |k| std::env::var_os(k).map(PathBuf::from))
+}
+
+/// Split out of [`resolve_db_path`] so the precedence can be unit-tested without
+/// mutating the process environment (which tests share, and run in parallel).
+/// Mirrors `github::resolve_token`.
+fn resolve_db_path_with(
+    cli_override: Option<PathBuf>,
+    env: impl Fn(&str) -> Option<PathBuf>,
+) -> PathBuf {
+    cli_override
+        // An empty value reads as "unset" rather than as the empty path, which would
+        // otherwise reach SQLite as an unhelpful open error.
+        .or_else(|| env(DB_PATH_ENV).filter(|p| !p.as_os_str().is_empty()))
+        .unwrap_or_else(default_db_path)
 }
 
 pub fn default_db_path() -> PathBuf {
@@ -897,6 +934,57 @@ pub async fn is_full_fetch_due(
 mod tests {
     use super::*;
     use crate::test_support::{make_item, test_pool};
+
+    /// The three front-ends resolve their cache path through one function, so the
+    /// precedence is pinned here rather than left to whichever one is read first.
+    /// Driving `resolve_db_path_with` directly keeps this off the process environment,
+    /// which every other test in this binary shares.
+    #[test]
+    fn resolve_db_path_prefers_cli_then_env_then_default() {
+        let env = |_: &str| Some(PathBuf::from("/env/cache.db"));
+
+        assert_eq!(
+            resolve_db_path_with(Some(PathBuf::from("/cli/cache.db")), env),
+            PathBuf::from("/cli/cache.db"),
+        );
+        assert_eq!(
+            resolve_db_path_with(None, env),
+            PathBuf::from("/env/cache.db"),
+        );
+        assert_eq!(resolve_db_path_with(None, |_| None), default_db_path());
+    }
+
+    /// `GLAUCA_DB_PATH=` (exported but empty) is the shape a shell profile or CI job
+    /// produces by accident. Treating it as the empty path would hand SQLite something
+    /// it can only fail to open, so it has to read as unset.
+    #[test]
+    fn resolve_db_path_treats_an_empty_env_value_as_unset() {
+        assert_eq!(
+            resolve_db_path_with(None, |_| Some(PathBuf::new())),
+            default_db_path(),
+        );
+    }
+
+    /// `create_if_missing` creates the file but not its directory — the assumption
+    /// behind `open_pool` doing the `create_dir_all` itself. A user-supplied
+    /// `--db-path` can name a directory that does not exist yet.
+    #[tokio::test]
+    async fn open_pool_creates_a_missing_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("nested").join("deeper").join("cache.db");
+
+        let pool = open_pool(&db_path)
+            .await
+            .unwrap_or_else(|e| panic!("open pool: {e:#}"));
+
+        assert!(db_path.exists(), "database file was not created");
+        // Migrated, not merely touched: the front-ends expect a usable cache.
+        let queries: i64 = sqlx::query_scalar("SELECT count(*) FROM queries")
+            .fetch_one(&pool)
+            .await
+            .expect("count queries");
+        assert_eq!(queries, 0);
+    }
 
     /// The cache commits per page, per query, per sync cycle, so the journal mode is a
     /// performance decision worth pinning down rather than inheriting from sqlx's

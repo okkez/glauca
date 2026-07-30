@@ -1,18 +1,24 @@
 use clap::Parser;
 use glauca_core::{db, github};
+use std::path::PathBuf;
 mod tui;
 
 /// Terminal UI for browsing and triaging GitHub issues and pull requests.
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
-struct Cli {}
+struct Cli {
+    /// Path to the cache database. Takes precedence over the GLAUCA_DB_PATH
+    /// environment variable; both default to <data dir>/glauca/cache.db.
+    #[arg(long, value_name = "PATH")]
+    db_path: Option<PathBuf>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Parse args first so `--version`/`--help` print and exit before we touch the
     // log dir, DB, or TLS provider. This also keeps those flags usable without a
     // TTY (e.g. `gh glauca --version` in CI or piped output).
-    Cli::parse();
+    let cli = Cli::parse();
 
     // Keep the guard alive for the whole program so buffered logs are flushed on
     // exit. The TUI owns the terminal, so logs go to a file (see logging::init).
@@ -24,11 +30,7 @@ async fn main() -> anyhow::Result<()> {
     // any TLS use (the GitHub HTTP client). Ignore the error if already set.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let db_path = db::default_db_path();
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let pool = db::open_pool(&db_path).await?;
+    let pool = db::open_pool(&db::resolve_db_path(cli.db_path)).await?;
     let gh_client = github::build_client()?;
     tui::run(pool, gh_client).await?;
     Ok(())

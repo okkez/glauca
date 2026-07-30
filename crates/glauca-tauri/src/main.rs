@@ -53,11 +53,9 @@ fn main() -> anyhow::Result<()> {
     // command handlers below.
     let (engine, init_json, current_user, pool, query_names) =
         tauri::async_runtime::block_on(async {
-            let db_path = db::default_db_path();
-            if let Some(parent) = db_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let pool = db::open_pool(&db_path).await?;
+            // No CLI override here: this front-end parses no arguments, so the path
+            // comes from GLAUCA_DB_PATH or the default (only the TUI has `--db-path`).
+            let pool = db::open_pool(&db::resolve_db_path(None)).await?;
             let gh_client = github::build_client()?;
             // Keep a clone for AppState (rebuilding the left pane via list_entries);
             // the engine takes ownership of the original.

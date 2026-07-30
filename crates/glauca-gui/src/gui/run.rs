@@ -22,11 +22,9 @@ pub(crate) fn run() -> Result<()> {
     // the gpui event loop so its background tasks keep being driven.
     let rt = tokio::runtime::Runtime::new()?;
     let (engine, init) = rt.block_on(async {
-        let db_path = db::default_db_path();
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let pool = db::open_pool(&db_path).await?;
+        // No CLI override here: this front-end parses no arguments, so the path comes
+        // from GLAUCA_DB_PATH or the default (the TUI adds `--db-path` on top).
+        let pool = db::open_pool(&db::resolve_db_path(None)).await?;
         let gh = github::build_client()?;
         Engine::start(
             pool,
