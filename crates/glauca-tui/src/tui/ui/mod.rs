@@ -23,6 +23,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 mod comments;
 mod detail;
+mod markdown;
 mod modals;
 mod panes;
 mod text;
@@ -30,6 +31,7 @@ mod widgets;
 
 use comments::draw_comments_popup;
 use detail::draw_item_detail;
+use markdown::render_markdown;
 use modals::{
     draw_action_popup, draw_custom_action_popup, draw_help_popup, draw_merge_menu_popup,
     draw_modal, draw_review_menu_popup,

@@ -218,7 +218,7 @@ pub(super) fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                     "─── Description ────────────────────────────────",
                     Style::default().fg(Color::DarkGray),
                 )));
-                lines.extend(tui_markdown::from_str(body).lines);
+                lines.extend(render_markdown(body));
             }
 
             lines
