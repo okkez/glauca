@@ -810,8 +810,8 @@ where
     Ok(row.last_full_fetch_at)
 }
 
-/// Stamp `last_full_fetch_at` without touching `last_fetched_at`: a full walk was
-/// attempted and failed.
+/// Stamp `last_full_fetch_attempt_at` without touching `last_fetched_at` or the
+/// completion stamp: a full walk was attempted and failed.
 ///
 /// Leaving the stamp alone would promote *every* subsequent sync to a full re-page for
 /// as long as the failure lasts — a query that reliably errors on page 3 would walk
