@@ -1416,6 +1416,42 @@ mod tests {
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 2]);
     }
 
+    /// `idx_items_query_id` was a strict prefix of the index behind
+    /// `UNIQUE (query_id, repo_owner, repo_name, number)`, so dropping it removes a
+    /// b-tree write per insert and per prune delete without removing a lookup path.
+    #[tokio::test]
+    async fn query_id_lookups_use_the_unique_index_not_a_dedicated_one() {
+        use sqlx::Row;
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2]).await;
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'items'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("list indexes");
+        assert!(
+            !indexes.iter().any(|n| n == "idx_items_query_id"),
+            "redundant index still present: {indexes:?}"
+        );
+
+        let plan: Vec<String> =
+            sqlx::query("EXPLAIN QUERY PLAN SELECT id FROM items WHERE query_id = ?")
+                .bind(qid)
+                .fetch_all(&pool)
+                .await
+                .expect("explain")
+                .iter()
+                .map(|row| row.get::<String, _>("detail"))
+                .collect();
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("USING INDEX") || d.contains("USING COVERING INDEX")),
+            "query_id lookup fell back to a table scan: {plan:?}"
+        );
+    }
+
     /// A failed full walk records the *attempt* so it isn't retried every sync, without
     /// pretending the cache is fresh.
     #[tokio::test]
