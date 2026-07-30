@@ -32,11 +32,10 @@ unicode-width = "0.2"
 frizbee = "0.9"
 futures = "0.3"
 chrono = { version = "0.4.44", features = ["clock"] }
-# 0.3.9 is the floor: earlier versions panic when rendering a task list item
-# inside a loose list, which any PR description written that way reaches.
-# joshka/tui-markdown#166 closed that path as a side effect of a layout fix —
-# the `spans.insert(1, ..)` behind the panic is still there and upstream has no
-# test for it, so the floor is held by ui/markdown.rs's tests, not by upstream.
+# 0.3.9 is the floor, not a preference: earlier versions panic on a task list item
+# inside a loose list, which real PR descriptions hit. The mechanism, the upstream
+# PR, and the tests that hold this floor are in
+# crates/glauca-tui/src/tui/ui/markdown.rs.
 tui-markdown = "0.3.9"
 base64 = "0.22"
 tempfile = "3.27.0"
