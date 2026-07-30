@@ -1,9 +1,9 @@
 name: release-binaries
 
-# Triggered by the GitHub Release that release-plz publishes (see release-plz.yml).
+# Triggered by the GitHub Release that knope publishes (see release.yml).
 # Using the `release` event (not tag push) guarantees the Release object already
 # exists, since taiki-e/upload-rust-binary-action only uploads to an existing
-# release. For this to fire, release-plz must create the release with an App/PAT
+# release. For this to fire, knope must create the release with an App/PAT
 # token, not the default GITHUB_TOKEN.
 on:
   release:
