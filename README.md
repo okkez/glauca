@@ -272,6 +272,16 @@ DATABASE_URL="sqlite:crates/glauca-core/dev.db" cargo test
 `sqlx` checks queries at compile time, so `DATABASE_URL` must point at a SQLite database when
 building and testing.
 
+When you add or change a `sqlx::query!`, refresh the offline cache with
+`cargo sqlx prepare --workspace -- --all-targets`. The `-- --all-targets` is required: the bare
+form runs `cargo check --workspace` without it, so it never sees queries inside `#[cfg(test)]`
+modules and deletes their cached entries — which breaks CI, since CI builds with
+`SQLX_OFFLINE=true cargo clippy --all-targets` and fails complaining that a query is missing from
+the offline cache.
+
+A new migration must also be applied to the development database before code referencing its
+columns will compile: `cargo sqlx migrate run --source crates/glauca-core/migrations`.
+
 ## License
 
 Released under the [MIT License](LICENSE).

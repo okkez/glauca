@@ -21,10 +21,17 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
         // with the fsync deferred to a checkpoint, and readers never block on the
         // writer — which also matters because a TUI and a GUI can share one cache.
         //
-        // What NORMAL gives up: a power loss can lose the last few commits. Every row
-        // here is re-fetchable from GitHub, so the visible cost is a ghost surviving
-        // one extra full-fetch interval. Two sidecar files (`cache.db-wal`,
-        // `cache.db-shm`) now live next to the DB.
+        // What NORMAL gives up: not durability against an application crash (WAL survives
+        // that either way, without corruption) but durability against a power loss or
+        // kernel panic, which can lose the last few commits. For cached items that cost is
+        // cheap — they're re-fetchable from GitHub, so the visible effect is a ghost
+        // surviving one extra full-fetch interval. But `cache.db` also holds the user's
+        // saved searches (`queries`, `filter_streams`) and the local-only unread markers
+        // (`items.last_read_updated_at`, by design never synced anywhere) — none of that is
+        // re-fetchable, so a crash within seconds of a save can cost a just-created query or
+        // a few read marks. Accepted anyway: the window is seconds and everything in it is
+        // cheap for the user to redo. Two sidecar files (`cache.db-wal`, `cache.db-shm`) now
+        // live next to the DB.
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         // Block briefly on a locked DB instead of failing immediately — chiefly so
@@ -811,11 +818,12 @@ pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64)
     }
 }
 
-/// When `query_id` was last full fetched, or `None` if never.
+/// When `query_id` last *completed* a full fetch, or `None` if never.
 ///
-/// Generic over the executor because [`prune_missing_items`] must re-read this *inside*
-/// its transaction for the concurrency check to mean anything, while everyone else
-/// reads it from the pool.
+/// Reads the completion stamp that the prune concurrency guard compares against: generic
+/// over the executor because [`prune_missing_items`] must re-read it *inside* its
+/// transaction for that comparison to mean anything, while the only other production
+/// caller — `sync_task`'s pre-walk snapshot (`engine.rs`) — reads it from the pool.
 pub async fn last_full_fetch_at<'e, E>(exec: E, query_id: i64) -> Result<Option<String>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -1690,8 +1698,8 @@ mod tests {
         assert_eq!(row.query, "is:pr is:merged");
         assert_eq!(row.name.as_deref(), Some("Updated name"));
 
-        // Both timestamps should have been reset → stale, and due for a full fetch
-        // so items the *old* query matched get pruned.
+        // All three fetch-tracking columns should have been reset → stale, and due for
+        // a full fetch so items the *old* query matched get pruned.
         assert!(is_cache_stale(&pool, id, 300).await.unwrap());
         assert!(is_full_fetch_due(&pool, id, 300).await.unwrap());
 
