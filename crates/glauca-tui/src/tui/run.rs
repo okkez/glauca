@@ -6,7 +6,8 @@
 use super::*;
 
 pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
-    // Before the setup, so a panic in it lands on a terminal the hook can fix.
+    // Install before `enter_tui`, so that a panic during setup still runs the
+    // hook; `leave_tui` tolerates a terminal that was never entered.
     install_panic_hook();
 
     let mut stdout = io::stdout();
@@ -34,11 +35,14 @@ pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
 /// unwind.
 ///
 /// The hook fires for a panic on any thread, including the engine's background
-/// tasks. In a release build that is the only correct choice, since the abort
-/// takes the process down from there too. In a debug build tokio contains such a
-/// panic, so the TUI keeps drawing into a terminal that has just been reset; the
-/// engine treats task failure as unrecoverable anyway, and a visible panic
-/// message beats a session that looks fine but has stopped syncing.
+/// tasks, because under abort one of those takes the process down too and leaving
+/// the terminal wrecked is the outcome this exists to prevent.
+///
+/// TODO(known limitation, debug builds only): there tokio catches a background
+/// task's panic, so the TUI keeps drawing into a terminal this has just reset.
+/// Accepted rather than gated on the UI thread: the engine treats task failure as
+/// unrecoverable anyway, so a visibly broken session beats one that looks fine and
+/// has silently stopped syncing.
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -318,7 +322,7 @@ where
                                             app.input_mode = InputMode::Normal;
                                             leave_tui(terminal.backend_mut())?;
                                             let editor_result = run_editor("");
-                                            restore_tui(terminal)?;
+                                            reenter_tui(terminal)?;
 
                                             match editor_result {
                                                 Ok(Some(body)) => {
@@ -358,7 +362,7 @@ where
                                             let editor_result = run_editor(
                                                 "# Review comment (required for Comment / Request changes; optional for Approve)\n# Lines starting with '#' are ignored.\n",
                                             );
-                                            restore_tui(terminal)?;
+                                            reenter_tui(terminal)?;
 
                                             match editor_result {
                                                 Ok(body_opt) => {
