@@ -175,7 +175,7 @@ fn build_comment_lines<'a>(
             ]));
             lines.extend(hidden_prefix);
             lines.push(Line::from(""));
-            lines.extend(tui_markdown::from_str(&c.body).lines);
+            lines.extend(render_markdown(&c.body));
             lines.push(Line::from(""));
         }
     }
