@@ -625,8 +625,9 @@ pub async fn sync_task(
             }
             Err(github::SearchError::Other(api_err)) => {
                 warn!(error = %api_err, "sync failed");
-                // Record the failed attempt so the full walk isn't retried every sync;
-                // see `mark_full_fetch_attempted`.
+                // Record the failed attempt so the full walk isn't retried every sync.
+                // Stamps only `last_full_fetch_attempt_at`, so this can't be mistaken
+                // for a completed walk — see `mark_full_fetch_attempted`.
                 if is_full && let Err(db_err) = db::mark_full_fetch_attempted(&pool, query_id).await
                 {
                     warn!(error = %db_err, "failed to record full-fetch attempt");
@@ -728,10 +729,10 @@ pub async fn sync_task(
         warn!("skipping prune: incomplete result set");
     }
 
-    // Mark the query as freshly fetched only after all pages are done. Invariant: no
-    // path stamps `last_full_fetch_at` before the paging loop finishes *except*
-    // `mark_full_fetch_attempted` on the API-error return above, which records a failed
-    // attempt to bound retries and never implies a prune happened.
+    // Mark the query as freshly fetched only after all pages are done. Nothing stamps
+    // `last_full_fetch_at` before the paging loop finishes: the API-error return above
+    // records its failed attempt in `last_full_fetch_attempt_at` instead, which defers
+    // the retry without claiming a completion the prune guard would trust.
     //
     // A completed full fetch stamps even when it couldn't prune (truncated, or the
     // walk lost data). Withholding the stamp to "retry sooner" is a trap: some
@@ -1893,7 +1894,7 @@ mod tests {
     #[case::incremental(false, 10, true, false)]
     #[case::full_and_complete(true, 10, true, true)]
     // Lost data mid-walk: a missing key doesn't prove the item left, so pruning would
-    // delete live rows. (It still stamps `last_full_fetch_at` — see `sync_task`.)
+    // delete live rows. (It still stamps both fetch columns — see `sync_task`.)
     #[case::full_but_incomplete(true, 10, false, false)]
     // Truncated by GitHub: can't tell an item that left from one that was cut off.
     #[case::truncated(true, SEARCH_RESULT_CAP, true, false)]

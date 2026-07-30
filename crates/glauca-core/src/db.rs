@@ -1,5 +1,8 @@
 use anyhow::Result;
-use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
+};
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::debug;
@@ -8,6 +11,29 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
+        // WAL + `synchronous = NORMAL`. sqlx deliberately leaves `journal_mode`
+        // alone, which leaves SQLite's default rollback journal and
+        // `synchronous = FULL`: two to three fsyncs per commit. This cache commits
+        // constantly — `upsert_items` commits once per page, per query, per sync
+        // cycle — and under a rollback journal a reader blocks on the writer, so the
+        // UI's reloads queue behind whichever sync holds the lock (and behind
+        // `prune_missing_items`' `BEGIN IMMEDIATE`). Under WAL a commit is an append
+        // with the fsync deferred to a checkpoint, and readers never block on the
+        // writer — which also matters because a TUI and a GUI can share one cache.
+        //
+        // What NORMAL gives up: not durability against an application crash (WAL survives
+        // that either way, without corruption) but durability against a power loss or
+        // kernel panic, which can lose the last few commits. For cached items that cost is
+        // cheap — they're re-fetchable from GitHub, so the visible effect is a ghost
+        // surviving one extra full-fetch interval. But `cache.db` also holds the user's
+        // saved searches (`queries`, `filter_streams`) and the local-only unread markers
+        // (`items.last_read_updated_at`, by design never synced anywhere) — none of that is
+        // re-fetchable, so a crash within seconds of a save can cost a just-created query or
+        // a few read marks. Accepted anyway: the window is seconds and everything in it is
+        // cheap for the user to redo. Two sidecar files (`cache.db-wal`, `cache.db-shm`) now
+        // live next to the DB.
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
         // Block briefly on a locked DB instead of failing immediately — chiefly so
         // a concurrent write during the maintenance pass's VACUUM (which needs
         // exclusive access) waits its turn instead of erroring out its sync cycle.
@@ -170,7 +196,7 @@ pub async fn update_query(
 
     if query_changed {
         sqlx::query!(
-            "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL, last_full_fetch_at = NULL WHERE id = ?",
+            "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL, last_full_fetch_at = NULL, last_full_fetch_attempt_at = NULL WHERE id = ?",
             name,
             query,
             id,
@@ -275,20 +301,24 @@ pub async fn upsert_query(
 }
 
 /// Mark a query as freshly fetched. `full_fetch` additionally stamps
-/// `last_full_fetch_at`, which gates the next forced full fetch — pass `true` only
-/// when the fetch really covered the whole result set *and* the prune ran (or was
-/// impossible), since that timestamp is a promise that ghosts were cleared. Both
-/// columns are written in one statement, so this writer alone keeps
-/// `last_full_fetch_at <= last_fetched_at`; `mark_full_fetch_attempted` deliberately
-/// breaks that ordering to record a failed walk.
+/// `last_full_fetch_at` — the promise that this walk covered the whole result set
+/// *and* pruned (or couldn't) — and `last_full_fetch_attempt_at`, which is what defers
+/// the next full walk. Pass `true` only when both hold.
+///
+/// This is the only writer of `last_full_fetch_at`, and it writes it in the same
+/// statement as `last_fetched_at`, so `last_full_fetch_at <= last_fetched_at` always
+/// holds. `mark_full_fetch_attempted` records a *failed* walk and touches only the
+/// attempt column, which is therefore always the later of the two.
 pub async fn mark_fetched(pool: &SqlitePool, query_id: i64, full_fetch: bool) -> Result<()> {
     sqlx::query!(
         r#"
         UPDATE queries
-        SET last_fetched_at    = datetime('now'),
-            last_full_fetch_at = CASE WHEN ? THEN datetime('now') ELSE last_full_fetch_at END
+        SET last_fetched_at            = datetime('now'),
+            last_full_fetch_at         = CASE WHEN ? THEN datetime('now') ELSE last_full_fetch_at END,
+            last_full_fetch_attempt_at = CASE WHEN ? THEN datetime('now') ELSE last_full_fetch_attempt_at END
         WHERE id = ?
         "#,
+        full_fetch,
         full_fetch,
         query_id,
     )
@@ -357,9 +387,12 @@ pub const PRUNE_STRIKES: i64 = 2;
 /// here, demoting `mark_fetched` to `last_fetched_at`). The current check narrows the
 /// race rather than closing it: `sync_task` stamps *after* this returns, so a second
 /// walk committing inside that gap still sees the old value; `datetime('now')` has
-/// one-second resolution; and two walks predating a query's first full fetch both
-/// observe `NULL`. Deferred because each needs overlapping full walks *and* a
-/// transiently-absent row, and costs one row's read marker when it fires.
+/// one-second resolution; and two walks predating a query's first completed full fetch
+/// both observe `NULL`. Moving the write is not enough on its own — `sync_task` also
+/// stamps on the paths where `may_prune` is false and this function never runs, so
+/// those need a second stamping route. Deferred because each window needs overlapping
+/// full walks *and* a transiently-absent row, and costs one row's read marker when it
+/// fires.
 ///
 /// Caller must only pass `keep` from an untruncated, complete full fetch — see
 /// `engine::may_prune`.
@@ -785,11 +818,12 @@ pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64)
     }
 }
 
-/// When `query_id` was last full fetched, or `None` if never.
+/// When `query_id` last *completed* a full fetch, or `None` if never.
 ///
-/// Generic over the executor because [`prune_missing_items`] must re-read this *inside*
-/// its transaction for the concurrency check to mean anything, while everyone else
-/// reads it from the pool.
+/// Reads the completion stamp that the prune concurrency guard compares against: generic
+/// over the executor because [`prune_missing_items`] must re-read it *inside* its
+/// transaction for that comparison to mean anything, while the only other production
+/// caller — `sync_task`'s pre-walk snapshot (`engine.rs`) — reads it from the pool.
 pub async fn last_full_fetch_at<'e, E>(exec: E, query_id: i64) -> Result<Option<String>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -803,8 +837,8 @@ where
     Ok(row.last_full_fetch_at)
 }
 
-/// Stamp `last_full_fetch_at` without touching `last_fetched_at`: a full walk was
-/// attempted and failed.
+/// Stamp `last_full_fetch_attempt_at` without touching `last_fetched_at` or the
+/// completion stamp: a full walk was attempted and failed.
 ///
 /// Leaving the stamp alone would promote *every* subsequent sync to a full re-page for
 /// as long as the failure lasts — a query that reliably errors on page 3 would walk
@@ -818,11 +852,13 @@ where
 /// keep choosing a full fetch regardless — there is no cheaper retry to fall back to.
 /// Editing a query re-enters that state.
 ///
-/// Note this is the one writer that can leave `last_full_fetch_at > last_fetched_at`;
-/// see `mark_fetched`.
+/// Only the attempt column is written: `last_full_fetch_at` means "a full walk
+/// completed" and is the prune concurrency guard's comparison value, so a failure
+/// moving it would make a *concurrent* successful walk mistake this for the winner and
+/// skip its prune. See the `20260730000002` migration.
 pub async fn mark_full_fetch_attempted(pool: &SqlitePool, query_id: i64) -> Result<()> {
     sqlx::query!(
-        "UPDATE queries SET last_full_fetch_at = datetime('now') WHERE id = ?",
+        "UPDATE queries SET last_full_fetch_attempt_at = datetime('now') WHERE id = ?",
         query_id,
     )
     .execute(pool)
@@ -830,18 +866,28 @@ pub async fn mark_full_fetch_attempted(pool: &SqlitePool, query_id: i64) -> Resu
     Ok(())
 }
 
-/// Whether `query_id` is due for a *full* (non-incremental) fetch: never full
-/// fetched (NULL) or the last one is older than `max_age_secs`.
+/// Whether `query_id` is due for a *full* (non-incremental) fetch: no full walk has
+/// ever been attempted (NULL) or the last attempt is older than `max_age_secs`.
 ///
-/// Only a full fetch is an authoritative result set, so only a full fetch may
-/// prune rows that left the query ([`prune_missing_items`]). This is therefore what
-/// bounds how long a stale row can linger; see `engine::resolve_since`.
+/// Reads the *attempt* stamp, not the completion stamp: a query whose full walk keeps
+/// failing must not re-page on every sync (see `mark_full_fetch_attempted`). Because
+/// `mark_fetched` stamps both, a completed walk defers the retry just the same.
+///
+/// Only a full fetch is an authoritative result set, so only a full fetch may prune
+/// rows that left the query ([`prune_missing_items`]). This is therefore what bounds
+/// how long a stale row can linger; see `engine::resolve_since`.
 pub async fn is_full_fetch_due(
     pool: &SqlitePool,
     query_id: i64,
     max_age_secs: i64,
 ) -> Result<bool> {
-    match last_full_fetch_at(pool, query_id).await? {
+    let row = sqlx::query!(
+        r#"SELECT last_full_fetch_attempt_at FROM queries WHERE id = ?"#,
+        query_id,
+    )
+    .fetch_one(pool)
+    .await?;
+    match row.last_full_fetch_attempt_at {
         None => Ok(true),
         Some(ts) => older_than(pool, &ts, max_age_secs).await,
     }
@@ -851,6 +897,59 @@ pub async fn is_full_fetch_due(
 mod tests {
     use super::*;
     use crate::test_support::{make_item, test_pool};
+
+    /// The cache commits per page, per query, per sync cycle, so the journal mode is a
+    /// performance decision worth pinning down rather than inheriting from sqlx's
+    /// defaults. `PRAGMA synchronous` answers with an integer: 1 is NORMAL.
+    #[tokio::test]
+    async fn open_pool_uses_wal_with_normal_synchronous() {
+        let (pool, _file) = test_pool().await;
+
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .expect("journal_mode");
+        assert_eq!(journal_mode, "wal");
+
+        let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(&pool)
+            .await
+            .expect("synchronous");
+        assert_eq!(synchronous, 1);
+    }
+
+    /// `vacuum` is the one place the cache takes an exclusive lock, and the journal
+    /// mode changes how that lock is taken — so drive both of its branches against a
+    /// real WAL database instead of trusting that `VACUUM` and WAL compose.
+    #[tokio::test]
+    async fn vacuum_runs_only_once_enough_pages_are_free() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        // A fresh cache has nothing to reclaim, so the sweep must skip the rewrite.
+        assert!(!vacuum(&pool).await.expect("vacuum on a fresh cache"));
+
+        // Push past `VACUUM_MIN_FREELIST_PAGES` (256 pages ≈ 1 MiB) with re-fetchable
+        // bodies, then drop the query so those pages land on the freelist.
+        let body = "x".repeat(8 * 1024);
+        for number in 1..=400 {
+            let mut item = make_item(qid, number, "Filler");
+            item.body = Some(body.clone());
+            upsert_item(&pool, &item).await.expect("upsert");
+        }
+        delete_query(&pool, qid).await.expect("delete query");
+
+        assert!(vacuum(&pool).await.expect("vacuum with a full freelist"));
+
+        // The full-file rewrite must not have knocked the database out of WAL.
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .expect("journal_mode");
+        assert_eq!(journal_mode, "wal");
+    }
 
     #[tokio::test]
     async fn delete_query_cascades_items() {
@@ -1416,10 +1515,46 @@ mod tests {
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 2]);
     }
 
-    /// A failed full walk records the *attempt* so it isn't retried every sync, without
-    /// pretending the cache is fresh.
+    /// `idx_items_query_id` was a strict prefix of the index behind
+    /// `UNIQUE (query_id, repo_owner, repo_name, number)`, so dropping it removes a
+    /// b-tree write per insert and per prune delete without removing a lookup path.
     #[tokio::test]
-    async fn mark_full_fetch_attempted_defers_retry_but_keeps_cache_stale() {
+    async fn query_id_lookups_use_the_unique_index_not_a_dedicated_one() {
+        use sqlx::Row;
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2]).await;
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'items'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("list indexes");
+        assert!(
+            !indexes.iter().any(|n| n == "idx_items_query_id"),
+            "redundant index still present: {indexes:?}"
+        );
+
+        let plan: Vec<String> =
+            sqlx::query("EXPLAIN QUERY PLAN SELECT id FROM items WHERE query_id = ?")
+                .bind(qid)
+                .fetch_all(&pool)
+                .await
+                .expect("explain")
+                .iter()
+                .map(|row| row.get::<String, _>("detail"))
+                .collect();
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("USING INDEX") || d.contains("USING COVERING INDEX")),
+            "query_id lookup fell back to a table scan: {plan:?}"
+        );
+    }
+
+    /// A failed full walk defers the *retry* without pretending the walk completed:
+    /// the completion stamp is what the prune guard compares, so it must not move.
+    #[tokio::test]
+    async fn mark_full_fetch_attempted_defers_retry_without_claiming_completion() {
         let (pool, _file) = test_pool().await;
         let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await
@@ -1427,10 +1562,78 @@ mod tests {
 
         mark_full_fetch_attempted(&pool, qid).await.expect("mark");
 
-        assert!(!is_full_fetch_due(&pool, qid, 300).await.expect("due"));
+        assert!(
+            last_full_fetch_at(&pool, qid)
+                .await
+                .expect("stamp")
+                .is_none(),
+            "a failed walk must not stamp the completion column"
+        );
+        assert!(
+            !is_full_fetch_due(&pool, qid, 300).await.expect("due"),
+            "the expensive full walk is deferred"
+        );
         assert!(
             is_cache_stale(&pool, qid, 300).await.expect("stale"),
             "the incremental retry must still happen promptly"
+        );
+    }
+
+    /// The prune guard compares completion stamps only, so a *failed* walk of the same
+    /// query landing mid-flight no longer costs a successful walk its prune.
+    #[tokio::test]
+    async fn a_failed_walk_no_longer_blocks_a_concurrent_prune() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2]).await;
+        let before_walk = last_full_fetch_at(&pool, qid).await.expect("stamp");
+
+        mark_full_fetch_attempted(&pool, qid).await.expect("mark");
+
+        let deleted = prune_missing_items(&pool, qid, &keep(&[1]), 1, before_walk.as_deref())
+            .await
+            .expect("prune");
+        assert_eq!(deleted, 1);
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
+    }
+
+    /// A completed walk stamps both columns, and the attempt column alone decides when
+    /// the next full walk is due — a recent failure defers the retry even though the
+    /// last *completion* is older than the interval.
+    #[tokio::test]
+    async fn is_full_fetch_due_reads_the_attempt_stamp() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        mark_fetched(&pool, qid, true).await.expect("mark");
+        let stamps = sqlx::query!(
+            r#"SELECT last_full_fetch_at, last_full_fetch_attempt_at FROM queries WHERE id = ?"#,
+            qid,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("stamps");
+        assert_eq!(
+            stamps.last_full_fetch_at, stamps.last_full_fetch_attempt_at,
+            "a completed walk is also an attempt"
+        );
+
+        // Age the completion past the interval, leaving a fresh attempt behind.
+        sqlx::query!(
+            r#"
+            UPDATE queries
+            SET last_full_fetch_at = datetime('now', '-1 hour')
+            WHERE id = ?
+            "#,
+            qid,
+        )
+        .execute(&pool)
+        .await
+        .expect("age completion");
+        assert!(
+            !is_full_fetch_due(&pool, qid, 300).await.expect("due"),
+            "the attempt stamp bounds the retry, not the completion stamp"
         );
     }
 
@@ -1495,10 +1698,22 @@ mod tests {
         assert_eq!(row.query, "is:pr is:merged");
         assert_eq!(row.name.as_deref(), Some("Updated name"));
 
-        // Both timestamps should have been reset → stale, and due for a full fetch
-        // so items the *old* query matched get pruned.
+        // All three fetch-tracking columns should have been reset → stale, and due for
+        // a full fetch so items the *old* query matched get pruned.
         assert!(is_cache_stale(&pool, id, 300).await.unwrap());
         assert!(is_full_fetch_due(&pool, id, 300).await.unwrap());
+
+        let attempt = sqlx::query_scalar!(
+            r#"SELECT last_full_fetch_attempt_at FROM queries WHERE id = ?"#,
+            id,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("attempt stamp");
+        assert!(
+            attempt.is_none(),
+            "an edited query must not have its full walk deferred by the old attempt"
+        );
     }
 
     #[tokio::test]

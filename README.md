@@ -259,6 +259,8 @@ Output is not captured; the action runs in the background and reports success or
 ### Cache location
 
 Cached items are stored at `~/.local/share/glauca/cache.db` (created automatically).
+The database runs in WAL mode, so `cache.db-wal` and `cache.db-shm` appear alongside
+it; delete all three together if you ever want to reset the cache.
 
 ## Development
 
@@ -269,6 +271,16 @@ DATABASE_URL="sqlite:crates/glauca-core/dev.db" cargo test
 
 `sqlx` checks queries at compile time, so `DATABASE_URL` must point at a SQLite database when
 building and testing.
+
+When you add or change a `sqlx::query!`, refresh the offline cache with
+`cargo sqlx prepare --workspace -- --all-targets`. The `-- --all-targets` is required: the bare
+form runs `cargo check --workspace` without it, so it never sees queries inside `#[cfg(test)]`
+modules and deletes their cached entries — which breaks CI, since CI builds with
+`SQLX_OFFLINE=true cargo clippy --all-targets` and fails complaining that a query is missing from
+the offline cache.
+
+A new migration must also be applied to the development database before code referencing its
+columns will compile: `cargo sqlx migrate run --source crates/glauca-core/migrations`.
 
 ## License
 

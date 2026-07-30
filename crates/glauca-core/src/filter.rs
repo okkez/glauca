@@ -109,6 +109,35 @@ struct Conditions {
     is_private: Option<bool>,
 }
 
+/// Signature shared by every entry in [`QUALIFIER_FIELDS`]. Named to keep the
+/// table's type readable (clippy flags the raw fn-pointer type as
+/// `type_complexity`).
+type QualifierField = fn(&mut Conditions) -> &mut Vec<String>;
+
+/// Value-taking qualifiers: name (no `:`) → the field it appends to. Adding one is a
+/// single line; the order carries no meaning, because `Conditions::add_token` splits a
+/// token at its first `:` and looks the name up exactly.
+///
+/// `is:` is absent deliberately — it is overloaded (kind / draft / repo visibility /
+/// state) and gets its own arm.
+const QUALIFIER_FIELDS: &[(&str, QualifierField)] = &[
+    ("state", |c| &mut c.states),
+    ("author", |c| &mut c.authors),
+    ("assignee", |c| &mut c.assignees),
+    ("label", |c| &mut c.labels),
+    ("milestone", |c| &mut c.milestones),
+    ("repo", |c| &mut c.repos),
+    ("base", |c| &mut c.base_refs),
+    ("head", |c| &mut c.head_refs),
+    ("review-requested", |c| &mut c.review_requested),
+    // A team slug is stored in `requested_reviewers` in the same shape as a user login
+    // (see `github::node_to_cached_item`), so matching is identical — which makes the
+    // two qualifiers locally equivalent: `team-review-requested:` also matches a user
+    // of that name. Acceptable for a substring filter; telling them apart would need a
+    // type discriminator stored per reviewer.
+    ("team-review-requested", |c| &mut c.review_requested),
+];
+
 impl Conditions {
     /// Record a qualifier's value, unless it is empty.
     ///
@@ -126,11 +155,36 @@ impl Conditions {
         }
     }
 
+    /// Normalise a qualifier's value before the empty-value gate sees it.
+    ///
+    /// Only `team-review-requested:` needs it. GitHub spells the value `org/team-slug`,
+    /// but only the bare slug is cached, so keep the last path segment — without this
+    /// the *canonical* form a user copies out of their saved query would match nothing,
+    /// exactly the silent failure the qualifier was added to fix. A trailing slash
+    /// (`my-org/`) leaves that segment empty; fall back to the raw value, which still
+    /// contains a `/` and so matches nothing — for a half-typed *value* that is the
+    /// honest answer, where a missing value constrains nothing at all.
+    fn normalize_value<'a>(qualifier: &str, val: &'a str) -> &'a str {
+        if qualifier != "team-review-requested" {
+            return val;
+        }
+        match val.rsplit_once('/') {
+            Some((_org, slug)) if !slug.is_empty() => slug,
+            _ => val,
+        }
+    }
+
     /// Parse one token (already lowercased, `-` stripped) into this set.
+    ///
+    /// Dispatch is on the qualifier *name*, taken as everything before the first `:`,
+    /// so `QUALIFIER_FIELDS` needs no ordering discipline and every value passes
+    /// through one normalisation and one empty-value gate.
     fn add_token(&mut self, lower: &str) {
-        if let Some(val) = lower.strip_prefix("state:") {
-            Self::push_value(&mut self.states, val);
-        } else if let Some(val) = lower.strip_prefix("is:") {
+        let Some((qualifier, val)) = lower.split_once(':') else {
+            Self::push_value(&mut self.text_tokens, lower);
+            return;
+        };
+        if qualifier == "is" {
             // `is:` is overloaded: kind (pr/issue), draft, repo visibility,
             // else a state value (open/closed/merged/…).
             match val {
@@ -141,46 +195,16 @@ impl Conditions {
                 "private" => self.is_private = Some(true),
                 _ => Self::push_value(&mut self.states, val),
             }
-        } else if let Some(val) = lower.strip_prefix("author:") {
-            Self::push_value(&mut self.authors, val);
-        } else if let Some(val) = lower.strip_prefix("assignee:") {
-            Self::push_value(&mut self.assignees, val);
-        } else if let Some(val) = lower.strip_prefix("label:") {
-            Self::push_value(&mut self.labels, val);
-        } else if let Some(val) = lower.strip_prefix("milestone:") {
-            Self::push_value(&mut self.milestones, val);
-        } else if let Some(val) = lower.strip_prefix("repo:") {
-            Self::push_value(&mut self.repos, val);
-        } else if let Some(val) = lower.strip_prefix("base:") {
-            Self::push_value(&mut self.base_refs, val);
-        } else if let Some(val) = lower.strip_prefix("head:") {
-            Self::push_value(&mut self.head_refs, val);
-        } else if let Some(val) = lower.strip_prefix("review-requested:") {
-            Self::push_value(&mut self.review_requested, val);
-        } else if let Some(val) = lower.strip_prefix("team-review-requested:") {
-            // A team slug is stored in `requested_reviewers` in the same shape as a
-            // user login (see `github::node_to_cached_item`), so matching is
-            // identical to `review-requested:`. That makes the two qualifiers
-            // locally equivalent — `team-review-requested:` also matches a user of
-            // that name. Acceptable for a substring filter; distinguishing them
-            // would need a type discriminator stored per reviewer.
-            //
-            // GitHub spells this qualifier `org/team-slug`, but only the bare slug is
-            // cached, so keep just the last path segment. Without this the *canonical*
-            // form a user copies out of their saved query would match nothing —
-            // exactly the silent failure this qualifier was added to fix. A trailing
-            // slash (`my-org/`) leaves that segment empty; fall back to the raw value,
-            // which still contains a `/` and so matches nothing — for a half-typed
-            // *value* that is the honest answer, where a missing value constrains
-            // nothing at all.
-            let slug = match val.rsplit_once('/') {
-                Some((_org, slug)) if !slug.is_empty() => slug,
-                _ => val,
-            };
-            Self::push_value(&mut self.review_requested, slug);
-        } else {
-            Self::push_value(&mut self.text_tokens, lower);
+            return;
         }
+        let Some((_, field)) = QUALIFIER_FIELDS.iter().find(|(name, _)| *name == qualifier) else {
+            // A plain word that merely ends in `:` (`fix:`, `wip:`) names no qualifier
+            // and must still reach `text_tokens` — with its colon.
+            Self::push_value(&mut self.text_tokens, lower);
+            return;
+        };
+        let val = Self::normalize_value(qualifier, val);
+        Self::push_value(field(self), val);
     }
 
     /// `true` when every condition in this set evaluates to `want` against
@@ -907,6 +931,32 @@ mod tests {
         assert_eq!(q.exclude.text_tokens, vec!["wip"]);
         assert_eq!(q.require.states, vec!["open"]);
         assert!(q.require.labels.is_empty());
+    }
+
+    /// A word that merely ends in `:` names no qualifier, so it filters as text —
+    /// colon included. The lookup is by qualifier *name*, so this must not depend on
+    /// which prefixes happen to be in the table.
+    #[test]
+    fn unknown_qualifier_keeps_its_colon_and_filters_as_text() {
+        let q = FilterQuery::parse("fix: wip:");
+        assert_eq!(
+            q.require.text_tokens,
+            vec!["fix:".to_string(), "wip:".to_string()]
+        );
+        assert!(q.require.states.is_empty());
+    }
+
+    /// `team-review-requested:` and `review-requested:` share a field but not a name:
+    /// each token is dispatched on its full qualifier, so neither can shadow the other
+    /// however the table is ordered.
+    #[test]
+    fn qualifiers_sharing_a_prefix_are_dispatched_by_name() {
+        let q = FilterQuery::parse("team-review-requested:my-org/my-team review-requested:alice");
+        assert_eq!(
+            q.require.review_requested,
+            vec!["my-team".to_string(), "alice".to_string()]
+        );
+        assert!(q.require.text_tokens.is_empty());
     }
 
     // ── negation (`-` prefix) ─────────────────────────────────────────────────
