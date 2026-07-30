@@ -1,4 +1,6 @@
 /target
 dev.db
+dev.db-shm
+dev.db-wal
 /mise.toml
 /crates/glauca-tauri/gen/schemas/

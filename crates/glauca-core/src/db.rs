@@ -1,5 +1,8 @@
 use anyhow::Result;
-use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
+};
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::debug;
@@ -8,6 +11,22 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
+        // WAL + `synchronous = NORMAL`. sqlx deliberately leaves `journal_mode`
+        // alone, which leaves SQLite's default rollback journal and
+        // `synchronous = FULL`: two to three fsyncs per commit. This cache commits
+        // constantly — `upsert_items` commits once per page, per query, per sync
+        // cycle — and under a rollback journal a reader blocks on the writer, so the
+        // UI's reloads queue behind whichever sync holds the lock (and behind
+        // `prune_missing_items`' `BEGIN IMMEDIATE`). Under WAL a commit is an append
+        // with the fsync deferred to a checkpoint, and readers never block on the
+        // writer — which also matters because a TUI and a GUI can share one cache.
+        //
+        // What NORMAL gives up: a power loss can lose the last few commits. Every row
+        // here is re-fetchable from GitHub, so the visible cost is a ghost surviving
+        // one extra full-fetch interval. Two sidecar files (`cache.db-wal`,
+        // `cache.db-shm`) now live next to the DB.
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
         // Block briefly on a locked DB instead of failing immediately — chiefly so
         // a concurrent write during the maintenance pass's VACUUM (which needs
         // exclusive access) waits its turn instead of erroring out its sync cycle.
@@ -870,6 +889,26 @@ pub async fn is_full_fetch_due(
 mod tests {
     use super::*;
     use crate::test_support::{make_item, test_pool};
+
+    /// The cache commits per page, per query, per sync cycle, so the journal mode is a
+    /// performance decision worth pinning down rather than inheriting from sqlx's
+    /// defaults. `PRAGMA synchronous` answers with an integer: 1 is NORMAL.
+    #[tokio::test]
+    async fn open_pool_uses_wal_with_normal_synchronous() {
+        let (pool, _file) = test_pool().await;
+
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .expect("journal_mode");
+        assert_eq!(journal_mode, "wal");
+
+        let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(&pool)
+            .await
+            .expect("synchronous");
+        assert_eq!(synchronous, 1);
+    }
 
     #[tokio::test]
     async fn delete_query_cascades_items() {

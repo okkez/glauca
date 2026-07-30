@@ -259,6 +259,8 @@ Output is not captured; the action runs in the background and reports success or
 ### Cache location
 
 Cached items are stored at `~/.local/share/glauca/cache.db` (created automatically).
+The database runs in WAL mode, so `cache.db-wal` and `cache.db-shm` appear alongside
+it; delete all three together if you ever want to reset the cache.
 
 ## Development
 
