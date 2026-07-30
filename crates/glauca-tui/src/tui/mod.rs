@@ -32,7 +32,8 @@ use keys::handle_key;
 use message::handle_app_message;
 use mouse::{MouseRegions, MouseTarget, handle_mouse};
 pub(crate) use process::{
-    copy_to_clipboard_osc52, item_actions, restore_tui, run_editor, run_octorus_review, suspend_tui,
+    copy_to_clipboard_osc52, enter_tui, item_actions, leave_tui, restore_tui, run_editor,
+    run_octorus_review,
 };
 pub(crate) use run::run;
 use select::{

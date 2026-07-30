@@ -6,28 +6,45 @@
 use super::*;
 
 pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
-    // Set up terminal
-    crossterm::terminal::enable_raw_mode()?;
+    // Before the setup, so a panic in it lands on a terminal the hook can fix.
+    install_panic_hook();
+
     let mut stdout = io::stdout();
-    crossterm::execute!(
-        stdout,
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
+    enter_tui(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_app(&mut terminal, pool, gh).await;
 
-    // Restore terminal unconditionally
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::event::DisableMouseCapture,
-        crossterm::terminal::LeaveAlternateScreen
-    )?;
+    // Restore terminal unconditionally — best-effort, because a failed escape
+    // write must not swallow whatever the run loop was actually reporting.
+    let _ = leave_tui(terminal.backend_mut());
 
     result
+}
+
+/// Hand the terminal back (see [`leave_tui`]) before the default hook prints the
+/// panic message.
+///
+/// Without this a panic anywhere in the draw path (tui-markdown has been one
+/// such source) leaves the terminal in raw mode on the alternate screen with the
+/// cursor hidden: the message is painted over the TUI and then wiped, and the
+/// shell that comes back echoes nothing and shows no cursor. The teardown in
+/// `run` cannot cover it, because release builds use `panic = "abort"` and never
+/// unwind.
+///
+/// The hook fires for a panic on any thread, including the engine's background
+/// tasks. In a release build that is the only correct choice, since the abort
+/// takes the process down from there too. In a debug build tokio contains such a
+/// panic, so the TUI keeps drawing into a terminal that has just been reset; the
+/// engine treats task failure as unrecoverable anyway, and a visible panic
+/// message beats a session that looks fine but has stopped syncing.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = leave_tui(&mut io::stdout());
+        previous(info);
+    }));
 }
 
 async fn run_app<B: ratatui::backend::Backend + io::Write>(
@@ -299,7 +316,7 @@ where
                                         }
                                         ItemAction::Comment => {
                                             app.input_mode = InputMode::Normal;
-                                            suspend_tui(terminal)?;
+                                            leave_tui(terminal.backend_mut())?;
                                             let editor_result = run_editor("");
                                             restore_tui(terminal)?;
 
@@ -337,7 +354,7 @@ where
                                         }
                                         ItemAction::ApprovePR => {
                                             app.input_mode = InputMode::Normal;
-                                            suspend_tui(terminal)?;
+                                            leave_tui(terminal.backend_mut())?;
                                             let editor_result = run_editor(
                                                 "# Review comment (required for Comment / Request changes; optional for Approve)\n# Lines starting with '#' are ignored.\n",
                                             );
