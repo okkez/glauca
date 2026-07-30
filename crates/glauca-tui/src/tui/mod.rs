@@ -22,6 +22,7 @@ mod select;
 pub mod settings;
 pub mod single_line_input;
 mod state;
+mod terminal;
 pub mod ui;
 
 #[cfg(test)]
@@ -31,10 +32,7 @@ use icons::Icons;
 use keys::handle_key;
 use message::handle_app_message;
 use mouse::{MouseRegions, MouseTarget, handle_mouse};
-pub(crate) use process::{
-    copy_to_clipboard_osc52, enter_tui, item_actions, leave_tui, restore_tui, run_editor,
-    run_octorus_review,
-};
+pub(crate) use process::{copy_to_clipboard_osc52, item_actions, run_editor, run_octorus_review};
 pub(crate) use run::run;
 use select::{
     full_resync_selected, mark_selected_item_read, refetch_selected_body_if_missing,
@@ -45,6 +43,7 @@ pub(crate) use state::{
     active_filter_stream_field_mut, clear_active_modal_field, modal_fields, modal_fields_ref,
     sync_modal_cursors,
 };
+pub(crate) use terminal::{enter_tui, leave_tui, reenter_tui};
 
 use glauca_core::actions::{CustomAction, CustomActions};
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, ReviewEvent};

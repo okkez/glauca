@@ -1,8 +1,8 @@
 //! Markdown → ratatui rendering for the detail pane and the comments popup.
 //!
-//! The only entry point to tui-markdown. A one-line wrapper earns that on the
-//! history: a workaround for this pre-1.0 dependency has already lived here once,
-//! and the tests that hold its version floor in place need somewhere to sit.
+//! The only entry point to tui-markdown, so the two panes cannot drift apart in
+//! how they render a body, and so the tests that hold the dependency's version
+//! floor (see below) have a home next to the call they constrain.
 
 use super::*;
 
@@ -17,7 +17,7 @@ mod tests {
     use rstest::rstest;
 
     /// Rendered lines as plain text (`Line`'s `Display` concatenates its spans).
-    fn rendered(source: &str) -> Vec<String> {
+    fn rendered_text(source: &str) -> Vec<String> {
         render_markdown(source)
             .iter()
             .map(Line::to_string)
@@ -25,18 +25,22 @@ mod tests {
     }
 
     /// tui-markdown up to 0.3.8 panicked on a task list item in a *loose* list
-    /// (items separated by blank lines): the item's paragraph opened a line with
-    /// no spans, and the task marker was inserted at index 1 of it. A PR
-    /// description shaped like this took the whole TUI down.
+    /// (items separated by blank lines): the item's paragraph opened a line with no
+    /// spans, and the task marker was inserted at index 1 of that empty span list —
+    /// `insertion index (is 1) should be <= len (is 0)`. A PR description shaped
+    /// like this took the whole TUI down.
     ///
-    /// That makes the version floor in the workspace Cargo.toml a correctness
-    /// constraint, and this the test that holds it: every case below except
-    /// `tight` and `empty_item` panics on 0.3.7 (verified), so lowering the floor
-    /// fails the suite rather than shipping a crash.
+    /// joshka/tui-markdown#166 closed that path in 0.3.9 as a side effect of a
+    /// layout fix; the `spans.insert(1, ..)` behind the panic is still there and
+    /// upstream has no test for it. So the floor in the workspace Cargo.toml is a
+    /// correctness constraint and this is the test that holds it: every `loose_*`
+    /// case below panics on 0.3.7 (verified; 0.3.8 carries the same code), which
+    /// means lowering the floor fails the suite rather than shipping a crash.
     #[rstest]
-    #[case::loose("- [ ] a\n\n- b\n", &["- [ ] a", "- b"])]
+    #[case::loose_task_then_plain("- [ ] a\n\n- b\n", &["- [ ] a", "- b"])]
     #[case::loose_all_tasks("- [ ] a\n\n- [x] b\n", &["- [ ] a", "- [x] b"])]
     #[case::loose_ordered("1. [ ] a\n\n2. [x] b\n", &["1. [ ] a", "2. [x] b"])]
+    // Nested items are re-indented to 4 columns; the input's 2 are Markdown's minimum.
     #[case::loose_nested("- x\n  - [ ] a\n\n  - b\n", &["- x", "    - [ ] a", "    - b"])]
     // CRLF because that is what the GitHub API actually returns.
     #[case::loose_crlf("- [ ] a\r\n\r\n- b\r\n", &["- [ ] a", "- b"])]
@@ -44,24 +48,29 @@ mod tests {
         "- [ ] [t](http://example.com)\n\n- b\n",
         &["- [ ] t (http://example.com)", "- b"]
     )]
+    // A fence inside an item loses the indent that attached it to the item.
     #[case::loose_code_fence_in_item(
         "- [ ] a\n\n  ```sh\n  x\n  ```\n\n- [ ] b\n",
         &["- [ ] a", "", "```sh", "x", "```", "- [ ] b"]
     )]
+    // The two below never panicked: they are the baseline the `loose_*` cases
+    // differ from, not floor guards.
     #[case::tight("- [ ] a\n- [x] b\n", &["- [ ] a", "- [x] b"])]
+    // An item with no text renders as the marker alone — hence the trailing space.
     #[case::empty_item("- [ ]\n\n- b\n", &["- [ ] ", "- b"])]
     fn renders_task_lists(#[case] source: &str, #[case] expected: &[&str]) {
-        assert_eq!(rendered(source), expected);
+        assert_eq!(rendered_text(source), expected);
     }
 
-    /// Pinned upstream wart, not desired behaviour: inside a blockquote the
-    /// checkbox is inserted right after the `>` prefix, so it lands *before* the
-    /// bullet it belongs to. This test failing means upstream fixed it and the
-    /// expectation should simply be corrected.
+    /// TODO(upstream, joshka/tui-markdown): inside a blockquote the checkbox is
+    /// inserted right after the `>` prefix, so it lands *before* the bullet it
+    /// belongs to. Pinned as-is, not endorsed: this test failing means upstream
+    /// fixed it and the expectation should simply be corrected.
     #[test]
     fn blockquote_puts_the_checkbox_before_its_bullet() {
+        // Note the two spaces: `[ ] ` is inserted whole, ahead of the `- ` bullet.
         assert_eq!(
-            rendered("> - [ ] a\n>\n> - b\n"),
+            rendered_text("> - [ ] a\n>\n> - b\n"),
             vec![">[ ]  - a", "> - b"]
         );
     }

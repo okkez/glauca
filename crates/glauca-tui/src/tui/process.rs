@@ -1,6 +1,7 @@
-//! TUI-only external-process and terminal helpers: the OSC 52 clipboard copy,
-//! the $EDITOR round-trip (with TUI suspend/restore), the octorus PR-review
-//! launcher, and `item_actions` (the TUI's item action menu source of truth).
+//! TUI-only external-process helpers: the OSC 52 clipboard copy, the $EDITOR
+//! round-trip, the octorus PR-review launcher, and `item_actions` (the TUI's item
+//! action menu source of truth). Handing the terminal to those children and
+//! taking it back is `super::terminal`'s job.
 
 use super::*;
 
@@ -24,9 +25,9 @@ fn osc52_sequence(text: &str) -> String {
     format!("\x1b]52;c;{}\x07", STANDARD.encode(text.as_bytes()))
 }
 
-// ── Editor / terminal helpers (TUI-only) ─────────────────────────────────────
+// ── Editor (TUI-only) ────────────────────────────────────────────────────────
 
-/// Does NOT suspend/restore the TUI — the caller must do that around this call.
+/// Does NOT leave/reenter the TUI — the caller must do that around this call.
 pub(crate) fn run_editor(initial_content: &str) -> anyhow::Result<Option<String>> {
     let cwd = std::env::current_dir()?;
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -60,55 +61,6 @@ pub(crate) fn run_editor(initial_content: &str) -> anyhow::Result<Option<String>
 
     let _ = std::fs::remove_file(&path);
     Ok(result)
-}
-
-/// Take over the terminal: raw mode, the alternate screen, mouse reporting.
-///
-/// Paired with [`leave_tui`], and kept next to it so the two sequences are read
-/// and edited together — every enter/leave in the crate goes through this pair.
-pub(crate) fn enter_tui(out: &mut impl io::Write) -> anyhow::Result<()> {
-    crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(
-        out,
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
-    Ok(())
-}
-
-/// Hand the terminal back: leave mouse reporting, the alternate screen and raw
-/// mode, and show the cursor again (`Terminal::draw` hides it on every frame
-/// that sets no cursor position, and ratatui only restores it in `Terminal`'s
-/// `Drop`, which `panic = "abort"` never runs).
-///
-/// Safe to call when there is nothing to undo — the panic hook calls it for
-/// panics outside the TUI's lifetime, including before [`enter_tui`] has run.
-/// Keep it that way: anything added here has to tolerate that.
-///
-/// Takes a writer rather than the `Terminal` because the panic hook cannot
-/// borrow it.
-pub(crate) fn leave_tui(out: &mut impl io::Write) -> anyhow::Result<()> {
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        out,
-        crossterm::event::DisableMouseCapture,
-        crossterm::terminal::LeaveAlternateScreen,
-        crossterm::cursor::Show
-    )?;
-    Ok(())
-}
-
-/// Re-enter the TUI after [`leave_tui`] handed the terminal to a child process,
-/// repainting from scratch since the child scribbled over the screen.
-pub(crate) fn restore_tui<B: ratatui::backend::Backend + io::Write>(
-    terminal: &mut Terminal<B>,
-) -> anyhow::Result<()>
-where
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
-    enter_tui(terminal.backend_mut())?;
-    terminal.clear()?;
-    Ok(())
 }
 
 /// Actions offered for an item in the TUI action menu. This is the TUI's source
@@ -158,7 +110,7 @@ where
         .arg("--working-dir")
         .arg(&workdir)
         .status();
-    restore_tui(terminal)?;
+    reenter_tui(terminal)?;
 
     Ok(match result {
         Ok(status) if status.success() => "Returned from octorus".into(),
