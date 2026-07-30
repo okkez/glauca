@@ -17,16 +17,35 @@
 mod commands;
 mod settings;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use clap::Parser;
 use commands::AppState;
 use glauca_core::engine::{AppMessage, Engine};
 use glauca_core::notify::{ItemTracker, notify_updated_items};
 use glauca_core::{db, github};
 use tauri::Emitter;
 
+/// Desktop web-tech (Tauri) UI for browsing and triaging GitHub issues and pull requests.
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Path to the cache database. Takes precedence over the GLAUCA_DB_PATH
+    /// environment variable; both default to <data dir>/glauca/cache.db.
+    ///
+    /// Via `cargo tauri dev` the flag needs two separators to get past both cargo
+    /// and the Tauri CLI: `cargo tauri dev -- -- --db-path PATH`.
+    #[arg(long, value_name = "PATH")]
+    db_path: Option<PathBuf>,
+}
+
 fn main() -> anyhow::Result<()> {
+    // Parse args first so `--version`/`--help` print and exit before we touch the log
+    // dir, DB, or TLS provider (mirrors glauca-tui / glauca-gui).
+    let cli = Cli::parse();
+
     let _log_guard =
         glauca_core::logging::init("glauca-tauri", "glauca_core=info,glauca_tauri=info");
     tracing::info!("glauca-tauri starting");
@@ -53,9 +72,7 @@ fn main() -> anyhow::Result<()> {
     // command handlers below.
     let (engine, init_json, current_user, pool, query_names) =
         tauri::async_runtime::block_on(async {
-            // No CLI override here: this front-end parses no arguments, so the path
-            // comes from GLAUCA_DB_PATH or the default (only the TUI has `--db-path`).
-            let pool = db::open_pool(&db::resolve_db_path(None)).await?;
+            let pool = db::open_pool(&db::resolve_db_path(cli.db_path)).await?;
             let gh_client = github::build_client()?;
             // Keep a clone for AppState (rebuilding the left pane via list_entries);
             // the engine takes ownership of the original.

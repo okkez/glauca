@@ -8,12 +8,13 @@ use glauca_core::engine::{Engine, MaintenanceConfig, SyncConfig};
 use glauca_core::github;
 use gpui::*;
 use gpui_component::Root;
+use std::path::PathBuf;
 
 use super::assets;
 use super::settings::GuiSettings;
 use super::*;
 
-pub(crate) fn run() -> Result<()> {
+pub(crate) fn run(db_path_override: Option<PathBuf>) -> Result<()> {
     // Load settings once; the GlaucaApp copy is the single source of truth from
     // here on (only ever written back from there).
     let settings = GuiSettings::load();
@@ -22,9 +23,7 @@ pub(crate) fn run() -> Result<()> {
     // the gpui event loop so its background tasks keep being driven.
     let rt = tokio::runtime::Runtime::new()?;
     let (engine, init) = rt.block_on(async {
-        // No CLI override here: this front-end parses no arguments, so the path comes
-        // from GLAUCA_DB_PATH or the default (the TUI adds `--db-path` on top).
-        let pool = db::open_pool(&db::resolve_db_path(None)).await?;
+        let pool = db::open_pool(&db::resolve_db_path(db_path_override)).await?;
         let gh = github::build_client()?;
         Engine::start(
             pool,
