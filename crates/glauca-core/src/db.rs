@@ -910,6 +910,39 @@ mod tests {
         assert_eq!(synchronous, 1);
     }
 
+    /// `vacuum` is the one place the cache takes an exclusive lock, and the journal
+    /// mode changes how that lock is taken — so drive both of its branches against a
+    /// real WAL database instead of trusting that `VACUUM` and WAL compose.
+    #[tokio::test]
+    async fn vacuum_runs_only_once_enough_pages_are_free() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        // A fresh cache has nothing to reclaim, so the sweep must skip the rewrite.
+        assert!(!vacuum(&pool).await.expect("vacuum on a fresh cache"));
+
+        // Push past `VACUUM_MIN_FREELIST_PAGES` (256 pages ≈ 1 MiB) with re-fetchable
+        // bodies, then drop the query so those pages land on the freelist.
+        let body = "x".repeat(8 * 1024);
+        for number in 1..=400 {
+            let mut item = make_item(qid, number, "Filler");
+            item.body = Some(body.clone());
+            upsert_item(&pool, &item).await.expect("upsert");
+        }
+        delete_query(&pool, qid).await.expect("delete query");
+
+        assert!(vacuum(&pool).await.expect("vacuum with a full freelist"));
+
+        // The full-file rewrite must not have knocked the database out of WAL.
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .expect("journal_mode");
+        assert_eq!(journal_mode, "wal");
+    }
+
     #[tokio::test]
     async fn delete_query_cascades_items() {
         let (pool, _file) = test_pool().await;
