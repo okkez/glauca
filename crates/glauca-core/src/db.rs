@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
@@ -8,15 +8,22 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
+    // Logged before the work below, so a failure to create or open the path still
+    // leaves a record of which path was tried.
+    info!(path = %db_path.display(), "opening cache");
+
     // `create_if_missing` below creates the file but not its directory, and the path
     // can now come from `--db-path` / `GLAUCA_DB_PATH` rather than only the data dir
     // — so make the parent here instead of in each front-end's startup. The empty
     // check matters for a bare relative path like `cache.db`, where `parent()` is
     // `Some("")` and `create_dir_all("")` fails.
+    //
+    // Both failures below carry the path: now that it is user-supplied, a bare
+    // `Permission denied (os error 13)` doesn't say which directory or file it means.
     if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating cache directory {}", parent.display()))?;
     }
-    info!(path = %db_path.display(), "opening cache");
 
     let options = SqliteConnectOptions::new()
         .filename(db_path)
@@ -48,7 +55,9 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
         // a concurrent write during the maintenance pass's VACUUM (which needs
         // exclusive access) waits its turn instead of erroring out its sync cycle.
         .busy_timeout(Duration::from_secs(30));
-    let pool = SqlitePool::connect_with(options).await?;
+    let pool = SqlitePool::connect_with(options)
+        .await
+        .with_context(|| format!("opening cache database {}", db_path.display()))?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(pool)
 }
@@ -984,6 +993,27 @@ mod tests {
             .await
             .expect("count queries");
         assert_eq!(queries, 0);
+    }
+
+    /// A `--db-path` naming an unwritable or nonsensical location surfaces as an
+    /// `io::Error` with no path in it (`Permission denied (os error 13)` and nothing
+    /// else), which says nothing about what to fix. Pin the path into the message.
+    /// Uses a file as the parent because that fails the same way everywhere, unlike a
+    /// permissions test.
+    #[tokio::test]
+    async fn open_pool_names_the_directory_it_could_not_create() {
+        let blocker = tempfile::NamedTempFile::new().expect("tempfile");
+        let db_path = blocker.path().join("subdir").join("cache.db");
+
+        let err = open_pool(&db_path)
+            .await
+            .expect_err("a file cannot be a parent directory");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&blocker.path().join("subdir").display().to_string()),
+            "error should name the directory it failed to create, got: {msg}"
+        );
     }
 
     /// The cache commits per page, per query, per sync cycle, so the journal mode is a
