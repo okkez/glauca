@@ -575,14 +575,6 @@ pub async fn prune_missing_items(
         .into_iter()
         .filter(|r| !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number)))
         .collect();
-    if missing.is_empty() {
-        return Ok(PruneOutcome::Considered {
-            absent: 0,
-            deleted: 0,
-            absent_keys: Vec::new(),
-            deleted_keys: Vec::new(),
-        });
-    }
     let absent = missing.len();
     let absent_keys: Vec<String> = missing
         .iter()
@@ -604,11 +596,25 @@ pub async fn prune_missing_items(
     // deadlock), so `busy_timeout` would not save us from a concurrent writer —
     // another query's `upsert_items`, a read-marking update, or the maintenance
     // sweep. Taking the write lock up front makes the 30s timeout apply as intended.
+    //
+    // The guard runs before the "nothing was absent" exit, not after: a stale walk that
+    // happens to find everything present still observed nothing independent, and reporting
+    // that as `absent = 0` would feed a non-observation into the denominator the
+    // transient-absence measurement is read against.
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     if last_full_fetch_at(&mut *tx, query_id).await?.as_deref() != last_full_fetch_before_walk {
         tx.rollback().await?;
         return Ok(PruneOutcome::Skipped {
             reason: "a concurrent full fetch finished first",
+        });
+    }
+    if missing.is_empty() {
+        tx.rollback().await?;
+        return Ok(PruneOutcome::Considered {
+            absent: 0,
+            deleted: 0,
+            absent_keys: Vec::new(),
+            deleted_keys: Vec::new(),
         });
     }
 
@@ -1788,6 +1794,26 @@ mod tests {
              got {outcome:?}"
         );
         assert_eq!(outcome.deleted(), 0);
+    }
+
+    /// The guard runs even when nothing was absent. A stale walk observed nothing
+    /// independent, so reporting it as `absent=0` would put a non-observation into the
+    /// denominator the transient-absence measurement is read against.
+    #[tokio::test]
+    async fn prune_reports_a_skip_even_when_nothing_was_absent() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1]).await;
+
+        // A concurrent walk completed and stamped the query after this one started.
+        mark_fetched(&pool, qid, true).await.expect("mark");
+
+        // This walk returned everything it had cached, so nothing is absent — but it still
+        // observed a stamp that has since moved.
+        let outcome = prune_outcome(&pool, qid, &keep(&[1]), None).await;
+        assert!(
+            matches!(outcome, PruneOutcome::Skipped { .. }),
+            "a stale walk must report a skip whether or not it found rows absent, got {outcome:?}"
+        );
     }
 
     /// What the log line reports: the absent keys on strike one, and the deleted keys on the
