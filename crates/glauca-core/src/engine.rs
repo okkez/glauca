@@ -726,9 +726,10 @@ pub async fn sync_task(
         )
         .await
         {
-            // One line per prunable walk, even when nothing was absent: that count is the
-            // denominator when reading how often a transient absence happens. A skip is
-            // logged separately because it observed nothing, so it is not evidence.
+            // One line per prunable walk, even when nothing was absent: these lines are the
+            // denominator when reading how often a transient absence happens — how many there
+            // are, and the `cached` each one carries. A skip is logged separately because it
+            // observed nothing, so it is not evidence.
             Ok(db::PruneOutcome::Skipped { reason }) => info!(reason, "prune skipped"),
             Ok(db::PruneOutcome::Considered {
                 cached,
@@ -756,10 +757,10 @@ pub async fn sync_task(
                 }
             }
             Err(e) => {
-                // Logged as well as surfaced: a failed prune leaves no line of its own, so a
-                // query whose prune keeps erroring would just be missing from the log rather
-                // than visibly broken — and its walks would drop silently out of the
-                // denominator the absence measurement is read against.
+                // Logged as well as surfaced: without this line a failed prune leaves no trace
+                // of its own, so a query whose prune keeps erroring would just be missing from
+                // the log rather than visibly broken — and its walks would drop silently out
+                // of the denominator the absence measurement is read against.
                 warn!(error = %e, "prune failed");
                 let _ = tx
                     .send(AppMessage::Status(format!("prune error: {e}")))
