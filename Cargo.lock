@@ -3168,6 +3168,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "clap",
  "dirs 5.0.1",
  "glauca-core",
  "gpui",
@@ -3187,6 +3188,7 @@ name = "glauca-tauri"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "clap",
  "dirs 5.0.1",
  "glauca-core",
  "rustls",

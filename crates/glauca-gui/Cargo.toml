@@ -12,6 +12,7 @@ path = "src/main.rs"
 glauca-core.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
+clap.workspace = true
 chrono.workspace = true
 smol.workspace = true
 dirs.workspace = true

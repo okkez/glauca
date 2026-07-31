@@ -172,7 +172,8 @@ Servo support (watch the [Servo blog](https://servo.org/blog/) and
 | `GH_TOKEN` | GitHub token (checked first; set automatically by the `gh` CLI) |
 | `GITHUB_TOKEN` | GitHub token (fallback) |
 | `RUST_LOG` | Log level, e.g. `glauca_core=debug` |
-| `DATABASE_URL` | Override the database path (development only) |
+| `GLAUCA_DB_PATH` | Cache database path for all front-ends, overriding the default. `--db-path` overrides it (see [Cache location](#cache-location)) |
+| `DATABASE_URL` | `sqlx` compile-time query verification only — it has no effect on the database used at runtime (see [Development](#development)) |
 
 ### Settings files
 
@@ -262,6 +263,28 @@ Cached items are stored at `~/.local/share/glauca/cache.db` (created automatical
 The database runs in WAL mode, so `cache.db-wal` and `cache.db-shm` appear alongside
 it; delete all three together if you ever want to reset the cache.
 
+All three front-ends share that one database. To point them somewhere else — a scratch
+cache while developing, say — every front-end takes `--db-path`, and `GLAUCA_DB_PATH`
+sets it for all of them at once. Missing parent directories are created.
+
+```bash
+cargo run -p glauca-tui -- --db-path /tmp/glauca-scratch/cache.db
+cargo run --release -p glauca-gui -- --db-path /tmp/glauca-scratch/cache.db
+GLAUCA_DB_PATH=/tmp/glauca-scratch/cache.db cargo run -p glauca-tauri
+
+# Through the Tauri CLI the flag needs two separators, one per wrapper:
+cargo tauri dev --config crates/glauca-tauri/tauri.conf.json -- -- --db-path /tmp/x.db
+```
+
+`--db-path` wins over `GLAUCA_DB_PATH`, which wins over the default. The path has to be a
+new file or an existing glauca cache — a SQLite database glauca did not create is reported
+instead of migrated, leaving its tables and rows as they were, and a cache written by a
+newer glauca is rejected rather than downgraded.
+
+Neither value goes through a shell, so a literal `~` is not expanded — write
+`$HOME/cache.db` (or an absolute path) where no shell is involved, such as a systemd
+unit's `Environment=`.
+
 ## Development
 
 ```bash
@@ -270,7 +293,10 @@ DATABASE_URL="sqlite:crates/glauca-core/dev.db" cargo test
 ```
 
 `sqlx` checks queries at compile time, so `DATABASE_URL` must point at a SQLite database when
-building and testing.
+building and testing. It is consumed by the `sqlx::query!` macros during the build and never
+read by the resulting binaries: at runtime the cache path comes from `--db-path`,
+`GLAUCA_DB_PATH`, or the default. Running `cargo run` with `DATABASE_URL` set therefore still
+opens the real cache — use `GLAUCA_DB_PATH` to redirect it.
 
 When you add or change a `sqlx::query!`, refresh the offline cache with
 `cargo sqlx prepare --workspace -- --all-targets`. The `-- --all-targets` is required: the bare

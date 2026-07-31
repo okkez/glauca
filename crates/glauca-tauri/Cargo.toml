@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 glauca-core.workspace = true
 tokio.workspace = true
+clap.workspace = true
 sqlx.workspace = true
 serde.workspace = true
 serde_json.workspace = true
