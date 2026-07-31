@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        DELETE FROM items\n        WHERE missing_count >= ? AND id IN (SELECT value FROM json_each(?))\n        RETURNING repo_owner, repo_name, number AS \"number!: i64\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "repo_owner",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "repo_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "number!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cb071a6e1af09fec1aea5e84742a9fab5ea81ced41f5b5c39a1daf25a4db6657"
+}
