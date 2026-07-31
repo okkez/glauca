@@ -3,10 +3,16 @@ use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, info};
 
+/// Open the cache at `db_path`, creating the file and any missing parent directories
+/// and applying pending migrations.
+///
+/// Every failure names the path: it comes from `--db-path` / `GLAUCA_DB_PATH`, so a bare
+/// `Permission denied (os error 13)` would leave the user without the one detail they
+/// need to fix it.
 pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
     // Logged before the work below, so a failure to create or open the path still
     // leaves a record of which path was tried.
@@ -17,9 +23,6 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
     // — so make the parent here instead of in each front-end's startup. The empty
     // check matters for a bare relative path like `cache.db`, where `parent()` is
     // `Some("")` and `create_dir_all("")` fails.
-    //
-    // Both failures below carry the path: now that it is user-supplied, a bare
-    // `Permission denied (os error 13)` doesn't say which directory or file it means.
     if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating cache directory {}", parent.display()))?;
@@ -58,8 +61,50 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
     let pool = SqlitePool::connect_with(options)
         .await
         .with_context(|| format!("opening cache database {}", db_path.display()))?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    ensure_not_a_foreign_database(&pool, db_path).await?;
+
+    // The third failure path, and the likeliest one for a hand-picked `--db-path`: a
+    // cache from a different glauca generation reports a missing/mismatched migration,
+    // which says nothing about which file it read.
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .with_context(|| format!("migrating cache database {}", db_path.display()))?;
     Ok(pool)
+}
+
+/// Refuse to migrate a SQLite file that belongs to something other than glauca.
+///
+/// Now that the path is user-supplied, `--db-path` can name an existing database by
+/// mistake — and migrating one is destructive rather than merely wrong. The initial
+/// migration's `CREATE TABLE IF NOT EXISTS` quietly skips a same-named table, while the
+/// later `ALTER TABLE ADD COLUMN` migrations still run: aiming glauca at a file holding
+/// `queries(foo int)` leaves that table as
+/// `queries(foo int, name TEXT, position INTEGER NOT NULL DEFAULT 0, …)` plus the rest of
+/// our schema, with no way back. A glauca cache always carries `_sqlx_migrations`, so its
+/// absence beside other tables means this database is someone else's.
+async fn ensure_not_a_foreign_database(pool: &SqlitePool, db_path: &Path) -> Result<()> {
+    let tables: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .fetch_all(pool)
+            .await
+            .with_context(|| format!("reading the schema of {}", db_path.display()))?;
+
+    // A new or empty file has no tables at all, which is the normal path.
+    if tables.is_empty() || tables.iter().any(|t| t == "_sqlx_migrations") {
+        return Ok(());
+    }
+
+    let mut sample: Vec<&str> = tables.iter().map(String::as_str).collect();
+    sample.sort_unstable();
+    anyhow::bail!(
+        "{} is a SQLite database that glauca did not create (tables: {}) — \
+         refusing to migrate it, because that would add glauca's tables and alter \
+         the existing ones. Point --db-path/GLAUCA_DB_PATH at a new or existing \
+         glauca cache instead.",
+        db_path.display(),
+        sample.join(", "),
+    )
 }
 
 /// Env var that overrides the cache path at runtime. Deliberately not `DATABASE_URL`:
@@ -1013,6 +1058,81 @@ mod tests {
         assert!(
             msg.contains(&blocker.path().join("subdir").display().to_string()),
             "error should name the directory it failed to create, got: {msg}"
+        );
+    }
+
+    /// Aiming `--db-path` at another application's database used to migrate it in place:
+    /// `CREATE TABLE IF NOT EXISTS` skipped the same-named table but the `ALTER TABLE`
+    /// migrations still ran, so the user's `queries` table came back with glauca's
+    /// columns grafted on. Refuse instead, and leave the file exactly as it was.
+    #[tokio::test]
+    async fn open_pool_refuses_a_database_glauca_did_not_create() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let db_path = file.path().to_path_buf();
+        {
+            let options = SqliteConnectOptions::new().filename(&db_path);
+            let pool = SqlitePool::connect_with(options).await.expect("connect");
+            sqlx::query("CREATE TABLE queries (foo INTEGER)")
+                .execute(&pool)
+                .await
+                .expect("create a colliding table");
+            pool.close().await;
+        }
+
+        let err = open_pool(&db_path)
+            .await
+            .expect_err("a foreign database must not be migrated");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&db_path.display().to_string()) && msg.contains("queries"),
+            "error should name the database and what it found, got: {msg}"
+        );
+
+        // The point of the guard: the file is untouched, not half-migrated.
+        let options = SqliteConnectOptions::new().filename(&db_path);
+        let pool = SqlitePool::connect_with(options).await.expect("reconnect");
+        let schema: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = 'queries'")
+                .fetch_one(&pool)
+                .await
+                .expect("read the original schema");
+        assert_eq!(schema, "CREATE TABLE queries (foo INTEGER)");
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .fetch_all(&pool)
+                .await
+                .expect("list tables");
+        assert_eq!(tables, vec!["queries".to_string()]);
+    }
+
+    /// The failure a hand-picked `--db-path` is likeliest to hit: pointing at a SQLite
+    /// file from another application, or at a cache written by a newer glauca and then
+    /// opened by an older one. sqlx reports the offending migration version but not the
+    /// file, so the path has to come from us.
+    #[tokio::test]
+    async fn open_pool_names_the_database_it_could_not_migrate() {
+        let (pool, file) = test_pool().await;
+        // A version this build has no migration for, which is what a rollback to an
+        // older binary looks like from sqlx's side.
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations
+             (version, description, installed_on, success, checksum, execution_time)
+             VALUES (99999999, 'from the future', CURRENT_TIMESTAMP, 1, x'00', 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert a migration this build does not have");
+        pool.close().await;
+
+        let err = open_pool(&file.path().to_path_buf())
+            .await
+            .expect_err("an unknown applied migration must not be ignored");
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&file.path().display().to_string()),
+            "error should name the database it failed to migrate, got: {msg}"
         );
     }
 

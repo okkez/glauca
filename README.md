@@ -276,7 +276,14 @@ GLAUCA_DB_PATH=/tmp/glauca-scratch/cache.db cargo run -p glauca-tauri
 cargo tauri dev --config crates/glauca-tauri/tauri.conf.json -- -- --db-path /tmp/x.db
 ```
 
-`--db-path` wins over `GLAUCA_DB_PATH`, which wins over the default.
+`--db-path` wins over `GLAUCA_DB_PATH`, which wins over the default. The path has to be a
+new file or an existing glauca cache — a SQLite database glauca did not create is reported
+and left alone rather than migrated, and a cache written by a newer glauca is rejected
+rather than downgraded.
+
+Neither value goes through a shell, so a literal `~` is not expanded — write
+`$HOME/cache.db` (or an absolute path) where no shell is involved, such as a systemd
+unit's `Environment=`.
 
 ## Development
 
