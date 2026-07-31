@@ -7,6 +7,8 @@
 //! already uses (`glauca-tui/src/tui/test_support.rs`).
 
 use sqlx::SqlitePool;
+use sqlx::sqlite::SqliteConnectOptions;
+use std::path::Path;
 use tempfile::NamedTempFile;
 
 use crate::db::{CachedItem, open_pool};
@@ -19,6 +21,27 @@ pub async fn test_pool() -> (SqlitePool, NamedTempFile) {
         .await
         .unwrap_or_else(|e| panic!("open pool: {e:#}"));
     (pool, file)
+}
+
+/// A connection to `path` that applies no migrations and no pragmas — for tests that need
+/// to set up or inspect a database *without* going through `open_pool`.
+pub async fn raw_pool(path: &Path) -> SqlitePool {
+    SqlitePool::connect_with(SqliteConnectOptions::new().filename(path))
+        .await
+        .unwrap_or_else(|e| panic!("connect to {}: {e:#}", path.display()))
+}
+
+/// A SQLite file that is not a glauca cache: it holds `table_sql` and no
+/// `_sqlx_migrations`, which is how `open_pool` tells someone else's database from ours.
+pub async fn foreign_database(table_sql: &str) -> NamedTempFile {
+    let file = NamedTempFile::new().expect("tempfile");
+    let pool = raw_pool(file.path()).await;
+    sqlx::query(table_sql)
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("run {table_sql}: {e:#}"));
+    pool.close().await;
+    file
 }
 
 /// A minimal open pull request in `owner/repo`, identified by `number`.

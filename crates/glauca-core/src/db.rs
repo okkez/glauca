@@ -10,6 +10,9 @@ use tracing::{debug, info};
 /// Open the cache at `db_path`, creating the file and any missing parent directories
 /// and applying pending migrations.
 ///
+/// Fails without touching a SQLite file that glauca did not create — see
+/// [`ensure_glauca_cache`], which the caller cannot anticipate from the path alone.
+///
 /// Every failure names the path: it comes from `--db-path` / `GLAUCA_DB_PATH`, so a bare
 /// `Permission denied (os error 13)` would leave the user without the one detail they
 /// need to fix it.
@@ -18,17 +21,38 @@ pub async fn open_pool(db_path: &Path) -> Result<SqlitePool> {
     // leaves a record of which path was tried.
     info!(path = %db_path.display(), "opening cache");
 
-    // `create_if_missing` below creates the file but not its directory, and the path
-    // can now come from `--db-path` / `GLAUCA_DB_PATH` rather than only the data dir
-    // — so make the parent here instead of in each front-end's startup. The empty
-    // check matters for a bare relative path like `cache.db`, where `parent()` is
-    // `Some("")` and `create_dir_all("")` fails.
+    create_parent_dir(db_path)?;
+    let pool = SqlitePool::connect_with(connect_options(db_path))
+        .await
+        .with_context(|| format!("opening cache database {}", db_path.display()))?;
+    ensure_glauca_cache(&pool, db_path).await?;
+
+    // A cache from an older or newer glauca gets past that guard and fails here instead.
+    // sqlx's error names the offending migration version but not the database file, so
+    // attach the path.
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .with_context(|| format!("migrating cache database {}", db_path.display()))?;
+    Ok(pool)
+}
+
+/// `create_if_missing` creates the cache file but not its directory, and the path can now
+/// come from `--db-path` / `GLAUCA_DB_PATH` rather than only the data dir — so make the
+/// parent here instead of in each front-end's startup. The empty check matters for a bare
+/// relative path like `cache.db`, where `parent()` is `Some("")` and `create_dir_all("")`
+/// fails.
+fn create_parent_dir(db_path: &Path) -> Result<()> {
     if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating cache directory {}", parent.display()))?;
     }
+    Ok(())
+}
 
-    let options = SqliteConnectOptions::new()
+/// SQLite tuning for this cache: WAL, `synchronous = NORMAL`, and a busy timeout.
+fn connect_options(db_path: &Path) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
         // WAL + `synchronous = NORMAL`. sqlx deliberately leaves `journal_mode`
@@ -57,22 +81,11 @@ pub async fn open_pool(db_path: &Path) -> Result<SqlitePool> {
         // Block briefly on a locked DB instead of failing immediately — chiefly so
         // a concurrent write during the maintenance pass's VACUUM (which needs
         // exclusive access) waits its turn instead of erroring out its sync cycle.
-        .busy_timeout(Duration::from_secs(30));
-    let pool = SqlitePool::connect_with(options)
-        .await
-        .with_context(|| format!("opening cache database {}", db_path.display()))?;
-    ensure_not_a_foreign_database(&pool, db_path).await?;
-
-    // A cache from a different glauca generation gets past the guard above and fails
-    // here, naming the migration but not the file it read.
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .with_context(|| format!("migrating cache database {}", db_path.display()))?;
-    Ok(pool)
+        .busy_timeout(Duration::from_secs(30))
 }
 
-/// Refuse to migrate a SQLite file that belongs to something other than glauca.
+/// Require `db_path` to be a glauca cache, refusing to migrate a SQLite file that belongs
+/// to something else.
 ///
 /// Now that the path is user-supplied, `--db-path` can name an existing database by
 /// mistake — and migrating one is destructive rather than merely wrong. The initial
@@ -83,18 +96,22 @@ pub async fn open_pool(db_path: &Path) -> Result<SqlitePool> {
 /// our schema, with no way back. A glauca cache always carries `_sqlx_migrations`, so its
 /// absence beside other tables means this database is someone else's.
 ///
-/// Scoped to schema and rows, which is what "with no way back" refers to: the pool has
-/// already applied `journal_mode = WAL` by the time this runs, and that is a persistent
-/// header flag, so a refused database can be left in WAL mode.
-async fn ensure_not_a_foreign_database(pool: &SqlitePool, db_path: &Path) -> Result<()> {
+/// FIXME: the protection is scoped to schema and rows, which is what "with no way back"
+/// above refers to. The pool has already applied `journal_mode = WAL` by the time this
+/// runs and that is a persistent header flag, so a database we refuse can still be left
+/// in WAL mode. Inspecting the schema over a connection that sets no pragmas (or before
+/// `connect_with`) would remove the side effect.
+async fn ensure_glauca_cache(pool: &SqlitePool, db_path: &Path) -> Result<()> {
     let mut tables: Vec<String> =
         sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
             .fetch_all(pool)
             .await
             .with_context(|| format!("reading the schema of {}", db_path.display()))?;
 
-    // A new or empty file has no tables at all, which is the normal path.
-    if tables.is_empty() || tables.iter().any(|t| t == "_sqlx_migrations") {
+    // A brand-new file has no tables at all, which is the normal path.
+    let is_fresh_file = tables.is_empty();
+    let is_glauca_cache = tables.iter().any(|t| t == "_sqlx_migrations");
+    if is_fresh_file || is_glauca_cache {
         return Ok(());
     }
 
@@ -990,7 +1007,7 @@ pub async fn is_full_fetch_due(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{make_item, test_pool};
+    use crate::test_support::{foreign_database, make_item, raw_pool, test_pool};
 
     /// The three front-ends resolve their cache path through one function, so the
     /// precedence is pinned here rather than left to whichever one is read first.
@@ -1035,12 +1052,12 @@ mod tests {
             .unwrap_or_else(|e| panic!("open pool: {e:#}"));
 
         assert!(db_path.exists(), "database file was not created");
-        // Migrated, not merely touched: the front-ends expect a usable cache.
-        let queries: i64 = sqlx::query_scalar("SELECT count(*) FROM queries")
-            .fetch_one(&pool)
+        // Migrated, not merely touched: the front-ends expect a usable cache, so the
+        // query itself is the assertion.
+        sqlx::query("SELECT id FROM queries LIMIT 1")
+            .fetch_optional(&pool)
             .await
-            .expect("count queries");
-        assert_eq!(queries, 0);
+            .expect("a migrated cache has a queries table");
     }
 
     /// A `--db-path` naming an unwritable or nonsensical location surfaces as an
@@ -1051,7 +1068,8 @@ mod tests {
     #[tokio::test]
     async fn open_pool_names_the_directory_it_could_not_create() {
         let blocker = tempfile::NamedTempFile::new().expect("tempfile");
-        let db_path = blocker.path().join("subdir").join("cache.db");
+        let missing_parent = blocker.path().join("subdir");
+        let db_path = missing_parent.join("cache.db");
 
         let err = open_pool(&db_path)
             .await
@@ -1059,73 +1077,63 @@ mod tests {
 
         let msg = format!("{err:#}");
         assert!(
-            msg.contains(&blocker.path().join("subdir").display().to_string()),
+            msg.contains(&missing_parent.display().to_string()),
             "error should name the directory it failed to create, got: {msg}"
         );
     }
 
-    /// Aiming `--db-path` at another application's database used to migrate it in place:
-    /// `CREATE TABLE IF NOT EXISTS` skipped the same-named table but the `ALTER TABLE`
-    /// migrations still ran, so the user's `queries` table came back with glauca's
-    /// columns grafted on. Refuse instead, and leave the file exactly as it was.
+    /// The table a foreign database and glauca both want to own, which is what makes
+    /// migrating one destructive. Shared by the two tests below so the "unchanged" claim
+    /// is compared against the very string that created it.
+    const FOREIGN_SCHEMA: &str = "CREATE TABLE queries (foo INTEGER)";
+
+    /// Aiming `--db-path` at another application's database has to say so, and say which
+    /// file and what it found there.
     #[tokio::test]
     async fn open_pool_refuses_a_database_glauca_did_not_create() {
-        let file = tempfile::NamedTempFile::new().expect("tempfile");
-        let db_path = file.path().to_path_buf();
-        {
-            let options = SqliteConnectOptions::new().filename(&db_path);
-            let pool = SqlitePool::connect_with(options).await.expect("connect");
-            sqlx::query("CREATE TABLE queries (foo INTEGER)")
-                .execute(&pool)
-                .await
-                .expect("create a colliding table");
-            pool.close().await;
-        }
+        let file = foreign_database(FOREIGN_SCHEMA).await;
 
-        let err = open_pool(&db_path)
+        let err = open_pool(file.path())
             .await
             .expect_err("a foreign database must not be migrated");
 
         let msg = format!("{err:#}");
         assert!(
-            msg.contains(&db_path.display().to_string()) && msg.contains("queries"),
+            msg.contains(&file.path().display().to_string()) && msg.contains("queries"),
             "error should name the database and what it found, got: {msg}"
         );
-
-        // The point of the guard: the file is untouched, not half-migrated.
-        let options = SqliteConnectOptions::new().filename(&db_path);
-        let pool = SqlitePool::connect_with(options).await.expect("reconnect");
-        let schema: String =
-            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = 'queries'")
-                .fetch_one(&pool)
-                .await
-                .expect("read the original schema");
-        assert_eq!(schema, "CREATE TABLE queries (foo INTEGER)");
-        let tables: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
-                .fetch_all(&pool)
-                .await
-                .expect("list tables");
-        assert_eq!(tables, vec!["queries".to_string()]);
     }
 
-    /// The failure a hand-picked `--db-path` is likeliest to hit: pointing at a SQLite
-    /// file from another application, or at a cache written by a newer glauca and then
-    /// opened by an older one. sqlx reports the offending migration version but not the
-    /// file, so the path has to come from us.
+    /// Refusing used to come too late: `CREATE TABLE IF NOT EXISTS` skipped the same-named
+    /// table but the `ALTER TABLE` migrations still ran, so the user's `queries` table came
+    /// back with glauca's columns grafted on. Nothing may be added or altered.
+    #[tokio::test]
+    async fn open_pool_leaves_a_refused_database_untouched() {
+        let file = foreign_database(FOREIGN_SCHEMA).await;
+
+        open_pool(file.path())
+            .await
+            .expect_err("a foreign database must not be migrated");
+
+        let pool = raw_pool(file.path()).await;
+        let schema: Vec<(String, String)> =
+            sqlx::query_as("SELECT name, sql FROM sqlite_master WHERE type = 'table'")
+                .fetch_all(&pool)
+                .await
+                .expect("read the schema back");
+        assert_eq!(
+            schema,
+            vec![("queries".to_string(), FOREIGN_SCHEMA.to_string())]
+        );
+    }
+
+    /// Opening a cache written by a newer glauca — or an older binary reading one it
+    /// cannot understand — must not be mistaken for a fresh file. sqlx reports the
+    /// offending migration version but not the file, so the path has to come from us.
     #[tokio::test]
     async fn open_pool_names_the_database_it_could_not_migrate() {
         let (pool, file) = test_pool().await;
-        // A version this build has no migration for, which is what a rollback to an
-        // older binary looks like from sqlx's side.
-        sqlx::query(
-            "INSERT INTO _sqlx_migrations
-             (version, description, installed_on, success, checksum, execution_time)
-             VALUES (99999999, 'from the future', CURRENT_TIMESTAMP, 1, x'00', 0)",
-        )
-        .execute(&pool)
-        .await
-        .expect("insert a migration this build does not have");
+        record_a_migration_from_the_future(&pool, 99_999_999).await;
         pool.close().await;
 
         let err = open_pool(file.path())
@@ -1137,6 +1145,21 @@ mod tests {
             msg.contains(&file.path().display().to_string()),
             "error should name the database it failed to migrate, got: {msg}"
         );
+    }
+
+    /// Mark `version` as already applied even though this build has no such migration —
+    /// what a rollback to an older binary looks like from sqlx's side. The other columns
+    /// are `NOT NULL` filler that no assertion reads.
+    async fn record_a_migration_from_the_future(pool: &SqlitePool, version: i64) {
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations
+             (version, description, installed_on, success, checksum, execution_time)
+             VALUES (?, 'from the future', CURRENT_TIMESTAMP, 1, x'00', 0)",
+        )
+        .bind(version)
+        .execute(pool)
+        .await
+        .expect("record a migration this build does not have");
     }
 
     /// The cache commits per page, per query, per sync cycle, so the journal mode is a
