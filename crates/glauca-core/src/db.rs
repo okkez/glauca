@@ -486,6 +486,10 @@ pub enum PruneOutcome {
         reason: &'static str,
     },
     Considered {
+        /// Rows the query had cached when this walk examined it. The denominator an absence
+        /// rate is read against: without it, "0 absences" from a query holding 30 rows and
+        /// one holding 1000 look the same.
+        cached: usize,
         /// Rows this walk did not return. The full count, not the sample length.
         absent: usize,
         /// Of those, the ones that reached `strikes_required` and were deleted.
@@ -562,27 +566,6 @@ pub async fn prune_missing_items(
         .map(|(owner, name, number)| (owner.as_str(), name.as_str(), *number))
         .collect();
 
-    let existing = sqlx::query!(
-        r#"SELECT id AS "id!: i64", repo_owner, repo_name, number FROM items WHERE query_id = ?"#,
-        query_id,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    // Whole rows, not just ids: the log line names the absent items, and re-querying for
-    // their keys after the delete would be too late.
-    let missing: Vec<_> = existing
-        .into_iter()
-        .filter(|r| !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number)))
-        .collect();
-    let absent = missing.len();
-    let absent_keys: Vec<String> = missing
-        .iter()
-        .take(PRUNE_LOG_KEY_CAP)
-        .map(|r| item_key_label(&r.repo_owner, &r.repo_name, r.number))
-        .collect();
-    let missing_ids: Vec<i64> = missing.iter().map(|r| r.id).collect();
-
     // Increment then delete in one transaction, so a crash between the two can't
     // leave a strike recorded against a row that was about to be deleted anyway
     // (harmless) or, worse, delete without having counted (impossible here). Reading
@@ -608,9 +591,37 @@ pub async fn prune_missing_items(
             reason: "a concurrent full fetch finished first",
         });
     }
+
+    // Read the cached rows inside the transaction, not before it: another front-end's
+    // `upsert_items` landing in that gap would otherwise let this walk strike a row the cache
+    // had just re-acquired — the same "not an independent observation" the guard above rules
+    // out, one step earlier.
+    let existing = sqlx::query!(
+        r#"SELECT id AS "id!: i64", repo_owner, repo_name, number FROM items WHERE query_id = ?"#,
+        query_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let cached = existing.len();
+
+    // Whole rows, not just ids: the log line names the absent items, and re-querying for
+    // their keys after the delete would be too late.
+    let missing: Vec<_> = existing
+        .into_iter()
+        .filter(|r| !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number)))
+        .collect();
+    let absent = missing.len();
+    let absent_keys: Vec<String> = missing
+        .iter()
+        .take(PRUNE_LOG_KEY_CAP)
+        .map(|r| item_key_label(&r.repo_owner, &r.repo_name, r.number))
+        .collect();
+    let missing_ids: Vec<i64> = missing.iter().map(|r| r.id).collect();
+
     if missing.is_empty() {
         tx.rollback().await?;
         return Ok(PruneOutcome::Considered {
+            cached,
             absent: 0,
             deleted: 0,
             absent_keys: Vec::new(),
@@ -649,6 +660,7 @@ pub async fn prune_missing_items(
 
     tx.commit().await?;
     Ok(PruneOutcome::Considered {
+        cached,
         absent,
         deleted: deleted_rows.len() as u64,
         absent_keys,
@@ -1770,7 +1782,17 @@ mod tests {
                 deleted,
                 absent_keys,
                 deleted_keys,
+                ..
             } => (absent, deleted, absent_keys, deleted_keys),
+            other => panic!("expected Considered, got {other:?}"),
+        }
+    }
+
+    /// The row count a prune examined, which the log reports as the denominator for its
+    /// absence count.
+    fn cached_count(outcome: &PruneOutcome) -> usize {
+        match outcome {
+            PruneOutcome::Considered { cached, .. } => *cached,
             other => panic!("expected Considered, got {other:?}"),
         }
     }
@@ -1839,6 +1861,26 @@ mod tests {
         assert_eq!(absent_keys, vec!["owner/repo#2".to_string()]);
         assert_eq!(deleted_keys, vec!["owner/repo#2".to_string()]);
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
+    }
+
+    /// `cached` is the row count the walk examined, so an absence count can be read as a rate.
+    /// Without it "0 absences" from a query holding 3 rows and one holding 1000 are the same
+    /// line.
+    #[tokio::test]
+    async fn prune_reports_how_many_rows_it_examined() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2, 3]).await;
+
+        let all_present = prune_outcome(&pool, qid, &keep(&[1, 2, 3]), None).await;
+        assert_eq!(cached_count(&all_present), 3);
+        assert_eq!(considered(all_present).0, 0, "nothing absent");
+
+        let one_absent = prune_outcome(&pool, qid, &keep(&[1, 2]), None).await;
+        assert_eq!(
+            cached_count(&one_absent),
+            3,
+            "counted before anything is deleted"
+        );
     }
 
     /// The key samples are bounded so one mass departure can't write a thousand keys into a

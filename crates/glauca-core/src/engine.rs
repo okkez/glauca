@@ -708,11 +708,12 @@ pub async fn sync_task(
     // After a full fetch that we can vouch for, drop cached items the query no
     // longer returns (e.g. a PR that was merged and left an `is:open` query).
     if may_prune(is_full, total_node_count, complete) {
+        let strikes = opts.prune_trust.strikes_required();
         match db::prune_missing_items(
             &pool,
             query_id,
             &keep_keys,
-            opts.prune_trust.strikes_required(),
+            strikes,
             last_full_fetch_before_walk.as_deref(),
         )
         .await
@@ -722,12 +723,18 @@ pub async fn sync_task(
             // logged separately because it observed nothing, so it is not evidence.
             Ok(db::PruneOutcome::Skipped { reason }) => info!(reason, "prune skipped"),
             Ok(db::PruneOutcome::Considered {
+                cached,
                 absent,
                 deleted,
                 absent_keys,
                 deleted_keys,
             }) => {
+                // `strikes` distinguishes a corroborating walk from a `PruneTrust::Immediate`
+                // one, which deletes on the first absence: read as if they were the same, an
+                // immediate deletion looks like an item that left after two observations.
                 info!(
+                    strikes,
+                    cached,
                     absent,
                     deleted,
                     ?absent_keys,
@@ -741,6 +748,11 @@ pub async fn sync_task(
                 }
             }
             Err(e) => {
+                // Logged as well as surfaced: a failed prune leaves no line of its own, so a
+                // query whose prune keeps erroring would just be missing from the log rather
+                // than visibly broken — and its walks would drop silently out of the
+                // denominator the absence measurement is read against.
+                warn!(error = %e, "prune failed");
                 let _ = tx
                     .send(AppMessage::Status(format!("prune error: {e}")))
                     .await;
