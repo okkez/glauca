@@ -15,7 +15,7 @@ use crate::db::{CachedItem, open_pool};
 /// be kept alive for the pool's lifetime — dropping it deletes the database.
 pub async fn test_pool() -> (SqlitePool, NamedTempFile) {
     let file = NamedTempFile::new().expect("tempfile");
-    let pool = open_pool(&file.path().to_path_buf())
+    let pool = open_pool(file.path())
         .await
         .unwrap_or_else(|e| panic!("open pool: {e:#}"));
     (pool, file)

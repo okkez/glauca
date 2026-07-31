@@ -13,7 +13,7 @@ use tracing::{debug, info};
 /// Every failure names the path: it comes from `--db-path` / `GLAUCA_DB_PATH`, so a bare
 /// `Permission denied (os error 13)` would leave the user without the one detail they
 /// need to fix it.
-pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
+pub async fn open_pool(db_path: &Path) -> Result<SqlitePool> {
     // Logged before the work below, so a failure to create or open the path still
     // leaves a record of which path was tried.
     info!(path = %db_path.display(), "opening cache");
@@ -63,9 +63,8 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
         .with_context(|| format!("opening cache database {}", db_path.display()))?;
     ensure_not_a_foreign_database(&pool, db_path).await?;
 
-    // The third failure path, and the likeliest one for a hand-picked `--db-path`: a
-    // cache from a different glauca generation reports a missing/mismatched migration,
-    // which says nothing about which file it read.
+    // A cache from a different glauca generation gets past the guard above and fails
+    // here, naming the migration but not the file it read.
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
@@ -83,8 +82,12 @@ pub async fn open_pool(db_path: &PathBuf) -> Result<SqlitePool> {
 /// `queries(foo int, name TEXT, position INTEGER NOT NULL DEFAULT 0, …)` plus the rest of
 /// our schema, with no way back. A glauca cache always carries `_sqlx_migrations`, so its
 /// absence beside other tables means this database is someone else's.
+///
+/// Scoped to schema and rows, which is what "with no way back" refers to: the pool has
+/// already applied `journal_mode = WAL` by the time this runs, and that is a persistent
+/// header flag, so a refused database can be left in WAL mode.
 async fn ensure_not_a_foreign_database(pool: &SqlitePool, db_path: &Path) -> Result<()> {
-    let tables: Vec<String> =
+    let mut tables: Vec<String> =
         sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
             .fetch_all(pool)
             .await
@@ -95,15 +98,14 @@ async fn ensure_not_a_foreign_database(pool: &SqlitePool, db_path: &Path) -> Res
         return Ok(());
     }
 
-    let mut sample: Vec<&str> = tables.iter().map(String::as_str).collect();
-    sample.sort_unstable();
+    tables.sort_unstable();
     anyhow::bail!(
         "{} is a SQLite database that glauca did not create (tables: {}) — \
          refusing to migrate it, because that would add glauca's tables and alter \
-         the existing ones. Point --db-path/GLAUCA_DB_PATH at a new or existing \
+         the existing ones. Point --db-path/{DB_PATH_ENV} at a new or existing \
          glauca cache instead.",
         db_path.display(),
-        sample.join(", "),
+        tables.join(", "),
     )
 }
 
@@ -114,8 +116,9 @@ async fn ensure_not_a_foreign_database(pool: &SqlitePool, db_path: &Path) -> Res
 /// empty dev schema.
 const DB_PATH_ENV: &str = "GLAUCA_DB_PATH";
 
-/// Resolve the cache path: an explicit CLI override wins, then [`DB_PATH_ENV`], then
-/// [`default_db_path`].
+/// Resolve the cache path: an explicit CLI override wins, then [`DB_PATH_ENV`], then the
+/// platform data dir. The single entry point for this — front-ends never build the path
+/// themselves, so none of them can bypass the override.
 pub fn resolve_db_path(cli_override: Option<PathBuf>) -> PathBuf {
     resolve_db_path_with(cli_override, |k| std::env::var_os(k).map(PathBuf::from))
 }
@@ -134,7 +137,7 @@ fn resolve_db_path_with(
         .unwrap_or_else(default_db_path)
 }
 
-pub fn default_db_path() -> PathBuf {
+fn default_db_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("glauca")
@@ -1125,7 +1128,7 @@ mod tests {
         .expect("insert a migration this build does not have");
         pool.close().await;
 
-        let err = open_pool(&file.path().to_path_buf())
+        let err = open_pool(file.path())
             .await
             .expect_err("an unknown applied migration must not be ignored");
 
