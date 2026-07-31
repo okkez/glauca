@@ -469,6 +469,14 @@ fn may_prune(is_full: bool, total_count: usize, complete: bool) -> bool {
     is_full && total_count < SEARCH_RESULT_CAP && complete
 }
 
+/// Render item keys as `owner/repo#number` for a log line. The format is a contract with
+/// whatever reads those lines back, so it lives at the log site rather than in `db`.
+fn item_key_labels(keys: &[db::ItemKey]) -> Vec<String> {
+    keys.iter()
+        .map(|(owner, name, number)| format!("{owner}/{name}#{number}"))
+        .collect()
+}
+
 /// How far a single absence from one fetch is trusted to mean "this item left the
 /// query".
 ///
@@ -737,8 +745,8 @@ pub async fn sync_task(
                     cached,
                     absent,
                     deleted,
-                    ?absent_keys,
-                    ?deleted_keys,
+                    absent_keys = ?item_key_labels(&absent_keys),
+                    deleted_keys = ?item_key_labels(&deleted_keys),
                     "prune considered"
                 );
                 // Only reload when rows were actually removed — the final per-page
