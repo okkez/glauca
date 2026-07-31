@@ -538,7 +538,11 @@ async fn resolve_since(
 /// so the UI can show results as they arrive rather than waiting for all pages.
 #[instrument(
     skip(pool, gh, query_str, opts, tx, gate),
-    fields(background = opts.background, incremental = opts.incremental)
+    fields(
+        background = opts.background,
+        incremental = opts.incremental,
+        full_fetch = tracing::field::Empty
+    )
 )]
 pub async fn sync_task(
     pool: SqlitePool,
@@ -558,6 +562,10 @@ pub async fn sync_task(
     // collect keys to prune against. Being full is necessary but not sufficient — a
     // truncated or lossy walk is disqualified too; see `may_prune`.
     let is_full = since.is_none();
+    // `incremental` on the span is the *permission* to narrow the fetch; this is what the walk
+    // actually did, and it decides whether pruning is even possible. Recorded on the span so
+    // every line of this sync — "sync done", the prune outcome, any warning — carries it.
+    tracing::Span::current().record("full_fetch", is_full);
     let mut keep_keys: Vec<db::ItemKey> = Vec::new();
     // `last_full_fetch_at` as it stands *before* the walk. Handed to the prune so it
     // can detect a concurrent full fetch finishing first — see `prune_missing_items`.
@@ -709,13 +717,29 @@ pub async fn sync_task(
         )
         .await
         {
-            // Only reload when rows were actually removed — the final per-page
-            // reload already reflects every upsert.
-            Ok(deleted) if deleted > 0 => {
-                debug!(deleted, "pruned items no longer matching query");
-                reload().await;
+            // One line per prunable walk, even when nothing was absent: that count is the
+            // denominator when reading how often a transient absence happens. A skip is
+            // logged separately because it observed nothing, so it is not evidence.
+            Ok(db::PruneOutcome::Skipped { reason }) => info!(reason, "prune skipped"),
+            Ok(db::PruneOutcome::Considered {
+                absent,
+                deleted,
+                absent_keys,
+                deleted_keys,
+            }) => {
+                info!(
+                    absent,
+                    deleted,
+                    ?absent_keys,
+                    ?deleted_keys,
+                    "prune considered"
+                );
+                // Only reload when rows were actually removed — the final per-page
+                // reload already reflects every upsert.
+                if deleted > 0 {
+                    reload().await;
+                }
             }
-            Ok(_) => {}
             Err(e) => {
                 let _ = tx
                     .send(AppMessage::Status(format!("prune error: {e}")))
