@@ -1,3 +1,26 @@
+## 0.2.2 (2026-07-31)
+
+### Features
+
+- recognize team-review-requested: in local filters ([#59](https://github.com/okkez/glauca/pull/59) by @okkez)
+- allow overriding the cache database path at runtime ([#64](https://github.com/okkez/glauca/pull/64) by @okkez)
+- add --db-path to the GUI and Tauri front-ends ([#64](https://github.com/okkez/glauca/pull/64) by @okkez)
+
+### Fixes
+
+- periodically re-fetch in full so items that left a query get pruned ([#59](https://github.com/okkez/glauca/pull/59) by @okkez)
+- count removals so pruned items leave the visible list ([#59](https://github.com/okkez/glauca/pull/59) by @okkez)
+- refuse to prune against an incomplete result set ([#59](https://github.com/okkez/glauca/pull/59) by @okkez)
+- bound full-fetch retries and corroborate before pruning ([#59](https://github.com/okkez/glauca/pull/59) by @okkez)
+- let known-stale rows prune immediately, and keep strikes independent ([#59](https://github.com/okkez/glauca/pull/59) by @okkez)
+- don't arm renames, take the write lock up front, drop empty qualifiers ([#59](https://github.com/okkez/glauca/pull/59) by @okkez)
+- keep fetch timestamps on a pure query rename ([#59](https://github.com/okkez/glauca/pull/59) by @okkez)
+- stop a failed full walk from blocking a concurrent prune ([#61](https://github.com/okkez/glauca/pull/61) by @okkez)
+- stop the detail pane crashing on loose task lists ([#62](https://github.com/okkez/glauca/pull/62) by @okkez)
+- restore the terminal when the TUI panics ([#62](https://github.com/okkez/glauca/pull/62) by @okkez)
+- name the cache path in startup failures ([#64](https://github.com/okkez/glauca/pull/64) by @okkez)
+- refuse to migrate a database glauca did not create ([#64](https://github.com/okkez/glauca/pull/64) by @okkez)
+
 ## 0.2.1 (2026-07-21)
 
 ### Features
