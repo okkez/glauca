@@ -469,6 +469,14 @@ fn may_prune(is_full: bool, total_count: usize, complete: bool) -> bool {
     is_full && total_count < SEARCH_RESULT_CAP && complete
 }
 
+/// Render item keys as `owner/repo#number` for a log line. The format is a contract with
+/// whatever reads those lines back, so it lives at the log site rather than in `db`.
+fn item_key_labels(keys: &[db::ItemKey]) -> Vec<String> {
+    keys.iter()
+        .map(|(owner, name, number)| format!("{owner}/{name}#{number}"))
+        .collect()
+}
+
 /// How far a single absence from one fetch is trusted to mean "this item left the
 /// query".
 ///
@@ -538,7 +546,11 @@ async fn resolve_since(
 /// so the UI can show results as they arrive rather than waiting for all pages.
 #[instrument(
     skip(pool, gh, query_str, opts, tx, gate),
-    fields(background = opts.background, incremental = opts.incremental)
+    fields(
+        background = opts.background,
+        incremental = opts.incremental,
+        full_fetch = tracing::field::Empty
+    )
 )]
 pub async fn sync_task(
     pool: SqlitePool,
@@ -558,6 +570,10 @@ pub async fn sync_task(
     // collect keys to prune against. Being full is necessary but not sufficient — a
     // truncated or lossy walk is disqualified too; see `may_prune`.
     let is_full = since.is_none();
+    // `incremental` on the span is the *permission* to narrow the fetch; this is what the walk
+    // actually did, and it decides whether pruning is even possible. Recorded on the span so
+    // every line of this sync — "sync done", the prune outcome, any warning — carries it.
+    tracing::Span::current().record("full_fetch", is_full);
     let mut keep_keys: Vec<db::ItemKey> = Vec::new();
     // `last_full_fetch_at` as it stands *before* the walk. Handed to the prune so it
     // can detect a concurrent full fetch finishing first — see `prune_missing_items`.
@@ -700,23 +716,52 @@ pub async fn sync_task(
     // After a full fetch that we can vouch for, drop cached items the query no
     // longer returns (e.g. a PR that was merged and left an `is:open` query).
     if may_prune(is_full, total_node_count, complete) {
+        let strikes = opts.prune_trust.strikes_required();
         match db::prune_missing_items(
             &pool,
             query_id,
             &keep_keys,
-            opts.prune_trust.strikes_required(),
+            strikes,
             last_full_fetch_before_walk.as_deref(),
         )
         .await
         {
-            // Only reload when rows were actually removed — the final per-page
-            // reload already reflects every upsert.
-            Ok(deleted) if deleted > 0 => {
-                debug!(deleted, "pruned items no longer matching query");
-                reload().await;
+            // One line per prunable walk, even when nothing was absent: these lines are the
+            // denominator when reading how often a transient absence happens — how many there
+            // are, and the `cached` each one carries. A skip is logged separately because it
+            // observed nothing, so it is not evidence.
+            Ok(db::PruneOutcome::Skipped { reason }) => info!(reason, "prune skipped"),
+            Ok(db::PruneOutcome::Considered {
+                cached,
+                absent,
+                deleted,
+                absent_keys,
+                deleted_keys,
+            }) => {
+                // `strikes` distinguishes a corroborating walk from a `PruneTrust::Immediate`
+                // one, which deletes on the first absence: read as if they were the same, an
+                // immediate deletion looks like an item that left after two observations.
+                info!(
+                    strikes,
+                    cached,
+                    absent,
+                    deleted,
+                    absent_keys = ?item_key_labels(&absent_keys),
+                    deleted_keys = ?item_key_labels(&deleted_keys),
+                    "prune considered"
+                );
+                // Only reload when rows were actually removed — the final per-page
+                // reload already reflects every upsert.
+                if deleted > 0 {
+                    reload().await;
+                }
             }
-            Ok(_) => {}
             Err(e) => {
+                // Logged as well as surfaced: without this line a failed prune leaves no trace
+                // of its own, so a query whose prune keeps erroring would just be missing from
+                // the log rather than visibly broken — and its walks would drop silently out
+                // of the denominator the absence measurement is read against.
+                warn!(error = %e, "prune failed");
                 let _ = tx
                     .send(AppMessage::Status(format!("prune error: {e}")))
                     .await;

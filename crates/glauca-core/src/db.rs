@@ -5,7 +5,7 @@ use sqlx::{
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Open the cache at `db_path`, creating the file and any missing parent directories
 /// and applying pending migrations.
@@ -470,9 +470,55 @@ pub type ItemKey = (String, String, i64);
 /// why one absence isn't proof.
 pub const PRUNE_STRIKES: i64 = 2;
 
+/// How many item keys a prune outcome samples. Bounded because a query edit arms every cached
+/// row, so one walk can legitimately find hundreds absent and the only consumer is a log line.
+pub const PRUNE_LOG_KEY_CAP: usize = 20;
+
+/// What one prune attempt observed.
+///
+/// `Skipped` and "nothing was absent" are different facts: a skipped attempt observed nothing
+/// at all, so it is not evidence about any row. Returning `0` for both is what used to make
+/// the concurrency guard invisible in the logs, and what stopped a test from telling them
+/// apart.
+#[derive(Debug)]
+pub enum PruneOutcome {
+    Skipped {
+        reason: &'static str,
+    },
+    Considered {
+        /// Rows the query had cached when this walk examined it. The denominator an absence
+        /// rate is read against: without it, "0 absences" from a query holding 30 rows and
+        /// one holding 1000 look the same.
+        cached: usize,
+        /// Rows this walk did not return. The full count, not the sample length.
+        absent: usize,
+        /// Of those, the ones that reached `strikes_required` and were deleted.
+        deleted: usize,
+        /// Which items were absent, capped at [`PRUNE_LOG_KEY_CAP`]. Identities rather than
+        /// rendered strings: how they read is the log's business, and a caller that wants to
+        /// act on them shouldn't have to parse `owner/repo#number` back apart.
+        absent_keys: Vec<ItemKey>,
+        /// Which of those were deleted, under the same cap.
+        deleted_keys: Vec<ItemKey>,
+    },
+}
+
+impl PruneOutcome {
+    /// Rows deleted; `0` for a skipped attempt. Only the test helpers that predate this enum
+    /// want the count without the rest, so it is not part of the crate's API.
+    #[cfg(test)]
+    fn deleted(&self) -> usize {
+        match self {
+            Self::Skipped { .. } => 0,
+            Self::Considered { deleted, .. } => *deleted,
+        }
+    }
+}
+
 /// Record that this full fetch didn't return the cached rows absent from `keep`, and
-/// delete the ones that have reached `strikes_required` consecutive absences. Returns
-/// the number of rows deleted.
+/// delete the ones that have reached `strikes_required` consecutive absences. Returns what the
+/// attempt observed — see [`PruneOutcome`], which distinguishes "nothing was absent" from
+/// "the guard below skipped this walk entirely".
 ///
 /// `upsert_items` zeroes the counter, so any search that returns the item again
 /// disarms it, and the threshold is only ever reached by *consecutive* absences.
@@ -513,28 +559,12 @@ pub async fn prune_missing_items(
     keep: &[ItemKey],
     strikes_required: i64,
     last_full_fetch_before_walk: Option<&str>,
-) -> Result<u64> {
+) -> Result<PruneOutcome> {
     use std::collections::HashSet;
     let keep_set: HashSet<(&str, &str, i64)> = keep
         .iter()
         .map(|(owner, name, number)| (owner.as_str(), name.as_str(), *number))
         .collect();
-
-    let existing = sqlx::query!(
-        r#"SELECT id AS "id!: i64", repo_owner, repo_name, number FROM items WHERE query_id = ?"#,
-        query_id,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let missing_ids: Vec<i64> = existing
-        .into_iter()
-        .filter(|r| !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number)))
-        .map(|r| r.id)
-        .collect();
-    if missing_ids.is_empty() {
-        return Ok(0);
-    }
 
     // Increment then delete in one transaction, so a crash between the two can't
     // leave a strike recorded against a row that was about to be deleted anyway
@@ -549,12 +579,56 @@ pub async fn prune_missing_items(
     // deadlock), so `busy_timeout` would not save us from a concurrent writer —
     // another query's `upsert_items`, a read-marking update, or the maintenance
     // sweep. Taking the write lock up front makes the 30s timeout apply as intended.
+    //
+    // The guard runs before the "nothing was absent" exit, not after: a stale walk that
+    // happens to find everything present still observed nothing independent, and reporting
+    // that as `absent = 0` would feed a non-observation into the denominator the
+    // transient-absence measurement is read against.
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     if last_full_fetch_at(&mut *tx, query_id).await?.as_deref() != last_full_fetch_before_walk {
-        debug!("skipping prune: a concurrent full fetch finished first");
         tx.rollback().await?;
-        return Ok(0);
+        return Ok(PruneOutcome::Skipped {
+            reason: "a concurrent full fetch finished first",
+        });
     }
+
+    // Read the cached rows inside the transaction, not before it: another front-end's
+    // `upsert_items` landing in that gap would otherwise let this walk strike a row the cache
+    // had just re-acquired — the same "not an independent observation" the guard above rules
+    // out, one step earlier.
+    let cached_rows = sqlx::query!(
+        r#"SELECT id AS "id!: i64", repo_owner, repo_name, number FROM items WHERE query_id = ?"#,
+        query_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let cached = cached_rows.len();
+
+    // Whole rows, not just ids: the log line names the absent items, and re-querying for
+    // their keys after the delete would be too late.
+    let missing: Vec<_> = cached_rows
+        .into_iter()
+        .filter(|r| !keep_set.contains(&(r.repo_owner.as_str(), r.repo_name.as_str(), r.number)))
+        .collect();
+    let absent = missing.len();
+    let absent_keys: Vec<ItemKey> = missing
+        .iter()
+        .take(PRUNE_LOG_KEY_CAP)
+        .map(|r| (r.repo_owner.clone(), r.repo_name.clone(), r.number))
+        .collect();
+
+    if missing.is_empty() {
+        tx.rollback().await?;
+        return Ok(PruneOutcome::Considered {
+            cached,
+            absent,
+            deleted: 0,
+            absent_keys,
+            deleted_keys: Vec::new(),
+        });
+    }
+
+    let missing_ids: Vec<i64> = missing.iter().map(|r| r.id).collect();
 
     // Bind the id list once as JSON and let SQLite's json_each expand it, rather than
     // building `IN (?, ?, …)` by hand: that would need chunking under the
@@ -570,20 +644,33 @@ pub async fn prune_missing_items(
     )
     .execute(&mut *tx)
     .await?;
-    let deleted = sqlx::query!(
+    // `RETURNING` rather than `rows_affected()` plus a Rust-side re-derivation of which rows
+    // met the threshold: the deleted keys then come from the statement that did the deleting,
+    // so the log can't disagree with the database about what went.
+    let deleted_rows = sqlx::query!(
         r#"
         DELETE FROM items
         WHERE missing_count >= ? AND id IN (SELECT value FROM json_each(?))
+        RETURNING repo_owner, repo_name, number AS "number!: i64"
         "#,
         strikes_required,
         ids,
     )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut *tx)
+    .await?;
 
     tx.commit().await?;
-    Ok(deleted)
+    Ok(PruneOutcome::Considered {
+        cached,
+        absent,
+        deleted: deleted_rows.len(),
+        absent_keys,
+        deleted_keys: deleted_rows
+            .into_iter()
+            .take(PRUNE_LOG_KEY_CAP)
+            .map(|r| (r.repo_owner, r.repo_name, r.number))
+            .collect(),
+    })
 }
 
 /// Free cache space by clearing the (re-fetchable) `body` of items unlikely to be
@@ -1530,11 +1617,19 @@ mod tests {
         qid
     }
 
-    fn keep(numbers: &[i64]) -> Vec<ItemKey> {
+    /// The cache keys for `numbers`, as `query_with_items` stores them.
+    fn item_keys(numbers: &[i64]) -> Vec<ItemKey> {
         numbers
             .iter()
             .map(|n| ("owner".to_string(), "repo".to_string(), *n))
             .collect()
+    }
+
+    /// What a search returned — i.e. the rows a prune must leave alone. Same values as
+    /// [`item_keys`]; the two names keep an argument ("these came back") from reading like an
+    /// expectation ("these went missing").
+    fn keep(numbers: &[i64]) -> Vec<ItemKey> {
+        item_keys(numbers)
     }
 
     /// The next search returned `numbers`, which clears their strikes.
@@ -1546,14 +1641,34 @@ mod tests {
         upsert_items(pool, &items).await.expect("upsert");
     }
 
+    /// The one place these tests call `prune_missing_items`, so its argument list is written
+    /// once. The helpers around it name the shapes the production callers actually take.
+    async fn prune_outcome(
+        pool: &SqlitePool,
+        query_id: i64,
+        keep: &[ItemKey],
+        strikes_required: i64,
+        last_full_fetch_before_walk: Option<&str>,
+    ) -> PruneOutcome {
+        prune_missing_items(
+            pool,
+            query_id,
+            keep,
+            strikes_required,
+            last_full_fetch_before_walk,
+        )
+        .await
+        .expect("prune")
+    }
+
     /// Prune as a fetch that observed `last_full_fetch_before_walk` before its walk would.
     async fn prune_observing(
         pool: &SqlitePool,
         query_id: i64,
         keep: &[ItemKey],
         last_full_fetch_before_walk: Option<&str>,
-    ) -> u64 {
-        prune_missing_items(
+    ) -> usize {
+        prune_outcome(
             pool,
             query_id,
             keep,
@@ -1561,20 +1676,35 @@ mod tests {
             last_full_fetch_before_walk,
         )
         .await
-        .expect("prune")
+        .deleted()
     }
 
     /// An automatic sync's prune of a query that has never been full fetched (so the
-    /// stamp it observed is `None`).
-    async fn auto_prune(pool: &SqlitePool, query_id: i64, keep: &[ItemKey]) -> u64 {
-        prune_observing(pool, query_id, keep, None).await
+    /// stamp it observed is `None`), as [`PruneOutcome`] rather than a count — for tests that
+    /// need to tell a skip from an attempt that found nothing absent.
+    async fn auto_prune_outcome(
+        pool: &SqlitePool,
+        query_id: i64,
+        keep: &[ItemKey],
+    ) -> PruneOutcome {
+        prune_outcome(pool, query_id, keep, PRUNE_STRIKES, None).await
+    }
+
+    async fn auto_prune(pool: &SqlitePool, query_id: i64, keep: &[ItemKey]) -> usize {
+        auto_prune_outcome(pool, query_id, keep).await.deleted()
     }
 
     /// A user's explicit resync: `PruneTrust::Immediate`, i.e. delete on first absence.
-    async fn forced_prune(pool: &SqlitePool, query_id: i64, keep: &[ItemKey]) -> u64 {
-        prune_missing_items(pool, query_id, keep, 1, None)
-            .await
-            .expect("prune")
+    async fn forced_prune_outcome(
+        pool: &SqlitePool,
+        query_id: i64,
+        keep: &[ItemKey],
+    ) -> PruneOutcome {
+        prune_outcome(pool, query_id, keep, 1, None).await
+    }
+
+    async fn forced_prune(pool: &SqlitePool, query_id: i64, keep: &[ItemKey]) -> usize {
+        forced_prune_outcome(pool, query_id, keep).await.deleted()
     }
 
     /// The corroboration rule: one absence only records a strike, the second deletes.
@@ -1663,6 +1793,144 @@ mod tests {
             prune_observing(&pool, qid, &keep(&[1]), stamp.as_deref()).await,
             1
         );
+    }
+
+    /// A guarded prune observed nothing at all, which is a different fact from "nothing was
+    /// absent". Collapsing both into `0` is what makes the guard invisible in the logs.
+    #[tokio::test]
+    async fn prune_reports_a_skip_rather_than_zero_deletions() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2]).await;
+
+        // Walk A observed no stamp, pruned (strike one), and marked the query fetched.
+        assert_eq!(auto_prune(&pool, qid, &keep(&[1])).await, 0);
+        mark_fetched(&pool, qid, true).await.expect("mark");
+
+        // Walk B started before that and also observed no stamp.
+        let outcome = auto_prune_outcome(&pool, qid, &keep(&[1])).await;
+        assert!(
+            matches!(outcome, PruneOutcome::Skipped { .. }),
+            "a guarded prune must be distinguishable from one that found nothing absent, \
+             got {outcome:?}"
+        );
+    }
+
+    /// The guard runs even when nothing was absent. A stale walk observed nothing
+    /// independent, so reporting it as `absent=0` would put a non-observation into the
+    /// denominator the transient-absence measurement is read against.
+    #[tokio::test]
+    async fn prune_reports_a_skip_even_when_nothing_was_absent() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1]).await;
+
+        // A concurrent walk completed and stamped the query after this one started.
+        mark_fetched(&pool, qid, true).await.expect("mark");
+
+        // This walk returned everything it had cached, so nothing is absent — but it still
+        // observed a stamp that has since moved.
+        let outcome = auto_prune_outcome(&pool, qid, &keep(&[1])).await;
+        assert!(
+            matches!(outcome, PruneOutcome::Skipped { .. }),
+            "a stale walk must report a skip whether or not it found rows absent, got {outcome:?}"
+        );
+    }
+
+    /// What the log line reports: the absent keys on strike one, and the deleted keys on the
+    /// strike that removes them.
+    #[tokio::test]
+    async fn prune_reports_absent_then_deleted_keys() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2]).await;
+
+        let PruneOutcome::Considered {
+            absent,
+            deleted,
+            absent_keys,
+            deleted_keys,
+            ..
+        } = auto_prune_outcome(&pool, qid, &keep(&[1])).await
+        else {
+            panic!("the fixture has one row absent, so this walk must have considered it");
+        };
+        assert_eq!(
+            (absent, deleted),
+            (1, 0),
+            "strike one records, deletes nothing"
+        );
+        assert_eq!(absent_keys, item_keys(&[2]));
+        assert!(deleted_keys.is_empty());
+
+        let PruneOutcome::Considered {
+            absent,
+            deleted,
+            absent_keys,
+            deleted_keys,
+            ..
+        } = auto_prune_outcome(&pool, qid, &keep(&[1])).await
+        else {
+            panic!("the second walk must have considered the same row");
+        };
+        assert_eq!((absent, deleted), (1, 1), "strike two deletes");
+        assert_eq!(absent_keys, item_keys(&[2]));
+        assert_eq!(deleted_keys, item_keys(&[2]));
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
+    }
+
+    /// `cached` is the row count the walk examined, so an absence count can be read as a rate
+    /// rather than a bare number. It counts what was there when the walk started, including
+    /// the rows the same walk goes on to delete.
+    #[tokio::test]
+    async fn prune_reports_how_many_rows_it_examined() {
+        let (pool, _file) = test_pool().await;
+        let qid = query_with_items(&pool, &[1, 2, 3]).await;
+
+        let PruneOutcome::Considered { cached, absent, .. } =
+            auto_prune_outcome(&pool, qid, &keep(&[1, 2, 3])).await
+        else {
+            panic!("nothing stamped the query, so the guard cannot have skipped this walk");
+        };
+        assert_eq!((cached, absent), (3, 0), "all three present");
+
+        // Strike one against #3, then the strike that deletes it: `cached` must still report
+        // the three rows the walk examined, not the two it left behind.
+        auto_prune(&pool, qid, &keep(&[1, 2])).await;
+        let PruneOutcome::Considered {
+            cached, deleted, ..
+        } = auto_prune_outcome(&pool, qid, &keep(&[1, 2])).await
+        else {
+            panic!("nothing stamped the query, so the guard cannot have skipped this walk");
+        };
+        assert_eq!(
+            (cached, deleted),
+            (3, 1),
+            "counted before anything is deleted"
+        );
+        assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 2]);
+    }
+
+    /// The key samples are bounded so one mass departure can't write a thousand keys into a
+    /// log line; the counts stay exact, so a truncated list is never mistaken for the whole.
+    #[tokio::test]
+    async fn prune_caps_the_key_samples_but_not_the_counts() {
+        let (pool, _file) = test_pool().await;
+        let numbers: Vec<i64> = (1..=(PRUNE_LOG_KEY_CAP as i64 + 5)).collect();
+        let qid = query_with_items(&pool, &numbers).await;
+
+        // A forced resync deletes on the first absence, so one call both records and deletes.
+        let PruneOutcome::Considered {
+            absent,
+            deleted,
+            absent_keys,
+            deleted_keys,
+            ..
+        } = forced_prune_outcome(&pool, qid, &[]).await
+        else {
+            panic!("every row is absent from an empty keep set");
+        };
+        assert_eq!(absent, numbers.len());
+        assert_eq!(deleted, numbers.len());
+        assert_eq!(absent_keys.len(), PRUNE_LOG_KEY_CAP);
+        assert_eq!(deleted_keys.len(), PRUNE_LOG_KEY_CAP);
     }
 
     /// Strikes live on the row, so one query's misses neither delete another query's
@@ -1853,9 +2121,9 @@ mod tests {
 
         mark_full_fetch_attempted(&pool, qid).await.expect("mark");
 
-        let deleted = prune_missing_items(&pool, qid, &keep(&[1]), 1, before_walk.as_deref())
+        let deleted = prune_outcome(&pool, qid, &keep(&[1]), 1, before_walk.as_deref())
             .await
-            .expect("prune");
+            .deleted();
         assert_eq!(deleted, 1);
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
     }
