@@ -37,6 +37,7 @@ octicons! {
     "octicons/x-circle-fill.svg" => "../../assets/octicons/x-circle-fill.svg",
     "octicons/comment.svg" => "../../assets/octicons/comment.svg",
     "octicons/clock.svg" => "../../assets/octicons/clock.svg",
+    "octicons/people.svg" => "../../assets/octicons/people.svg",
 }
 
 impl AssetSource for Assets {
