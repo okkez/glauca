@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use crate::db::CachedItem;
 use crate::filter::{FilterQuery, StreamFilter};
-use crate::types::{ItemEntry, LeftPaneEntry, UserRef};
+use crate::types::{ActorKind, ItemEntry, LeftPaneEntry, UserRef};
 
 /// An item is unread iff its current `updated_at` is newer than the `updated_at`
 /// the user had seen when they last read it. Never-read items (`None`) are always
@@ -129,7 +129,14 @@ pub fn decode_reviews(raw: &str) -> Vec<(UserRef, String)> {
             let login = v["login"].as_str()?.to_string();
             let state = v["state"].as_str()?.to_string();
             let avatar_url = v["avatar_url"].as_str().map(|s| s.to_string());
-            Some((UserRef { login, avatar_url }, state))
+            Some((
+                UserRef {
+                    login,
+                    avatar_url,
+                    kind: ActorKind::User,
+                },
+                state,
+            ))
         })
         .collect()
 }
@@ -188,6 +195,7 @@ pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
         author: c.author.map(|login| UserRef {
             login,
             avatar_url: c.author_avatar_url,
+            kind: ActorKind::User,
         }),
         state: c.state,
         updated_at: c.updated_at,

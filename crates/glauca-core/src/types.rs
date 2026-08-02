@@ -83,13 +83,32 @@ impl LeftPaneEntry {
     }
 }
 
-/// A GitHub user reference: login plus an optional avatar URL. `avatar_url` is
-/// `None` for teams (review requests) and may be absent in older cache rows.
+/// Whether a referenced actor is a person or a team. GitHub's review-request
+/// union is `User | Team`, and the two are rendered differently (a circle vs a
+/// rounded square), so the distinction has to survive into the cache.
+///
+/// Absent from cache rows written before this field existed; `Default` makes
+/// those decode as users, which is the safe direction — a real user rendered as
+/// a team would be wrong, while a team rendered as a user is what already
+/// happened before this field existed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorKind {
+    #[default]
+    User,
+    Team,
+}
+
+/// A GitHub actor referenced by an item: login (or team slug) plus an optional
+/// avatar URL. `avatar_url` is absent for teams with no team/org image and in
+/// older cache rows.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct UserRef {
     pub login: String,
     #[serde(default)]
     pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub kind: ActorKind,
 }
 
 impl UserRef {
@@ -97,6 +116,7 @@ impl UserRef {
         Self {
             login: login.into(),
             avatar_url: None,
+            kind: ActorKind::User,
         }
     }
 }
