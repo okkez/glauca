@@ -46,7 +46,7 @@ pub struct Icons {
     /// `REVIEW_REQUIRED` PR-level decision: a whole-PR review decision has no
     /// actor kind, so there is no `pending_reviewer_icon` call to route through.
     pending_reviewer: &'static str,
-    reviewer_team: &'static str,
+    pending_reviewer_team: &'static str,
     merged: &'static str,
     pr: &'static str,
     issue: &'static str,
@@ -82,7 +82,7 @@ impl Icons {
             filter_stream: "↳",
             mode_badge: None,
             pending_reviewer: "○",
-            reviewer_team: "👥",
+            pending_reviewer_team: "👥",
             merged: "⬡",
             pr: "⎇",
             issue: "○",
@@ -103,25 +103,25 @@ impl Icons {
     /// it needs a Nerd Font (or the brands font) to render.
     pub fn icon_font() -> Self {
         Self {
-            query: "\u{f09b}",            // fa github (brands)
-            refresh: "\u{f021}",          // fa arrows-rotate
-            new_item: "\u{f111}",         // fa circle
-            private: "\u{f023}",          // fa lock
-            syncing: "\u{f021}",          // fa arrows-rotate
-            bell: "\u{f0f3}",             // fa bell
-            clock: "\u{f017}",            // fa clock
-            filter_stream: "\u{f160}",    // fa arrow-down-wide-short
-            mode_badge: Some("\u{f6be}"), // fa cat
-            pending_reviewer: "\u{f192}", // fa circle-dot
-            reviewer_team: "\u{f0c0}",    // fa users
-            merged: "\u{f387}",           // fa code-merge
-            pr: "\u{e13c}",               // fa code-pull-request
-            issue: "\u{f192}",            // fa circle-dot
-            check: "\u{f00c}",            // fa check
-            review_approved: "\u{f058}",  // fa circle-check
-            review_changes: "\u{f00d}",   // fa xmark
-            review_commented: "\u{f075}", // fa comment
-            review_dismissed: "\u{f3e5}", // fa reply
+            query: "\u{f09b}",                 // fa github (brands)
+            refresh: "\u{f021}",               // fa arrows-rotate
+            new_item: "\u{f111}",              // fa circle
+            private: "\u{f023}",               // fa lock
+            syncing: "\u{f021}",               // fa arrows-rotate
+            bell: "\u{f0f3}",                  // fa bell
+            clock: "\u{f017}",                 // fa clock
+            filter_stream: "\u{f160}",         // fa arrow-down-wide-short
+            mode_badge: Some("\u{f6be}"),      // fa cat
+            pending_reviewer: "\u{f192}",      // fa circle-dot
+            pending_reviewer_team: "\u{f0c0}", // fa users
+            merged: "\u{f387}",                // fa code-merge
+            pr: "\u{e13c}",                    // fa code-pull-request
+            issue: "\u{f192}",                 // fa circle-dot
+            check: "\u{f00c}",                 // fa check
+            review_approved: "\u{f058}",       // fa circle-check
+            review_changes: "\u{f00d}",        // fa xmark
+            review_commented: "\u{f075}",      // fa comment
+            review_dismissed: "\u{f3e5}",      // fa reply
         }
     }
 
@@ -156,7 +156,7 @@ impl Icons {
     /// who has no avatar.
     pub fn pending_reviewer_icon(&self, kind: ActorKind) -> &'static str {
         match kind {
-            ActorKind::Team => self.reviewer_team,
+            ActorKind::Team => self.pending_reviewer_team,
             ActorKind::User => self.pending_reviewer,
         }
     }

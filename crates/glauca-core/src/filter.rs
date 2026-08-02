@@ -974,7 +974,7 @@ mod tests {
     /// of the other, and they no longer share a field. Each token is dispatched on its
     /// full qualifier name, so neither can shadow the other however the table is ordered.
     #[test]
-    fn qualifiers_sharing_a_prefix_are_dispatched_by_name() {
+    fn overlapping_qualifier_names_are_dispatched_in_full() {
         let q = FilterQuery::parse("team-review-requested:my-org/my-team review-requested:alice");
         assert_eq!(
             q.require.review_requested_teams,
