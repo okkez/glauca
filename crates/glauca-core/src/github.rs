@@ -148,7 +148,7 @@ const ITEM_FIELDS: &str = "
           nodes {
             requestedReviewer {
               ... on User { login avatarUrl }
-              ... on Team { slug }
+              ... on Team { slug avatarUrl }
             }
           }
         }
@@ -473,9 +473,11 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         })
         .unwrap_or_default();
 
-    // Reviewers / assignees are stored as JSON object arrays carrying the avatar
-    // URL: [{"login":"alice","avatar_url":"https://…"}]. Teams (review requests)
-    // have only a `slug` and no avatar.
+    // Reviewers / assignees are stored as JSON object arrays:
+    // [{"login":"alice","avatar_url":"https://…","kind":"user"}]. `kind` is written
+    // for both variants rather than left implicit, so nothing downstream has to
+    // infer a team from a missing avatar. Assignees carry no `kind` — GraphQL only
+    // ever returns users there, and `decode_users` defaults to `user`.
     let requested_reviewers: Vec<serde_json::Value> = if is_pr {
         node["reviewRequests"]["nodes"]
             .as_array()
@@ -483,10 +485,18 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
                 arr.iter()
                     .filter_map(|n| {
                         let rv = &n["requestedReviewer"];
-                        // User has `login`, Team has `slug`
-                        let login = rv["login"].as_str().or_else(|| rv["slug"].as_str())?;
+                        // A User has `login`, a Team has `slug`; both carry `avatarUrl`
+                        // (a team's is its own or its org's, and may be absent).
+                        let (login, kind) = match rv["login"].as_str() {
+                            Some(login) => (login, "user"),
+                            None => (rv["slug"].as_str()?, "team"),
+                        };
                         let avatar_url = rv["avatarUrl"].as_str();
-                        Some(serde_json::json!({"login": login, "avatar_url": avatar_url}))
+                        Some(serde_json::json!({
+                            "login": login,
+                            "avatar_url": avatar_url,
+                            "kind": kind,
+                        }))
                     })
                     .collect()
             })
@@ -602,6 +612,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ActorKind;
     use rstest::rstest;
 
     // Env lookup over a fixed map, for resolve_token tests.
@@ -779,20 +790,32 @@ mod tests {
             "comments": { "totalCount": 0 },
             "reviewRequests": {
                 "nodes": [
-                    { "requestedReviewer": { "login": "carol" } },
-                    { "requestedReviewer": { "slug": "my-team" } }
+                    { "requestedReviewer": { "login": "carol", "avatarUrl": "https://a/carol.png" } },
+                    { "requestedReviewer": { "slug": "my-team", "avatarUrl": "https://a/org.png" } },
+                    { "requestedReviewer": { "slug": "avatarless-team" } }
                 ]
             }
         });
         let item = node_to_cached_item(&node, 1).unwrap();
         assert_eq!(item.kind, "pull_request");
         assert_eq!(item.state, "open");
-        // requested_reviewers is now a JSON object array carrying avatar URLs.
-        let reviewers: Vec<String> = crate::logic::decode_users(&item.requested_reviewers)
-            .into_iter()
-            .map(|u| u.login)
-            .collect();
-        assert_eq!(reviewers, vec!["carol", "my-team"]);
+        let reviewers = crate::logic::decode_users(&item.requested_reviewers);
+        let logins: Vec<&str> = reviewers.iter().map(|u| u.login.as_str()).collect();
+        assert_eq!(logins, vec!["carol", "my-team", "avatarless-team"]);
+        // The User/Team split the GraphQL fragments encode must survive into the cache:
+        // flattening it is what made the two review-request qualifiers equivalent.
+        let kinds: Vec<ActorKind> = reviewers.iter().map(|u| u.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![ActorKind::User, ActorKind::Team, ActorKind::Team]
+        );
+        // A team's avatar (its own, or its org's) is fetched like a user's. Only a
+        // team without one has no image, and that is the icon-fallback case.
+        assert_eq!(
+            reviewers[1].avatar_url.as_deref(),
+            Some("https://a/org.png")
+        );
+        assert!(reviewers[2].avatar_url.is_none());
     }
 
     #[test]
