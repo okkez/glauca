@@ -970,13 +970,10 @@ mod tests {
         assert!(q.require.states.is_empty());
     }
 
-    /// `team-review-requested:` and `review-requested:` share a name prefix but not a
-    /// field: each token is dispatched on its full qualifier, so neither can shadow the
-    /// other however the table is ordered.
+    /// `review-requested` is a *suffix* of `team-review-requested` — neither is a prefix
+    /// of the other, and they no longer share a field. Each token is dispatched on its
+    /// full qualifier name, so neither can shadow the other however the table is ordered.
     #[test]
-    /// `review-requested` is a suffix of `team-review-requested`, not a prefix
-    /// (and neither is a prefix of the other) — dispatch must key on the full
-    /// qualifier name, not on a prefix match.
     fn qualifiers_sharing_a_prefix_are_dispatched_by_name() {
         let q = FilterQuery::parse("team-review-requested:my-org/my-team review-requested:alice");
         assert_eq!(
