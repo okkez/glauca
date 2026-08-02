@@ -1,6 +1,6 @@
-use crate::types::ItemEntry;
 #[cfg(test)]
 use crate::types::UserRef;
+use crate::types::{ActorKind, ItemEntry};
 use frizbee::{Config, Matcher};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -72,8 +72,7 @@ fn fuzzy_hit(needle: &str, haystacks: &[&str]) -> bool {
 ///   - `repo:<owner/name>` — filter by repository (substring)
 ///   - `base:<branch>` / `head:<branch>` — filter PRs by base/head branch
 ///   - `review-requested:<login>` / `team-review-requested:<slug>` — filter by a
-///     requested reviewer. Teams and users share one list, so the two are
-///     interchangeable here (unlike on GitHub, where they are distinct).
+///     requested reviewer, matching only that actor kind, as on GitHub.
 ///   - `-<token>` — negate any token above, GitHub-style: the item must NOT
 ///     match it (`-label:bug`, `-is:draft`, `-wip`). A lone `-` is a plain
 ///     text token, not a negation.
@@ -102,7 +101,8 @@ struct Conditions {
     repos: Vec<String>,
     base_refs: Vec<String>,
     head_refs: Vec<String>,
-    review_requested: Vec<String>,
+    review_requested_users: Vec<String>,
+    review_requested_teams: Vec<String>,
     /// `is:draft` → `Some(true)`. Only constrained when set.
     is_draft: Option<bool>,
     /// `is:private` → `Some(true)`, `is:public` → `Some(false)`.
@@ -129,13 +129,11 @@ const QUALIFIER_FIELDS: &[(&str, QualifierField)] = &[
     ("repo", |c| &mut c.repos),
     ("base", |c| &mut c.base_refs),
     ("head", |c| &mut c.head_refs),
-    ("review-requested", |c| &mut c.review_requested),
-    // A team slug is stored in `requested_reviewers` in the same shape as a user login
-    // (see `github::node_to_cached_item`), so matching is identical — which makes the
-    // two qualifiers locally equivalent: `team-review-requested:` also matches a user
-    // of that name. Acceptable for a substring filter; telling them apart would need a
-    // type discriminator stored per reviewer.
-    ("team-review-requested", |c| &mut c.review_requested),
+    // GitHub keeps these apart and so do we: each `requested_reviewers` entry
+    // carries an `ActorKind`, so `review-requested:` reaches only users and
+    // `team-review-requested:` only teams.
+    ("review-requested", |c| &mut c.review_requested_users),
+    ("team-review-requested", |c| &mut c.review_requested_teams),
 ];
 
 impl Conditions {
@@ -293,14 +291,21 @@ impl Conditions {
                 return false;
             }
         }
-        // review-requested filter
-        for rv in &self.review_requested {
-            let hit = item
-                .requested_reviewers
-                .iter()
-                .any(|u| u.login.to_lowercase().contains(rv.as_str()));
-            if hit != want {
-                return false;
+        // review-requested filter — the qualifier picks the actor kind, so a team
+        // slug and a user login of the same name do not collide.
+        for (values, kind) in [
+            (&self.review_requested_users, ActorKind::User),
+            (&self.review_requested_teams, ActorKind::Team),
+        ] {
+            for rv in values {
+                let hit = item
+                    .requested_reviewers
+                    .iter()
+                    .filter(|u| u.kind == kind)
+                    .any(|u| u.login.to_lowercase().contains(rv.as_str()));
+                if hit != want {
+                    return false;
+                }
             }
         }
         // plain text tokens — fuzzy-match title | author | repo | labels
@@ -788,9 +793,22 @@ mod tests {
         assert!(!q.matches(&non_draft));
     }
 
+    /// Build a PR with the given requested reviewers. A `team:`-prefixed entry
+    /// becomes a team reviewer; anything else a user. An entry with no prefix also
+    /// stands in for a row cached before `kind` existed, which decodes as a user.
     fn pr_with_reviewers(reviewers: &[&str]) -> ItemEntry {
         let mut pr = item("PR", "alice", "open", &[], "o/r");
-        pr.requested_reviewers = reviewers.iter().map(|r| UserRef::new(*r)).collect();
+        pr.requested_reviewers = reviewers
+            .iter()
+            .map(|r| match r.strip_prefix("team:") {
+                Some(slug) => UserRef {
+                    login: slug.to_string(),
+                    avatar_url: None,
+                    kind: ActorKind::Team,
+                },
+                None => UserRef::new(*r),
+            })
+            .collect();
         pr
     }
 
@@ -799,19 +817,25 @@ mod tests {
     #[case::requested_carol("review-requested:carol", &["bob", "carol"], true)]
     #[case::unrequested_login("review-requested:dave", &["bob", "carol"], false)]
     #[case::no_reviewers("review-requested:bob", &[], false)]
-    // Team slugs live in the same `requested_reviewers` list as user logins, so
-    // `team-review-requested:` matches them (and, unavoidably, users too).
-    #[case::team_requested("team-review-requested:my-team", &["bob", "my-team"], true)]
-    #[case::team_not_requested("team-review-requested:other-team", &["bob", "my-team"], false)]
-    #[case::team_negated("-team-review-requested:my-team", &["bob", "my-team"], false)]
+    // Each qualifier matches only its own actor kind, as on GitHub. Before
+    // `ActorKind` the two were interchangeable, because a team slug was stored in
+    // the same shape as a user login.
+    #[case::team_requested("team-review-requested:my-team", &["bob", "team:my-team"], true)]
+    #[case::team_not_requested("team-review-requested:other-team", &["bob", "team:my-team"], false)]
+    #[case::team_negated("-team-review-requested:my-team", &["bob", "team:my-team"], false)]
+    #[case::team_qualifier_skips_users("team-review-requested:bob", &["bob"], false)]
+    #[case::user_qualifier_skips_teams("review-requested:my-team", &["team:my-team"], false)]
+    // A reviewer cached before `kind` existed decodes as a user, so the *user*
+    // qualifier is the one that reaches it until the next full fetch rewrites the row.
+    #[case::kindless_row_is_a_user("review-requested:my-team", &["my-team"], true)]
     // GitHub's canonical `org/team` spelling must work: only the bare slug is cached,
     // so the org prefix is dropped rather than silently matching nothing.
-    #[case::team_org_qualified("team-review-requested:my-org/my-team", &["my-team"], true)]
-    #[case::team_org_qualified_no_match("team-review-requested:my-org/other", &["my-team"], false)]
+    #[case::team_org_qualified("team-review-requested:my-org/my-team", &["team:my-team"], true)]
+    #[case::team_org_qualified_no_match("team-review-requested:my-org/other", &["team:my-team"], false)]
     // A trailing slash must not degenerate into `contains("")`, which would match
     // every item that has any requested reviewer.
-    #[case::team_trailing_slash_matches_nothing("team-review-requested:my-org/", &["my-team"], false)]
-    #[case::team_bare_slash_matches_nothing("team-review-requested:/", &["my-team"], false)]
+    #[case::team_trailing_slash_matches_nothing("team-review-requested:my-org/", &["team:my-team"], false)]
+    #[case::team_bare_slash_matches_nothing("team-review-requested:/", &["team:my-team"], false)]
     // A value-less qualifier is dropped, so it constrains nothing rather than acting
     // as a hidden "has any requested reviewer" filter.
     #[case::team_no_value_is_not_a_constraint("team-review-requested:", &[], true)]
@@ -946,16 +970,17 @@ mod tests {
         assert!(q.require.states.is_empty());
     }
 
-    /// `team-review-requested:` and `review-requested:` share a field but not a name:
-    /// each token is dispatched on its full qualifier, so neither can shadow the other
-    /// however the table is ordered.
+    /// `team-review-requested:` and `review-requested:` share a name prefix but not a
+    /// field: each token is dispatched on its full qualifier, so neither can shadow the
+    /// other however the table is ordered.
     #[test]
     fn qualifiers_sharing_a_prefix_are_dispatched_by_name() {
         let q = FilterQuery::parse("team-review-requested:my-org/my-team review-requested:alice");
         assert_eq!(
-            q.require.review_requested,
-            vec!["my-team".to_string(), "alice".to_string()]
+            q.require.review_requested_teams,
+            vec!["my-team".to_string()]
         );
+        assert_eq!(q.require.review_requested_users, vec!["alice".to_string()]);
         assert!(q.require.text_tokens.is_empty());
     }
 

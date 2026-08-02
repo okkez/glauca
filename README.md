@@ -137,7 +137,7 @@ case-insensitive substring unless noted):
 | `repo:<owner/name>` | repository |
 | `base:<branch>` / `head:<branch>` | PR base / head branch |
 | `review-requested:<login>` | a requested reviewer login |
-| `team-review-requested:<slug>` | a requested reviewer team. Teams and users share one list locally, so this and `review-requested:` are interchangeable (unlike on GitHub) |
+| `team-review-requested:<slug>` | a requested reviewer team. Matches teams only, as on GitHub. The canonical `org/team-slug` spelling works — only the bare slug is cached, so the org prefix is dropped |
 
 `@me` is expanded to the current user in both layers.
 
