@@ -856,6 +856,25 @@ function avatarEl(user, cls = "avatar", displayPx = 24) {
   return span;
 }
 
+// A team's avatar (the GUI's team_avatar): GitHub renders non-human actors as a
+// rounded square instead of a circle, which is the only cue at this size — a team
+// with no image and a user with no image both fall back to a glyph. Falls back to
+// the people octicon when the team (and its org) has no avatar.
+function teamAvatarEl(user) {
+  if (user && user.avatar_url) {
+    const img = el("img", { class: "avatar avatar-team" });
+    img.src = sizedAvatarUrl(user.avatar_url, 24);
+    img.alt = user.login || "";
+    img.title = user.login || "";
+    return img;
+  }
+  const span = el("span", { class: "avatar avatar-team avatar-fallback" }, [
+    octicon("people", "", 14),
+  ]);
+  if (user) span.title = user.login;
+  return span;
+}
+
 // Octicon per review state for the badge overlay (the GUI's
 // review_state_icon); COMMENTED / DISMISSED and anything unknown fall back to
 // the comment icon.
@@ -867,11 +886,14 @@ const REVIEW_BADGE_ICON = {
 
 // A reviewer avatar with a review-state octicon badge overlaid bottom-right
 // (the GUI's reviewer_avatar): approved=green check, changes=red x,
-// pending=yellow clock, commented/dismissed=grey comment.
+// pending=yellow clock, commented/dismissed=grey comment. Teams get a rounded
+// square instead of a circle; the state badge stays, since a team request is
+// genuinely pending until someone on it reviews.
 function reviewerAvatar(user, reviewState) {
   const icon = REVIEW_BADGE_ICON[reviewState] || "comment";
+  const avatar = user && user.kind === "team" ? teamAvatarEl(user) : avatarEl(user);
   return el("span", { class: "rv-wrap" }, [
-    avatarEl(user),
+    avatar,
     octicon(icon, `rv-badge ${reviewStateClass(reviewState)}`, 14),
   ]);
 }
