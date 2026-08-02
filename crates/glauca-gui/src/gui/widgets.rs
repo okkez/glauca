@@ -2,11 +2,12 @@
 //! avatars, and title highlighting. Pure presentation helpers with no app state.
 
 use gpui::*;
+use gpui_component::Icon;
 use gpui_component::avatar::Avatar;
 use gpui_component::{ActiveTheme, Sizable, StyledExt, Theme, h_flex};
 
 use glauca_core::logic::ReviewState;
-use glauca_core::types::{ItemEntry, UserRef};
+use glauca_core::types::{ActorKind, ItemEntry, UserRef};
 
 /// Overlay GitHub Dark (Primer "dark default") colors on gpui-component's stock
 /// dark theme, which is near-black and felt too dark. Only the fields the app
@@ -178,6 +179,11 @@ pub(crate) const HEADER_AVATAR_PX: f32 = 36.;
 /// Side length of the review-state badge overlaid on a reviewer avatar.
 pub(crate) const BADGE_PX: f32 = 14.;
 
+/// Corner radius for a team avatar. GitHub renders non-human actors (teams, orgs,
+/// bots) as a rounded square rather than a circle; Primer's 24px `.avatar-3` uses
+/// `--borderRadius-medium`, which is 6px.
+pub(crate) const TEAM_AVATAR_RADIUS_PX: f32 = 6.;
+
 /// Max avatars shown per group (assignees / reviewers) before a `+N` overflow.
 pub(crate) const AVATAR_LIMIT: usize = 5;
 
@@ -191,12 +197,32 @@ pub(crate) fn sized_avatar_url(url: &str, target_px: f32) -> String {
 }
 
 /// One participant avatar: the user's GitHub avatar image, falling back to the
-/// login's initials placeholder when there is no avatar URL (teams, or older
-/// cache rows). `name` also drives the alt/initials text.
+/// login's initials placeholder when there is no avatar URL (older cache rows).
+/// `name` also drives the alt/initials text. Teams go through [`team_avatar`].
 pub(crate) fn user_avatar(user: &UserRef) -> Avatar {
     let mut a = Avatar::new()
         .name(user.login.clone())
         .with_size(px(AVATAR_PX));
+    if let Some(url) = &user.avatar_url {
+        a = a.src(sized_avatar_url(url, AVATAR_PX));
+    }
+    a
+}
+
+/// A team's avatar: the same [`Avatar`] as a user's, squared off. GitHub renders
+/// non-human actors as a rounded square instead of a circle, which is the *only*
+/// cue at this size — a team with no image and a user with no image both fall back
+/// to a glyph.
+///
+/// `rounded` reaches the inner image too: `Avatar` copies its own corner radii onto
+/// the `img` it builds, which a parent's `overflow_hidden` would not do (gpui clips
+/// with a rectangular mask). Passing no `name` selects the placeholder branch, so a
+/// team with no team/org image gets the `people` octicon rather than initials.
+pub(crate) fn team_avatar(user: &UserRef) -> Avatar {
+    let mut a = Avatar::new()
+        .placeholder(Icon::empty().path("octicons/people.svg"))
+        .with_size(px(AVATAR_PX))
+        .rounded(px(TEAM_AVATAR_RADIUS_PX));
     if let Some(url) = &user.avatar_url {
         a = a.src(sized_avatar_url(url, AVATAR_PX));
     }
@@ -251,7 +277,10 @@ pub(crate) fn reviewer_avatar(user: &UserRef, state: ReviewState, cx: &App) -> i
         .relative()
         .flex_shrink_0()
         .size(px(AVATAR_PX))
-        .child(user_avatar(user))
+        .child(match user.kind {
+            ActorKind::Team => team_avatar(user),
+            ActorKind::User => user_avatar(user),
+        })
         .child(
             svg()
                 .path(icon)

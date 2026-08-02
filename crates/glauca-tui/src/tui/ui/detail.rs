@@ -59,7 +59,7 @@ pub(super) fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             for user in &item.requested_reviewers {
                 if !reviewed_logins.contains(user.login.as_str()) {
                     reviewer_groups.push((
-                        app.icons.pending_reviewer,
+                        app.icons.pending_reviewer_icon(user.kind),
                         Style::default().fg(Color::Yellow),
                         user.login.clone(),
                     ));

@@ -129,6 +129,9 @@ const OCTICONS = {
   lock: [
     { d: "M4 4a4 4 0 0 1 8 0v2h.25c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 12.25 15h-8.5A1.75 1.75 0 0 1 2 13.25v-5.5C2 6.784 2.784 6 3.75 6H4Zm8.25 3.5h-8.5a.25.25 0 0 0-.25.25v5.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25ZM10.5 6V4a2.5 2.5 0 1 0-5 0v2Z" },
   ],
+  people: [
+    { d: "M2 5.5a3.5 3.5 0 1 1 5.898 2.549 5.508 5.508 0 0 1 3.034 4.084.75.75 0 1 1-1.482.235 4 4 0 0 0-7.9 0 .75.75 0 0 1-1.482-.236A5.507 5.507 0 0 1 3.102 8.05 3.493 3.493 0 0 1 2 5.5ZM11 4a3.001 3.001 0 0 1 2.22 5.018 5.01 5.01 0 0 1 2.56 3.012.749.749 0 0 1-.885.954.752.752 0 0 1-.549-.514 3.507 3.507 0 0 0-2.522-2.372.75.75 0 0 1-.574-.73v-.352a.75.75 0 0 1 .416-.672A1.5 1.5 0 0 0 11 5.5.75.75 0 0 1 11 4Zm-5.5-.5a2 2 0 1 0-.001 3.999A2 2 0 0 0 5.5 3.5Z" },
+  ],
   "x-circle-fill": [
     { d: "M2.343 13.657A8 8 0 1 1 13.658 2.342 8 8 0 0 1 2.343 13.657ZM6.03 4.97a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042L6.94 8 4.97 9.97a.749.749 0 0 0 .326 1.275.749.749 0 0 0 .734-.215L8 9.06l1.97 1.97a.749.749 0 0 0 1.275-.326.749.749 0 0 0-.215-.734L9.06 8l1.97-1.97a.749.749 0 0 0-.326-1.275.749.749 0 0 0-.734.215L8 6.94Z", evenodd: true },
   ],
@@ -853,6 +856,21 @@ function avatarEl(user, cls = "avatar", displayPx = 24) {
   return span;
 }
 
+// A team's avatar (the GUI's team_avatar): GitHub renders non-human actors as a
+// rounded square instead of a circle, which is the only cue at this size — a team
+// with no image and a user with no image both fall back to a glyph. Falls back to
+// the people octicon when the team (and its org) has no avatar.
+function teamAvatarEl(user) {
+  // The image case is `avatarEl`'s, only squared off — pass the extra class
+  // rather than rebuilding the <img>. Only the no-image fallback differs.
+  if (user && user.avatar_url) return avatarEl(user, "avatar avatar-team");
+  const span = el("span", { class: "avatar avatar-team avatar-fallback" }, [
+    octicon("people", "", 14),
+  ]);
+  if (user) span.title = user.login;
+  return span;
+}
+
 // Octicon per review state for the badge overlay (the GUI's
 // review_state_icon); COMMENTED / DISMISSED and anything unknown fall back to
 // the comment icon.
@@ -864,11 +882,14 @@ const REVIEW_BADGE_ICON = {
 
 // A reviewer avatar with a review-state octicon badge overlaid bottom-right
 // (the GUI's reviewer_avatar): approved=green check, changes=red x,
-// pending=yellow clock, commented/dismissed=grey comment.
+// pending=yellow clock, commented/dismissed=grey comment. Teams get a rounded
+// square instead of a circle; the state badge stays, since a team request is
+// genuinely pending until someone on it reviews.
 function reviewerAvatar(user, reviewState) {
   const icon = REVIEW_BADGE_ICON[reviewState] || "comment";
+  const avatar = user && user.kind === "team" ? teamAvatarEl(user) : avatarEl(user);
   return el("span", { class: "rv-wrap" }, [
-    avatarEl(user),
+    avatar,
     octicon(icon, `rv-badge ${reviewStateClass(reviewState)}`, 14),
   ]);
 }

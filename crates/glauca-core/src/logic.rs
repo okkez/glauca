@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use crate::db::CachedItem;
 use crate::filter::{FilterQuery, StreamFilter};
-use crate::types::{ItemEntry, LeftPaneEntry, UserRef};
+use crate::types::{ActorKind, ItemEntry, LeftPaneEntry, UserRef};
 
 /// An item is unread iff its current `updated_at` is newer than the `updated_at`
 /// the user had seen when they last read it. Never-read items (`None`) are always
@@ -105,17 +105,33 @@ pub fn decode_labels(raw: &str) -> Vec<String> {
 }
 
 /// Reviewers / assignees are stored as a JSON array of objects, e.g.
-/// '[{"login":"alice","avatar_url":"https://…"}]'. Older cache rows hold a
-/// plain string array ('["alice"]'); fall back to that for backward compat
-/// (those rows render without avatars until the next re-sync).
+/// '[{"login":"alice","avatar_url":"https://…","kind":"user"}]'. Rows written
+/// before `kind` existed omit it and decode as users (`UserRef::kind` carries
+/// `#[serde(default)]`, and `ActorKind`'s default variant is `User`). Older
+/// cache rows hold a plain string array
+/// ('["alice"]'); fall back to that for backward compat (those rows render
+/// without avatars until the next re-sync).
+///
+/// A row can also carry a `kind` this binary does not recognise (an older
+/// binary reading a row a newer one wrote). `ActorKind` has no catch-all
+/// variant, so such an element fails to deserialize; salvage the array
+/// element-by-element in that case instead of losing every reviewer for one
+/// unrecognised entry.
 pub fn decode_users(raw: &str) -> Vec<UserRef> {
     if let Ok(users) = serde_json::from_str::<Vec<UserRef>>(raw) {
         return users;
     }
-    serde_json::from_str::<Vec<String>>(raw)
+    // Legacy string-array format: must keep working, so it is checked before
+    // the per-element salvage below (which would otherwise "succeed" on it
+    // too, but decode every bare string to nothing, since a plain string
+    // never converts to a `UserRef` object).
+    if let Ok(logins) = serde_json::from_str::<Vec<String>>(raw) {
+        return logins.into_iter().map(UserRef::new).collect();
+    }
+    serde_json::from_str::<Vec<serde_json::Value>>(raw)
         .unwrap_or_default()
         .into_iter()
-        .map(UserRef::new)
+        .filter_map(|v| serde_json::from_value::<UserRef>(v).ok())
         .collect()
 }
 
@@ -129,7 +145,14 @@ pub fn decode_reviews(raw: &str) -> Vec<(UserRef, String)> {
             let login = v["login"].as_str()?.to_string();
             let state = v["state"].as_str()?.to_string();
             let avatar_url = v["avatar_url"].as_str().map(|s| s.to_string());
-            Some((UserRef { login, avatar_url }, state))
+            Some((
+                UserRef {
+                    login,
+                    avatar_url,
+                    kind: ActorKind::User,
+                },
+                state,
+            ))
         })
         .collect()
 }
@@ -188,6 +211,7 @@ pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
         author: c.author.map(|login| UserRef {
             login,
             avatar_url: c.author_avatar_url,
+            kind: ActorKind::User,
         }),
         state: c.state,
         updated_at: c.updated_at,
@@ -388,6 +412,25 @@ mod tests {
     }
 
     #[test]
+    fn decode_users_reads_the_actor_kind() {
+        let users = decode_users(
+            r#"[{"login":"alice","avatar_url":"https://a/x.png","kind":"user"},
+                {"login":"my-team","avatar_url":null,"kind":"team"}]"#,
+        );
+        let kinds: Vec<ActorKind> = users.iter().map(|u| u.kind).collect();
+        assert_eq!(kinds, vec![ActorKind::User, ActorKind::Team]);
+    }
+
+    #[test]
+    fn decode_users_treats_a_missing_kind_as_a_user() {
+        // Rows cached before `kind` existed carry no discriminator. Reading them as
+        // users is what bounds the upgrade window to "teams look like users until the
+        // next full fetch" instead of the reverse, which would mis-render real users.
+        let users = decode_users(r#"[{"login":"my-team","avatar_url":null}]"#);
+        assert_eq!(users[0].kind, ActorKind::User);
+    }
+
+    #[test]
     fn decode_users_falls_back_to_legacy_string_array() {
         // Old cache rows stored a plain string array; they should still parse
         // (with no avatar) until the next re-sync.
@@ -395,6 +438,21 @@ mod tests {
         let logins: Vec<&str> = users.iter().map(|u| u.login.as_str()).collect();
         assert_eq!(logins, vec!["bob", "carol"]);
         assert!(users.iter().all(|u| u.avatar_url.is_none()));
+        assert!(users.iter().all(|u| u.kind == ActorKind::User));
+    }
+
+    #[test]
+    fn decode_users_salvages_well_formed_entries_around_an_unrecognised_kind() {
+        // An older binary must not lose every reviewer just because a newer binary
+        // wrote a `kind` it doesn't know about (e.g. a future `"bot"` variant):
+        // the well-formed entries in the same array should still come through,
+        // rather than the whole row decoding to nothing.
+        let users = decode_users(
+            r#"[{"login":"alice","avatar_url":null,"kind":"user"},
+                {"login":"some-bot","avatar_url":null,"kind":"bot"}]"#,
+        );
+        let logins: Vec<&str> = users.iter().map(|u| u.login.as_str()).collect();
+        assert_eq!(logins, vec!["alice"]);
     }
 
     #[test]
