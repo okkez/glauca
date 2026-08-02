@@ -226,8 +226,11 @@ pub(crate) fn team_avatar(user: &UserRef, cx: &App) -> impl IntoElement {
         .justify_center()
         .bg(cx.theme().accent);
     match &user.avatar_url {
-        Some(url) => frame
-            .child(img(SharedString::from(sized_avatar_url(url, AVATAR_PX))).size(px(AVATAR_PX))),
+        Some(url) => frame.child(
+            img(SharedString::from(sized_avatar_url(url, AVATAR_PX)))
+                .size(px(AVATAR_PX))
+                .rounded(px(TEAM_AVATAR_RADIUS_PX)),
+        ),
         None => frame.child(
             svg()
                 .path("octicons/people.svg")
