@@ -809,6 +809,11 @@ mod tests {
             kinds,
             vec![ActorKind::User, ActorKind::Team, ActorKind::Team]
         );
+        // `kind` is written for both variants rather than left implicit: the decode-side
+        // default exists only for rows cached before the field existed.
+        let raw: Vec<serde_json::Value> = serde_json::from_str(&item.requested_reviewers).unwrap();
+        assert_eq!(raw[0]["kind"], "user");
+        assert_eq!(raw[1]["kind"], "team");
         // A team's avatar (its own, or its org's) is fetched like a user's. Only a
         // team without one has no image, and that is the icon-fallback case.
         assert_eq!(
