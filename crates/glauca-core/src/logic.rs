@@ -396,6 +396,25 @@ mod tests {
     }
 
     #[test]
+    fn decode_users_reads_the_actor_kind() {
+        let users = decode_users(
+            r#"[{"login":"alice","avatar_url":"https://a/x.png","kind":"user"},
+                {"login":"my-team","avatar_url":null,"kind":"team"}]"#,
+        );
+        let kinds: Vec<ActorKind> = users.iter().map(|u| u.kind).collect();
+        assert_eq!(kinds, vec![ActorKind::User, ActorKind::Team]);
+    }
+
+    #[test]
+    fn decode_users_treats_a_missing_kind_as_a_user() {
+        // Rows cached before `kind` existed carry no discriminator. Reading them as
+        // users is what bounds the upgrade window to "teams look like users until the
+        // next full fetch" instead of the reverse, which would mis-render real users.
+        let users = decode_users(r#"[{"login":"my-team","avatar_url":null}]"#);
+        assert_eq!(users[0].kind, ActorKind::User);
+    }
+
+    #[test]
     fn decode_users_falls_back_to_legacy_string_array() {
         // Old cache rows stored a plain string array; they should still parse
         // (with no avatar) until the next re-sync.
@@ -403,6 +422,7 @@ mod tests {
         let logins: Vec<&str> = users.iter().map(|u| u.login.as_str()).collect();
         assert_eq!(logins, vec!["bob", "carol"]);
         assert!(users.iter().all(|u| u.avatar_url.is_none()));
+        assert!(users.iter().all(|u| u.kind == ActorKind::User));
     }
 
     #[test]
