@@ -42,6 +42,9 @@ pub struct Icons {
     pub mode_badge: Option<&'static str>,
     /// Requested-but-not-yet-submitted reviewer, by actor kind. Private: reached
     /// through `pending_reviewer_icon` so the kind→glyph mapping lives in one place.
+    /// `review_decision_badge` also reads this field directly for the
+    /// `REVIEW_REQUIRED` PR-level decision: a whole-PR review decision has no
+    /// actor kind, so there is no `pending_reviewer_icon` call to route through.
     pending_reviewer: &'static str,
     reviewer_team: &'static str,
     merged: &'static str,
