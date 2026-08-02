@@ -861,13 +861,9 @@ function avatarEl(user, cls = "avatar", displayPx = 24) {
 // with no image and a user with no image both fall back to a glyph. Falls back to
 // the people octicon when the team (and its org) has no avatar.
 function teamAvatarEl(user) {
-  if (user && user.avatar_url) {
-    const img = el("img", { class: "avatar avatar-team" });
-    img.src = sizedAvatarUrl(user.avatar_url, 24);
-    img.alt = user.login || "";
-    img.title = user.login || "";
-    return img;
-  }
+  // The image case is `avatarEl`'s, only squared off — pass the extra class
+  // rather than rebuilding the <img>. Only the no-image fallback differs.
+  if (user && user.avatar_url) return avatarEl(user, "avatar avatar-team");
   const span = el("span", { class: "avatar avatar-team avatar-fallback" }, [
     octicon("people", "", 14),
   ]);
