@@ -110,14 +110,27 @@ pub fn decode_labels(raw: &str) -> Vec<String> {
 /// `#[serde(default)]`). Older cache rows hold a plain string array
 /// ('["alice"]'); fall back to that for backward compat (those rows render
 /// without avatars until the next re-sync).
+///
+/// A row can also carry a `kind` this binary does not recognise (an older
+/// binary reading a row a newer one wrote). `ActorKind` has no catch-all
+/// variant, so such an element fails to deserialize; salvage the array
+/// element-by-element in that case instead of losing every reviewer for one
+/// unrecognised entry.
 pub fn decode_users(raw: &str) -> Vec<UserRef> {
     if let Ok(users) = serde_json::from_str::<Vec<UserRef>>(raw) {
         return users;
     }
-    serde_json::from_str::<Vec<String>>(raw)
+    // Legacy string-array format: must keep working, so it is checked before
+    // the per-element salvage below (which would otherwise "succeed" on it
+    // too, but decode every bare string to nothing, since a plain string
+    // never converts to a `UserRef` object).
+    if let Ok(logins) = serde_json::from_str::<Vec<String>>(raw) {
+        return logins.into_iter().map(UserRef::new).collect();
+    }
+    serde_json::from_str::<Vec<serde_json::Value>>(raw)
         .unwrap_or_default()
         .into_iter()
-        .map(UserRef::new)
+        .filter_map(|v| serde_json::from_value::<UserRef>(v).ok())
         .collect()
 }
 
@@ -425,6 +438,20 @@ mod tests {
         assert_eq!(logins, vec!["bob", "carol"]);
         assert!(users.iter().all(|u| u.avatar_url.is_none()));
         assert!(users.iter().all(|u| u.kind == ActorKind::User));
+    }
+
+    #[test]
+    fn decode_users_salvages_well_formed_entries_around_an_unrecognised_kind() {
+        // An older binary must not lose every reviewer just because a newer binary
+        // wrote a `kind` it doesn't know about (e.g. a future `"bot"` variant):
+        // the well-formed entries in the same array should still come through,
+        // rather than the whole row decoding to nothing.
+        let users = decode_users(
+            r#"[{"login":"alice","avatar_url":null,"kind":"user"},
+                {"login":"some-bot","avatar_url":null,"kind":"bot"}]"#,
+        );
+        let logins: Vec<&str> = users.iter().map(|u| u.login.as_str()).collect();
+        assert_eq!(logins, vec!["alice"]);
     }
 
     #[test]
