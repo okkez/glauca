@@ -18,9 +18,10 @@ use ratatui::style::{Color, Style};
 /// The glyph for each semantic icon the TUI renders.
 ///
 /// Public fields are glyphs a call site reads directly. The fields below
-/// `mode_badge` are private and reached only through the `item_icon` / `review_*`
-/// methods, which map a domain string (item kind+state, review state/decision)
-/// to a glyph — keeping that mapping in one place instead of at every call site.
+/// `mode_badge` are private and reached only through the `item_icon` /
+/// `review_*` / `pending_reviewer_icon` methods, which map a domain string
+/// (item kind+state, review state/decision) or an [`ActorKind`] to a glyph —
+/// keeping that mapping in one place instead of at every call site.
 #[derive(Debug, Clone)]
 pub struct Icons {
     /// Marker shown before a saved query in the left pane: the GitHub logo in

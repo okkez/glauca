@@ -136,7 +136,7 @@ case-insensitive substring unless noted):
 | `milestone:<title>` | milestone title (substring; value cannot contain spaces) |
 | `repo:<owner/name>` | repository |
 | `base:<branch>` / `head:<branch>` | PR base / head branch |
-| `review-requested:<login>` | a requested reviewer login |
+| `review-requested:<login>` | a requested reviewer login (users only; teams use the row below) |
 | `team-review-requested:<slug>` | a requested reviewer team. Matches teams only, as on GitHub. The canonical `org/team-slug` spelling works — only the bare slug is cached, so the org prefix is dropped |
 
 `@me` is expanded to the current user in both layers.
