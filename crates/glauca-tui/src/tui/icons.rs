@@ -12,6 +12,7 @@
 //! expanders ▸) are layout chrome, not semantic icons, and stay hardcoded in
 //! `ui.rs`.
 
+use glauca_core::types::ActorKind;
 use ratatui::style::{Color, Style};
 
 /// The glyph for each semantic icon the TUI renders.
@@ -29,7 +30,6 @@ pub struct Icons {
     pub refresh: &'static str,
     pub new_item: &'static str,
     pub private: &'static str,
-    pub pending_reviewer: &'static str,
     pub syncing: &'static str,
     pub bell: &'static str,
     pub clock: &'static str,
@@ -39,6 +39,10 @@ pub struct Icons {
     /// never renders as tofu on a terminal without the icon font), `Some` in
     /// the icon-font set.
     pub mode_badge: Option<&'static str>,
+    /// Requested-but-not-yet-submitted reviewer, by actor kind. Private: reached
+    /// through `pending_reviewer_icon` so the kind→glyph mapping lives in one place.
+    pending_reviewer: &'static str,
+    reviewer_team: &'static str,
     merged: &'static str,
     pr: &'static str,
     issue: &'static str,
@@ -68,12 +72,13 @@ impl Icons {
             refresh: "↻",
             new_item: "●",
             private: "🔒",
-            pending_reviewer: "○",
             syncing: "⟳",
             bell: "🔔",
             clock: "🕐",
             filter_stream: "↳",
             mode_badge: None,
+            pending_reviewer: "○",
+            reviewer_team: "👥",
             merged: "⬡",
             pr: "⎇",
             issue: "○",
@@ -98,12 +103,13 @@ impl Icons {
             refresh: "\u{f021}",          // fa arrows-rotate
             new_item: "\u{f111}",         // fa circle
             private: "\u{f023}",          // fa lock
-            pending_reviewer: "\u{f192}", // fa circle-dot
             syncing: "\u{f021}",          // fa arrows-rotate
             bell: "\u{f0f3}",             // fa bell
             clock: "\u{f017}",            // fa clock
             filter_stream: "\u{f160}",    // fa arrow-down-wide-short
             mode_badge: Some("\u{f6be}"), // fa cat
+            pending_reviewer: "\u{f192}", // fa circle-dot
+            reviewer_team: "\u{f0c0}",    // fa users
             merged: "\u{f387}",           // fa code-merge
             pr: "\u{e13c}",               // fa code-pull-request
             issue: "\u{f192}",            // fa circle-dot
@@ -136,6 +142,18 @@ impl Icons {
             "CHANGES_REQUESTED" => (self.review_changes, Style::default().fg(Color::Red)),
             "REVIEW_REQUIRED" => (self.pending_reviewer, Style::default().fg(Color::Yellow)),
             _ => ("", Style::default()),
+        }
+    }
+
+    /// Glyph for a reviewer who was requested but has not submitted a review, by
+    /// actor kind. Teams get their own glyph: the GUI distinguishes them by avatar
+    /// shape (GitHub renders non-human actors as a rounded square), which a
+    /// terminal cannot do, so without this a team is indistinguishable from a user
+    /// who has no avatar.
+    pub fn pending_reviewer_icon(&self, kind: ActorKind) -> &'static str {
+        match kind {
+            ActorKind::Team => self.reviewer_team,
+            ActorKind::User => self.pending_reviewer,
         }
     }
 
@@ -177,6 +195,25 @@ mod tests {
     fn review_state_badge_maps(#[case] state: &str, #[case] expected: &str) {
         let i = Icons::unicode();
         assert_eq!(i.review_state_badge(state).0, expected);
+    }
+
+    #[rstest]
+    #[case::user(ActorKind::User, "○")]
+    #[case::team(ActorKind::Team, "👥")]
+    fn pending_reviewer_icon_distinguishes_teams(#[case] kind: ActorKind, #[case] expected: &str) {
+        assert_eq!(Icons::unicode().pending_reviewer_icon(kind), expected);
+    }
+
+    #[test]
+    fn both_sets_distinguish_teams_from_users() {
+        // The GUI tells a team from a user by avatar shape; a terminal can only do it
+        // by glyph, so neither set may reuse one glyph for both.
+        for icons in [Icons::unicode(), Icons::icon_font()] {
+            assert_ne!(
+                icons.pending_reviewer_icon(ActorKind::Team),
+                icons.pending_reviewer_icon(ActorKind::User)
+            );
+        }
     }
 
     #[test]
