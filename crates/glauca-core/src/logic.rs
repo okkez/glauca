@@ -105,9 +105,11 @@ pub fn decode_labels(raw: &str) -> Vec<String> {
 }
 
 /// Reviewers / assignees are stored as a JSON array of objects, e.g.
-/// '[{"login":"alice","avatar_url":"https://…"}]'. Older cache rows hold a
-/// plain string array ('["alice"]'); fall back to that for backward compat
-/// (those rows render without avatars until the next re-sync).
+/// '[{"login":"alice","avatar_url":"https://…","kind":"user"}]'. Rows written
+/// before `kind` existed omit it and decode as users (`ActorKind`'s
+/// `#[serde(default)]`). Older cache rows hold a plain string array
+/// ('["alice"]'); fall back to that for backward compat (those rows render
+/// without avatars until the next re-sync).
 pub fn decode_users(raw: &str) -> Vec<UserRef> {
     if let Ok(users) = serde_json::from_str::<Vec<UserRef>>(raw) {
         return users;
