@@ -276,7 +276,7 @@ ul { list-style: none; margin: 0; padding: 0; }
 /* Teams and orgs are non-human actors; GitHub renders them as a rounded square
    (Primer --borderRadius-medium = 6px) instead of a circle. At 24px the shape is
    the only cue — both a team and an avatar-less user fall back to a glyph. */
-.avatar-team { border-radius: 6px; }
+.avatar.avatar-team { border-radius: 6px; }
 
 /* Reviewer avatar with a review-state octicon badge overlaid bottom-right
    (the GUI's reviewer_avatar): the badge background shows through the filled
