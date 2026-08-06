@@ -266,7 +266,7 @@ impl App {
     /// The status bar turns this into a warning; see
     /// [`glauca_core::logic::has_unexpanded_me`].
     pub fn me_unexpanded(&self) -> bool {
-        glauca_core::logic::has_unexpanded_me_in(
+        glauca_core::logic::has_unexpanded_me(
             self.current_user.as_deref(),
             self.stream_filter.as_deref(),
             self.filter.value(),
@@ -286,14 +286,26 @@ impl App {
         self.status = Some(format!("signed in as {login}"));
         self.current_user = Some(login);
         if let Some(query_id) = self.selected_root_query_id() {
-            let items = std::mem::take(&mut self.items);
-            self.recompute_unread_counts_for_query(query_id, &items);
-            self.items = items;
+            self.recompute_unread_counts_live(query_id);
         }
         // A resolved login can *shrink* the list as well as grow it — `-author:@me`
         // matched everything while `@me` was literal — so the cursor can be left
         // past the end, which empties the detail pane and makes `j` do nothing.
         self.clamp_item_cursor();
+    }
+
+    /// [`Self::recompute_unread_counts_for_query`] against the items already on
+    /// screen. Separate because that one borrows `items` while this borrows `self`
+    /// mutably; callers with nothing fresher to install would otherwise have to
+    /// move `self.items` out and back just to satisfy the borrow checker.
+    pub(crate) fn recompute_unread_counts_live(&mut self, query_id: i64) {
+        let updates = glauca_core::logic::compute_unread_counts(
+            &self.entries,
+            query_id,
+            &self.items,
+            self.current_user.as_deref(),
+        );
+        self.unread_counts.extend(updates);
     }
 
     pub(crate) fn recompute_unread_counts_for_query(&mut self, query_id: i64, items: &[ItemEntry]) {
@@ -429,41 +441,24 @@ mod tests {
         assert_eq!(app.filtered_items().len(), 2);
     }
 
-    // An `@me` filter with no login matches nothing and says nothing about why, so
-    // the status bar has to. The warning follows whichever filter is in play.
+    /// `me_unexpanded` only forwards `App`'s two filters to core, which owns and
+    /// tests the predicate itself. What's worth pinning here is that *both* fields
+    /// are wired up — a wrapper that forgot the search box would look fine until
+    /// someone typed `@me` into it. Whether it clears is covered end-to-end by the
+    /// status-bar render test.
     #[rstest]
-    // Stream filter or search box — either one is enough to empty the list.
-    #[case::stream_filter(None, Some("author:@me"), "", true)]
-    #[case::inline_filter(None, None, "author:@me", true)]
-    #[case::both(None, Some("author:@me"), "assignee:@me", true)]
-    // Nothing to expand → nothing to warn about.
-    #[case::no_me_token(None, Some("state:open"), "fix", false)]
-    #[case::no_filters_at_all(None, None, "", false)]
-    // Login known → `@me` works, so warning here would be noise.
-    #[case::login_known(Some("alice"), Some("author:@me"), "", false)]
-    fn me_unexpanded(
-        #[case] current_user: Option<&str>,
+    #[case::from_the_stream_filter(Some("author:@me"), "")]
+    #[case::from_the_search_box(None, "author:@me")]
+    fn me_unexpanded_reads_both_filters(
         #[case] stream_filter: Option<&str>,
         #[case] inline_filter: &str,
-        #[case] expected: bool,
     ) {
         let mut app = App::new(vec![]);
-        app.current_user = current_user.map(Into::into);
         app.stream_filter = stream_filter.map(Into::into);
         app.filter = ta(inline_filter);
-        assert_eq!(app.me_unexpanded(), expected);
-    }
-
-    /// The warning must clear itself once the login lands — it is a live property of
-    /// the filters, not a flag someone has to remember to reset.
-    #[test]
-    fn me_unexpanded_clears_when_the_login_resolves() {
-        let mut app = make_app_with_items(&["alice's PR"]);
-        app.stream_filter = Some("author:@me".into());
         assert!(app.me_unexpanded());
 
-        app.adopt_current_user("alice".into());
-
+        app.current_user = Some("alice".into());
         assert!(!app.me_unexpanded());
     }
 

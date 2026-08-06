@@ -1183,7 +1183,12 @@ fn current_user_retry_delay_secs(attempt: u32, sync_interval_secs: u64) -> u64 {
 ///
 /// Stops on the first success, on a refusal that a retry cannot change (see
 /// [`github::CurrentUserError`]), or once the front-end has hung up.
-pub async fn current_user_retry_task(gh: Octocrab, tx: mpsc::Sender<AppMessage>, sync: SyncConfig) {
+pub async fn current_user_retry_task(
+    gh: Octocrab,
+    tx: mpsc::Sender<AppMessage>,
+    sync: SyncConfig,
+    gate: RateLimitGate,
+) {
     let mut attempt: u32 = 0;
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(
@@ -1193,6 +1198,14 @@ pub async fn current_user_retry_task(gh: Octocrab, tx: mpsc::Sender<AppMessage>,
         // Nobody left to tell.
         if tx.is_closed() {
             return;
+        }
+        // Honour the same gate the sync worker does: while it is closed the app has
+        // decided not to talk to GitHub at all, and this task is not the exception
+        // that gets to keep knocking. Not counted as an attempt — nothing was tried,
+        // so the backoff shouldn't grow.
+        if !gate.is_open(Utc::now().timestamp()) {
+            debug!("skip current-user retry: rate-limited");
+            continue;
         }
         match github::get_current_user(&gh).await {
             Ok(cu) => {
@@ -1514,7 +1527,12 @@ impl Engine {
         // Chase the login in the background when the startup lookup couldn't reach
         // GitHub, so `@me` starts working mid-session instead of after a restart.
         if retry_current_user {
-            tokio::spawn(current_user_retry_task(gh.clone(), msg_tx.clone(), sync));
+            tokio::spawn(current_user_retry_task(
+                gh.clone(),
+                msg_tx.clone(),
+                sync,
+                gate.clone(),
+            ));
         }
         // Spawn the command-handling loop.
         tokio::spawn(command_loop(
@@ -2121,41 +2139,34 @@ mod tests {
         assert_eq!(complaint, None);
     }
 
-    /// Against a 300s sync interval, so the doublings and the cap are both visible.
+    /// `(attempt, sync interval) -> wait`. A zero would spin; anything past the sync
+    /// interval would leave the user waiting after the network is demonstrably back.
     #[rstest]
     // Doubles from the base …
-    #[case::first_retry(0, CURRENT_USER_RETRY_BASE_SECS)]
-    #[case::second_retry(1, 60)]
-    #[case::third_retry(2, 120)]
-    #[case::fourth_retry(3, 240)]
+    #[case::first_retry(0, 300, CURRENT_USER_RETRY_BASE_SECS)]
+    #[case::second_retry(1, 300, 60)]
+    #[case::third_retry(2, 300, 120)]
+    #[case::fourth_retry(3, 300, 240)]
     // … then stops at the sync interval and stays there, so a reconnect is noticed
     // within one ordinary sync cycle.
-    #[case::capped(4, 300)]
-    #[case::still_capped(60, 300)]
+    #[case::capped(4, 300, 300)]
+    #[case::still_capped(60, 300, 300)]
     // Past 63 the doubling would overflow the shift; it must saturate into the cap
     // rather than panic (a long-lived unreachable session keeps counting).
-    #[case::shift_overflow(u32::MAX, 300)]
-    fn current_user_retry_delay(#[case] attempt: u32, #[case] expected: u64) {
-        assert_eq!(current_user_retry_delay_secs(attempt, 300), expected);
-    }
-
-    /// Every wait is a real backoff and never longer than the app's own polling
-    /// cadence — a zero would spin, and anything past the sync interval would leave
-    /// the user waiting after the network is demonstrably back.
-    #[rstest]
-    // A sync interval below the base must not invert the range into an empty one.
-    #[case::interval_below_base(10)]
-    #[case::default_interval(DEFAULT_SYNC_INTERVAL_SECS)]
-    #[case::long_interval(1800)]
-    fn current_user_retry_delay_stays_within_bounds(#[case] interval: u64) {
-        let ceiling = interval.max(CURRENT_USER_RETRY_BASE_SECS);
-        for attempt in 0..64 {
-            let d = current_user_retry_delay_secs(attempt, interval);
-            assert!(
-                (CURRENT_USER_RETRY_BASE_SECS..=ceiling).contains(&d),
-                "attempt {attempt} at a {interval}s interval waits {d}s, outside the intended range"
-            );
-        }
+    #[case::shift_overflow(u32::MAX, 300, 300)]
+    // At the default interval the cap is reached on the second retry.
+    #[case::default_interval(1, DEFAULT_SYNC_INTERVAL_SECS, 60)]
+    #[case::default_interval_capped(9, DEFAULT_SYNC_INTERVAL_SECS, 60)]
+    // A sync interval below the base must not invert the range into an empty one —
+    // the base wins, rather than producing a busy-loop of ever-shorter waits.
+    #[case::interval_below_base(0, 10, CURRENT_USER_RETRY_BASE_SECS)]
+    #[case::interval_below_base_capped(9, 10, CURRENT_USER_RETRY_BASE_SECS)]
+    fn current_user_retry_delay(
+        #[case] attempt: u32,
+        #[case] interval: u64,
+        #[case] expected: u64,
+    ) {
+        assert_eq!(current_user_retry_delay_secs(attempt, interval), expected);
     }
 
     #[test]

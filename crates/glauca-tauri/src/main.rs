@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
     // Bring up DB + GitHub client + engine on the Tauri-managed tokio runtime, so
     // the engine's internal `tokio::spawn` tasks share that runtime with the async
     // command handlers below.
-    let (engine, init_json, current_user, pool, query_names) =
+    let (engine, init_entries, current_user, pool, query_names) =
         tauri::async_runtime::block_on(async {
             let pool = db::open_pool(&db::resolve_db_path(cli.db_path)).await?;
             let gh_client = github::build_client()?;
@@ -79,13 +79,18 @@ fn main() -> anyhow::Result<()> {
             let pool_for_state = pool.clone();
             let (engine, init) = Engine::start(pool, gh_client, sync, maintenance).await?;
             let current_user = commands::ResolvedUser {
-                login: init.current_user.clone(),
-                name: init.current_user_name.clone(),
-                avatar_url: init.current_user_avatar_url.clone(),
+                login: init.current_user,
+                name: init.current_user_name,
+                avatar_url: init.current_user_avatar_url,
             };
             let query_names = commands::query_name_map(&init.entries);
-            let init_json = serde_json::to_value(&init)?;
-            anyhow::Ok((engine, init_json, current_user, pool_for_state, query_names))
+            anyhow::Ok((
+                engine,
+                init.entries,
+                current_user,
+                pool_for_state,
+                query_names,
+            ))
         })?;
 
     let sender = engine.sender();
@@ -103,7 +108,7 @@ fn main() -> anyhow::Result<()> {
     tauri::Builder::default()
         .manage(AppState {
             tx: sender,
-            init: init_json,
+            init_entries,
             current_user,
             pool,
             notifications_enabled,

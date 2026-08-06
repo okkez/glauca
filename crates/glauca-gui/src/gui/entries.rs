@@ -157,7 +157,7 @@ impl GlaucaApp {
     /// The status footer turns this into a warning; see
     /// [`glauca_core::logic::has_unexpanded_me`].
     pub(crate) fn me_unexpanded(&self) -> bool {
-        glauca_core::logic::has_unexpanded_me_in(
+        glauca_core::logic::has_unexpanded_me(
             self.current_user.as_deref(),
             self.stream_filter.as_deref(),
             &self.filter,

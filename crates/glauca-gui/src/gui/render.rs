@@ -23,10 +23,13 @@ impl GlaucaApp {
         if let Some(url) = &self.current_user_avatar_url {
             avatar = avatar.src(sized_avatar_url(url, HEADER_AVATAR_PX));
         }
+        // Names both causes rather than asserting the token is missing: the lookup
+        // also fails when the app starts before the network is up, and the engine
+        // may still be retrying. Matches the Tauri header's wording.
         let login_line = self
             .current_user
             .clone()
-            .unwrap_or_else(|| "not authenticated".to_string());
+            .unwrap_or_else(|| "login unknown".to_string());
         let header = h_flex()
             .w_full()
             .flex_shrink_0()

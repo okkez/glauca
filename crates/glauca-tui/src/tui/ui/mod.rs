@@ -226,56 +226,32 @@ mod tests {
     }
 
     /// An `@me` filter with no login empties the list and, without this, explains
-    /// nothing. The warning has to reach the screen, not just the predicate.
-    #[test]
-    fn warning_appears_and_clears_with_the_login() {
-        let mut app = make_app_with_items(&["alice's PR"]);
-        app.stream_filter = Some("author:@me".into());
-
-        assert!(
-            bottom_rows(&app, 200).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
-            "no warning on screen while `@me` matches nothing"
-        );
-
-        app.adopt_current_user("alice".into());
-
-        assert!(
-            !bottom_rows(&app, 200).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
-            "warning still on screen after the login resolved"
-        );
-    }
-
-    /// Neither line wraps, and the status bar's key hints alone run past 120
-    /// columns — so a warning sharing that line is invisible on a normal terminal.
-    /// It has to survive the widths people actually use, not just the wide one the
-    /// first version of this test happened to pick.
+    /// nothing — so the warning has to reach the screen, disappear once the login
+    /// lands, and give its row back when it does.
+    ///
+    /// Run at several widths because neither line wraps and the status bar's key
+    /// hints alone run past 120 columns: a warning sharing that line is invisible on
+    /// a normal terminal, which is exactly what the first version of this test (at
+    /// width 200 only) failed to catch.
     #[rstest]
     #[case::narrow(80)]
     #[case::common(120)]
     #[case::wide(200)]
-    fn warning_survives_realistic_widths(#[case] width: u16) {
+    fn warning_shows_clears_and_frees_its_row(#[case] width: u16) {
         let mut app = make_app_with_items(&["alice's PR"]);
         app.stream_filter = Some("author:@me".into());
+        let with_warning = bottom_rows(&app, width);
         assert!(
-            bottom_rows(&app, width).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
-            "warning clipped off a {width}-column screen"
+            with_warning.contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
+            "warning missing or clipped off a {width}-column screen"
         );
-    }
-
-    /// The warning takes a row from the panes, so it must give it back — otherwise
-    /// a resolved login leaves a blank strip above the status bar.
-    #[test]
-    fn warning_row_is_reclaimed_once_it_clears() {
-        let mut app = make_app_with_items(&["alice's PR"]);
-        app.stream_filter = Some("author:@me".into());
-        let with_warning = bottom_rows(&app, 120);
 
         app.adopt_current_user("alice".into());
-        let without = bottom_rows(&app, 120);
+        let without = bottom_rows(&app, width);
 
-        assert_ne!(
-            with_warning, without,
-            "the warning row is still occupying the screen"
+        assert!(
+            !without.contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
+            "warning still on screen after the login resolved"
         );
         assert!(
             without.lines().next().is_some_and(|l| l.trim() != ""),

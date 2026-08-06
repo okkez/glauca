@@ -283,10 +283,15 @@ pub enum SearchError {
 /// make this distinction, so it lives in one place — reading it wrong means either
 /// hammering a wall or giving up on something that would work in an hour.
 fn is_rate_limit_response(status: u16, message: &str) -> bool {
+    if status == 429 {
+        return true;
+    }
+    // Only 403 is ambiguous enough to be worth reading the message for.
+    if status != 403 {
+        return false;
+    }
     let msg = message.to_lowercase();
-    status == 429
-        || (status == 403
-            && (msg.contains("rate limit") || msg.contains("abuse") || msg.contains("secondary")))
+    msg.contains("rate limit") || msg.contains("abuse") || msg.contains("secondary")
 }
 
 /// Classify an octocrab error: HTTP 429, or 403 whose message names a rate/abuse

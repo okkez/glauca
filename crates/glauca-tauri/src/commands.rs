@@ -13,11 +13,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use glauca_core::actions::CustomActions;
-use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
+use glauca_core::engine::{EngineCommand, EngineInit, ReviewEvent, load_left_pane_entries};
 use glauca_core::filter::{FilterQuery, StreamFilter};
 use glauca_core::logic::{
     ChangeCounts, ME_UNEXPANDED_WARNING, compute_unread_counts, count_changes, expand_me,
-    has_unexpanded_me_in,
+    has_unexpanded_me,
 };
 use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
 use serde::Serialize;
@@ -44,8 +44,12 @@ pub struct ResolvedUser {
 /// Shared state held by Tauri.
 pub struct AppState {
     pub tx: Sender<EngineCommand>,
-    /// Pre-serialized initial state (left-pane entries + current user) for `init`.
-    pub init: serde_json::Value,
+    /// The left-pane entries as they stood at startup, for `init`.
+    ///
+    /// Kept as entries rather than the finished JSON because the other half of
+    /// `init` — the authenticated user — can change after startup, so the payload
+    /// has to be rebuilt per call anyway (see [`init`]).
+    pub init_entries: Vec<LeftPaneEntry>,
     /// The authenticated user, for expanding `@me` and for the sidebar header.
     ///
     /// Shared and mutable because it can arrive late: when the lookup at startup
@@ -75,10 +79,14 @@ impl AppState {
     ///
     /// Cloned rather than handing out the guard: callers only need a `&str`, and
     /// holding a read lock across their work would serialize them for no reason.
-    /// Poisoning is recovered from — the value is a plain `Option<String>`, which
-    /// a panicking writer cannot leave half-updated.
+    /// Poisoning is recovered from — the value is a plain `ResolvedUser`, which a
+    /// panicking writer cannot leave half-updated.
     fn login(&self) -> Option<String> {
-        self.user().login
+        self.current_user
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .login
+            .clone()
     }
 
     /// The authenticated user as it stands *now*, cloned for the same reasons as
@@ -107,37 +115,27 @@ async fn dispatch(tx: &Sender<EngineCommand>, cmd: EngineCommand) -> Result<(), 
     tx.send(cmd).await.map_err(|e| e.to_string())
 }
 
-/// Return the initial state (left-pane entries + current user) captured at
-/// startup. Synchronous: it is just a cached JSON value.
+/// Return the initial state: the left-pane entries captured at startup, plus the
+/// authenticated user *as it stands now*.
+///
+/// Rebuilt per call rather than served from a snapshot because the login can
+/// arrive after startup, and a WebView reload re-runs the front-end's whole
+/// startup against this payload — a snapshot would resurrect the stale
+/// "not authenticated" state permanently, since `CurrentUserResolved` has already
+/// been sent and won't come again.
+///
+/// Assembled as an `EngineInit` so serde owns the field names. Spelling them out
+/// here instead would be a second, unchecked copy of that mapping.
 #[tauri::command]
-pub fn init(state: State<'_, AppState>) -> serde_json::Value {
-    let mut init = state.init.clone();
-    // Overlay the user as it stands now. The snapshot was serialized at startup,
-    // where the lookup may have failed; a WebView reload re-runs the front-end's
-    // whole startup against this value, and would otherwise resurrect the stale
-    // "not authenticated" state — permanently, since `CurrentUserResolved` has
-    // already been sent and won't come again.
-    if let Some(obj) = init.as_object_mut() {
-        let user = state.user();
-        for (key, value) in [
-            ("current_user", serde_json::json!(user.login)),
-            ("current_user_name", serde_json::json!(user.name)),
-            (
-                "current_user_avatar_url",
-                serde_json::json!(user.avatar_url),
-            ),
-        ] {
-            // These key names track `EngineInit`'s serde field names by hand.
-            // Renaming a field there would otherwise leave this inserting a dead
-            // key while JS reads the stale serialized one — silently.
-            let replaced = obj.insert(key.into(), value);
-            debug_assert!(
-                replaced.is_some(),
-                "{key} is not a field of EngineInit's JSON; the overlay has drifted"
-            );
-        }
-    }
-    init
+pub fn init(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let user = state.user();
+    serde_json::to_value(EngineInit {
+        entries: state.init_entries.clone(),
+        current_user: user.login,
+        current_user_name: user.name,
+        current_user_avatar_url: user.avatar_url,
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Quit the app (Glauca > Quit). A command rather than a window close from JS,
@@ -315,7 +313,7 @@ pub async fn filter_items(
     let su = login.as_deref();
     let stream_q = stream_filter.as_deref().map(|s| StreamFilter::parse(s, su));
     let inline_q = FilterQuery::parse(&expand_me(su, &inline_filter));
-    let me_warning = has_unexpanded_me_in(su, stream_filter.as_deref(), &inline_filter)
+    let me_warning = has_unexpanded_me(su, stream_filter.as_deref(), &inline_filter)
         .then_some(ME_UNEXPANDED_WARNING);
     Ok(FilterResult {
         items: items

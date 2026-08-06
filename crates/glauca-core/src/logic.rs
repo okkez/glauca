@@ -301,34 +301,29 @@ fn expand_me_line(line: &str, login: &str) -> String {
         .join(" ")
 }
 
-/// `true` when `filter` leans on `@me` but the login is still unknown, so
-/// [`expand_me`] leaves the token literal and the filter matches nobody.
+/// `true` when the filters shaping a view — the filter stream's (`None` for a root
+/// query) ANDed with the inline search box — lean on `@me` while the login is
+/// unknown, so [`expand_me`] leaves the token literal and they match nobody.
 ///
 /// This is the *silent* failure mode worth surfacing: an unresolved login (an
-/// offline start, a failed `/user` call) turns a working filter into an empty
-/// list with nothing on screen to explain it. Front-ends call this for the
-/// filter they are about to apply and show a warning next to the result.
+/// offline start, a failed `/user` call) turns a working filter into an empty list
+/// with nothing on screen to explain it. Front-ends call this for the view they are
+/// about to render and show [`ME_UNEXPANDED_WARNING`] next to the result.
+///
+/// It takes both filters rather than one because all three front-ends ask about
+/// exactly this pair; three copies of "either of them" would drift the moment a
+/// third filter layer appears.
 ///
 /// Tokenised exactly as expansion is (see [`me_token_prefix`]) rather than by
 /// substring: `@mentions` is a search term, not a broken `@me`, and warning about
 /// it would teach the user to ignore the warning.
-pub fn has_unexpanded_me(current_user: Option<&str>, filter: &str) -> bool {
-    current_user.is_none() && has_me_token(filter)
-}
-
-/// [`has_unexpanded_me`] over the pair of filters that shape a view: the filter
-/// stream's (`None` for a root query) ANDed with the inline search box.
-///
-/// Lives here rather than in each front-end so "which filters does the warning
-/// speak for?" has one answer. All three front-ends ask this exact question, and
-/// three copies of it would drift the moment a third filter layer appears.
-pub fn has_unexpanded_me_in(
+pub fn has_unexpanded_me(
     current_user: Option<&str>,
     stream_filter: Option<&str>,
     inline_filter: &str,
 ) -> bool {
-    has_unexpanded_me(current_user, stream_filter.unwrap_or_default())
-        || has_unexpanded_me(current_user, inline_filter)
+    current_user.is_none()
+        && (stream_filter.is_some_and(has_me_token) || has_me_token(inline_filter))
 }
 
 /// What to tell the user when [`has_unexpanded_me`] holds. Lives here, next to the
@@ -492,46 +487,29 @@ mod tests {
 
     // Either filter shaping the view can be the inert one, and the warning speaks
     // for both — a stream filter the user can't see the text of, and the search box.
+    // (*Which* strings count as an `@me` is pinned by the agreement test below.)
     #[rstest]
     #[case::stream_filter(Some("author:@me"), "", true)]
     #[case::inline_filter(None, "author:@me", true)]
     #[case::both(Some("author:@me"), "assignee:@me", true)]
+    #[case::one_of_several_or_groups(Some("state:open\nauthor:@me"), "", true)]
     #[case::neither(Some("state:open"), "fix", false)]
     #[case::no_filters(None, "", false)]
-    fn has_unexpanded_me_in(
+    fn has_unexpanded_me(
         #[case] stream_filter: Option<&str>,
         #[case] inline_filter: &str,
         #[case] expected: bool,
     ) {
         assert_eq!(
-            super::has_unexpanded_me_in(None, stream_filter, inline_filter),
+            super::has_unexpanded_me(None, stream_filter, inline_filter),
             expected
         );
         // A known login silences it whatever the filters say.
-        assert!(!super::has_unexpanded_me_in(
+        assert!(!super::has_unexpanded_me(
             Some("alice"),
             stream_filter,
             inline_filter
         ));
-    }
-
-    // `@me` in a filter is silently inert while the login is unknown: it stays
-    // literal and matches nobody. These pin the predicate the front-ends warn on.
-    #[rstest]
-    // Unknown login + a filter that needs it → the filter is quietly broken.
-    #[case::unknown_login_with_me(None, "author:@me", true)]
-    #[case::unknown_login_in_one_or_group(None, "state:open\nauthor:@me", true)]
-    // Nothing to expand → nothing to warn about, login or not.
-    #[case::unknown_login_without_me(None, "author:alice", false)]
-    // Login known → `@me` expands, so the filter works.
-    #[case::known_login_with_me(Some("alice"), "author:@me", false)]
-    #[case::known_login_without_me(Some("alice"), "author:bob", false)]
-    fn has_unexpanded_me(
-        #[case] current_user: Option<&str>,
-        #[case] filter: &str,
-        #[case] expected: bool,
-    ) {
-        assert_eq!(super::has_unexpanded_me(current_user, filter), expected);
     }
 
     /// The warning must fire on exactly the filters a login would have changed. If
@@ -550,7 +528,7 @@ mod tests {
     fn warning_fires_exactly_when_a_login_would_change_the_filter(#[case] filter: &str) {
         let a_login_changes_it = expand_me(Some("alice"), filter) != filter;
         assert_eq!(
-            super::has_unexpanded_me(None, filter),
+            super::has_unexpanded_me(None, Some(filter), ""),
             a_login_changes_it,
             "warning and expansion disagree about {filter:?}"
         );

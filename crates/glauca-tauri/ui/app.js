@@ -1877,7 +1877,9 @@ function handleMessage(msg) {
 function renderSidebarHeader(login, name, avatarUrl) {
   const header = $("sidebar-header");
   if (!login) {
-    header.replaceChildren(el("div", { class: "who" }, [el("div", { class: "name", text: "not authenticated" })]));
+    // Not "not authenticated": an offline start fails the same way with a perfectly
+    // good token, and the engine may still be retrying. Matches the GUI's header.
+    header.replaceChildren(el("div", { class: "who" }, [el("div", { class: "name", text: "login unknown" })]));
     return;
   }
   header.replaceChildren(
