@@ -1810,6 +1810,19 @@ function handleMessage(msg) {
       state.bgSyncPending = Math.max(0, state.bgSyncPending - 1);
       renderFooter();
       break;
+    // The login the startup lookup couldn't fetch (offline start) finally
+    // resolved. Until now every `@me` filter matched nothing, so redo the two
+    // things computed from it: the visible list and this query's unread badges.
+    // The Rust side has already adopted it (see main.rs), so both see the login.
+    case "CurrentUserResolved": {
+      state.currentUser = d.login;
+      renderSidebarHeader(d.login, d.name, d.avatar_url);
+      setStatus(`signed in as @${d.login}`);
+      const e = state.entries[state.selectedEntry];
+      refreshVisible();
+      if (e) refreshUnread(e.rootQueryId);
+      break;
+    }
     // Structural changes: the engine confirms with these; rebuild the left pane
     // from the DB (list_entries) rather than reordering in JS.
     case "QueryAdded":
@@ -1825,6 +1838,24 @@ function handleMessage(msg) {
     default:
       break;
   }
+}
+
+// Sidebar header: signed-in user (36px avatar + login + display name), mirroring
+// the GUI's left-pane header. Re-rendered rather than built once, because the
+// login can arrive late (see the CurrentUserResolved message).
+function renderSidebarHeader(login, name, avatarUrl) {
+  const header = $("sidebar-header");
+  if (!login) {
+    header.replaceChildren(el("div", { class: "who" }, [el("div", { class: "name", text: "not authenticated" })]));
+    return;
+  }
+  header.replaceChildren(
+    avatarEl({ login, avatar_url: avatarUrl }, "avatar lg", 36),
+    el("div", { class: "who" }, [
+      el("div", { class: "login", text: `@${login}` }),
+      name ? el("div", { class: "name", text: name }) : null,
+    ])
+  );
 }
 
 // ── settings & theme ──────────────────────────────────────────────────────--
@@ -1941,20 +1972,7 @@ async function main() {
   state.entries = init.entries.map(normalize);
   renderSidebar();
 
-  // Sidebar header: signed-in user (36px avatar + login + display name),
-  // mirroring the GUI's left-pane header.
-  const header = $("sidebar-header");
-  if (init.current_user) {
-    header.replaceChildren(
-      avatarEl({ login: init.current_user, avatar_url: init.current_user_avatar_url }, "avatar lg", 36),
-      el("div", { class: "who" }, [
-        el("div", { class: "login", text: `@${init.current_user}` }),
-        init.current_user_name ? el("div", { class: "name", text: init.current_user_name }) : null,
-      ])
-    );
-  } else {
-    header.replaceChildren(el("div", { class: "who" }, [el("div", { class: "name", text: "not authenticated" })]));
-  }
+  renderSidebarHeader(init.current_user, init.current_user_name, init.current_user_avatar_url);
 
   // Prime cached items (and thus unread badges) for every root query, mirroring
   // the TUI's startup load. Skip the first entry's root query: previewEntry(0)

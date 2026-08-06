@@ -349,6 +349,27 @@ impl GlaucaApp {
                     cx,
                 );
             }
+
+            // ── Login resolved after a failed startup lookup ────────────────────
+            // Everything computed against `@me` so far excluded everything, so redo
+            // it: the visible list here, and the selected query's unread badges
+            // (other queries' badges correct themselves on their next load).
+            AppMessage::CurrentUserResolved {
+                login,
+                name,
+                avatar_url,
+            } => {
+                self.status = Some(format!("Signed in as {login}"));
+                self.current_user = Some(login);
+                self.current_user_name = name;
+                self.current_user_avatar_url = avatar_url;
+                if let Some(query_id) = self.selected_root_query_id() {
+                    let items = std::mem::take(&mut self.items);
+                    self.recompute_unread(query_id, &items);
+                    self.items = items;
+                }
+                needs_refilter = true;
+            }
         }
         if needs_refilter {
             self.recompute_filtered();

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use glauca_core::actions::CustomActions;
 use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
@@ -30,7 +30,13 @@ pub struct AppState {
     /// Pre-serialized initial state (left-pane entries + current user) for `init`.
     pub init: serde_json::Value,
     /// Authenticated login, to expand `@me` when computing unread counts.
-    pub current_user: Option<String>,
+    ///
+    /// Shared and mutable because it can arrive late: when the lookup at startup
+    /// can't reach GitHub, the engine keeps retrying and reports the login over
+    /// `CurrentUserResolved`, which the message loop in `main.rs` writes here. The
+    /// commands below must then expand `@me` for the rest of the session — reading
+    /// a login captured at startup would keep every `@me` filter matching nothing.
+    pub current_user: Arc<RwLock<Option<String>>>,
     /// DB pool, to rebuild the left pane after structural changes.
     pub pool: SqlitePool,
     /// Whether desktop notifications fire (toggled at runtime via save_settings;
@@ -43,6 +49,23 @@ pub struct AppState {
     /// timing as the TUI/GUI). JS refers to them by name (see
     /// [`list_custom_actions`]); the definitions never cross the IPC boundary.
     pub custom_actions: CustomActions,
+}
+
+impl AppState {
+    /// The authenticated login as it stands *now*. Read per call, never cached in
+    /// a command, so a login that resolved mid-session takes effect immediately
+    /// (see [`AppState::current_user`]).
+    ///
+    /// Cloned rather than handing out the guard: callers only need a `&str`, and
+    /// holding a read lock across their work would serialize them for no reason.
+    /// Poisoning is recovered from — the value is a plain `Option<String>`, which
+    /// a panicking writer cannot leave half-updated.
+    fn login(&self) -> Option<String> {
+        self.current_user
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// One left-pane entry's unread count, as returned by [`unread_counts`]. Mirrors
@@ -149,8 +172,9 @@ pub async fn unread_counts(
     query_id: i64,
     items: Vec<ItemEntry>,
 ) -> Result<Vec<UnreadCount>, String> {
+    let login = state.login();
     Ok(
-        compute_unread_counts(&entries, query_id, &items, state.current_user.as_deref())
+        compute_unread_counts(&entries, query_id, &items, login.as_deref())
             .into_iter()
             .map(|((is_filter_stream, entry_id), count)| UnreadCount {
                 is_filter_stream,
@@ -223,7 +247,8 @@ pub async fn filter_items(
     stream_filter: Option<String>,
     inline_filter: String,
 ) -> Result<Vec<FilteredItem>, String> {
-    let su = state.current_user.as_deref();
+    let login = state.login();
+    let su = login.as_deref();
     let stream_q = stream_filter.as_deref().map(|s| StreamFilter::parse(s, su));
     let inline_q = FilterQuery::parse(&expand_me(su, &inline_filter));
     Ok(items
@@ -592,6 +617,7 @@ pub async fn mark_all_read(
 ) -> Result<(), String> {
     // The engine expects an already-`@me`-expanded filter; expand here (reusing
     // core's expand_me) so the front-end can pass the raw filter-stream filter.
-    let filter = filter.map(|f| expand_me(state.current_user.as_deref(), &f).into_owned());
+    let login = state.login();
+    let filter = filter.map(|f| expand_me(login.as_deref(), &f).into_owned());
     dispatch(&state.tx, EngineCommand::MarkAllRead { query_id, filter }).await
 }

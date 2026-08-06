@@ -19,7 +19,7 @@ mod settings;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use clap::Parser;
 use commands::AppState;
@@ -87,12 +87,14 @@ fn main() -> anyhow::Result<()> {
     let sender = engine.sender();
     let notifications_enabled = Arc::new(AtomicBool::new(settings.notifications_enabled));
     let query_names = Arc::new(Mutex::new(query_names));
+    let current_user = Arc::new(RwLock::new(current_user));
 
     // Clones for the engine-message loop in setup(). The ItemTracker lives only in
     // the loop (no command needs it).
     let notif_loop = notifications_enabled.clone();
     let tracker_loop = Arc::new(Mutex::new(ItemTracker::new()));
     let names_loop = query_names.clone();
+    let current_user_loop = current_user.clone();
 
     tauri::Builder::default()
         .manage(AppState {
@@ -144,6 +146,17 @@ fn main() -> anyhow::Result<()> {
                                 notify_updated_items(&name, n)
                             });
                         }
+                    }
+                    // Adopt a login the engine resolved after the startup lookup
+                    // failed, so the commands that expand `@me` (filter_items,
+                    // unread_counts, mark_all_read) stop treating it as a literal.
+                    // Written before the message reaches JS, so the re-filter the
+                    // front-end runs on it already sees the new login.
+                    if let AppMessage::CurrentUserResolved { login, .. } = &msg {
+                        *current_user_loop
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(login.clone());
                     }
                     match serde_json::to_value(&msg) {
                         Ok(value) => {

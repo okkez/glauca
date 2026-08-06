@@ -70,10 +70,25 @@ pub struct CurrentUser {
     pub avatar_url: Option<String>,
 }
 
-/// Fetch the authenticated user (login + display name + avatar).
+/// Why [`get_current_user`] failed — specifically, whether asking again with the
+/// same client could ever give a different answer.
 ///
-/// Returns `None` if unauthenticated or the API call fails.
-pub async fn get_current_user(client: &Octocrab) -> Option<CurrentUser> {
+/// The caller retries the lookup in the background (an app started while offline
+/// must not stay `@me`-less for its whole session), so it needs to tell "GitHub
+/// never answered" from "GitHub answered, and the answer was no".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentUserError {
+    /// No usable answer came back: offline, DNS/TLS failure, timeout, or a 5xx.
+    /// Transient by nature — retrying is exactly what fixes it.
+    Unreachable,
+    /// GitHub answered and refused: 401 (no/expired token) or 403 (a token
+    /// without the scope to read the user). The token is fixed for the life of
+    /// the process, so retrying it cannot help.
+    Rejected,
+}
+
+/// Fetch the authenticated user (login + display name + avatar).
+pub async fn get_current_user(client: &Octocrab) -> Result<CurrentUser, CurrentUserError> {
     #[derive(Deserialize)]
     struct UserResponse {
         login: String,
@@ -86,15 +101,42 @@ pub async fn get_current_user(client: &Octocrab) -> Option<CurrentUser> {
         .get::<UserResponse, _, _>("https://api.github.com/user", None::<&()>)
         .await
     {
-        Ok(u) => Some(CurrentUser {
+        Ok(u) => Ok(CurrentUser {
             login: u.login,
             name: u.name,
             avatar_url: u.avatar_url,
         }),
         Err(e) => {
-            warn!(error = %e, "get_current_user failed (unauthenticated or API error)");
-            None
+            let kind = classify_current_user_error(&e);
+            warn!(error = %e, retryable = (kind == CurrentUserError::Unreachable),
+                  "get_current_user failed (unauthenticated or API error)");
+            Err(kind)
         }
+    }
+}
+
+/// Split a failed `/user` call into "couldn't ask" and "was told no".
+///
+/// Only a refusal GitHub actually sent back is treated as final; everything else
+/// — transport errors, a malformed body, a 5xx — is assumed transient, because
+/// the cost of retrying a hopeless case (one request per retry interval) is far
+/// below the cost of getting a recoverable one wrong (`@me` dead all session).
+fn classify_current_user_error(e: &octocrab::Error) -> CurrentUserError {
+    match e {
+        octocrab::Error::GitHub { source, .. } => {
+            classify_current_user_status(source.status_code.as_u16())
+        }
+        _ => CurrentUserError::Unreachable,
+    }
+}
+
+/// The status-code half of [`classify_current_user_error`], split out so the rule
+/// is unit-testable — octocrab's error variants carry a backtrace and are awkward
+/// to build by hand.
+fn classify_current_user_status(status: u16) -> CurrentUserError {
+    match status {
+        401 | 403 => CurrentUserError::Rejected,
+        _ => CurrentUserError::Unreachable,
     }
 }
 
@@ -614,6 +656,24 @@ mod tests {
     use super::*;
     use crate::types::ActorKind;
     use rstest::rstest;
+
+    // Which `/user` failures the caller may retry. Getting this wrong is silent
+    // either way: retry a hopeless 401 forever, or give up on a recoverable outage
+    // and leave `@me` dead for the session.
+    #[rstest]
+    // GitHub answered "no" — the token can't change while the process runs.
+    #[case::unauthorized(401, CurrentUserError::Rejected)]
+    #[case::forbidden(403, CurrentUserError::Rejected)]
+    // GitHub answered, but not with a refusal: worth asking again.
+    #[case::server_error(500, CurrentUserError::Unreachable)]
+    #[case::bad_gateway(502, CurrentUserError::Unreachable)]
+    #[case::too_many_requests(429, CurrentUserError::Unreachable)]
+    // A 404 on /user means the request never reached the account (proxy, enterprise
+    // misroute), not that the account said no.
+    #[case::not_found(404, CurrentUserError::Unreachable)]
+    fn classify_current_user_status(#[case] status: u16, #[case] expected: CurrentUserError) {
+        assert_eq!(super::classify_current_user_status(status), expected);
+    }
 
     // Env lookup over a fixed map, for resolve_token tests.
     fn env_from<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {

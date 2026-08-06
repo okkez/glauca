@@ -100,6 +100,15 @@ pub enum AppMessage {
         lower_id: i64,
         active_id: i64,
     },
+    /// The authenticated user, resolved by a retry after the lookup at startup
+    /// failed (see [`current_user_retry_task`]). Front-ends adopt it so `@me`
+    /// starts expanding: re-filter the visible list and recompute unread counts,
+    /// both of which silently excluded everything while the login was unknown.
+    CurrentUserResolved {
+        login: String,
+        name: Option<String>,
+        avatar_url: Option<String>,
+    },
 }
 
 /// A job request sent to the background sync worker.
@@ -1139,6 +1148,73 @@ pub async fn refresh_timer_task(
     }
 }
 
+/// First wait before re-attempting the current-user lookup, in seconds. Short
+/// enough that a start during a brief network blip heals almost immediately.
+const CURRENT_USER_RETRY_BASE_SECS: u64 = 30;
+
+/// Ceiling on the (doubling) wait between current-user retries, in seconds. A
+/// laptop that stays offline for hours costs at most one request per this many
+/// seconds, and still resolves the login within it of coming back online.
+const CURRENT_USER_RETRY_MAX_SECS: u64 = 900;
+
+/// Wait before retry number `attempt` (0-based): doubling from
+/// [`CURRENT_USER_RETRY_BASE_SECS`], capped at [`CURRENT_USER_RETRY_MAX_SECS`].
+///
+/// Backing off matters because the common cause is "no network at all": retrying
+/// every 30s forever would spend the whole session failing to connect, while the
+/// cap keeps a long outage from pushing the recovery hours out.
+fn current_user_retry_delay_secs(attempt: u32) -> u64 {
+    // `1 << attempt` overflows past 63; saturate instead, since anything beyond a
+    // handful of doublings is already clamped by the cap.
+    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+    CURRENT_USER_RETRY_BASE_SECS
+        .saturating_mul(factor)
+        .min(CURRENT_USER_RETRY_MAX_SECS)
+}
+
+/// Keep asking GitHub who we are until it answers, then tell the front-end.
+///
+/// Spawned only when the lookup at startup failed. Without it a single failure —
+/// most often an app launched before the network was up — left `current_user`
+/// `None` for the entire session, and every `@me` filter silently matched nothing
+/// long after connectivity returned.
+///
+/// Stops on the first success, on a refusal that a retry cannot change (see
+/// [`github::CurrentUserError`]), or once the front-end has hung up.
+pub async fn current_user_retry_task(gh: Octocrab, tx: mpsc::Sender<AppMessage>) {
+    let mut attempt: u32 = 0;
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(
+            current_user_retry_delay_secs(attempt),
+        ))
+        .await;
+        // Nobody left to tell.
+        if tx.is_closed() {
+            return;
+        }
+        match github::get_current_user(&gh).await {
+            Ok(cu) => {
+                info!(login = %cu.login, attempt, "current user resolved on retry");
+                let _ = tx
+                    .send(AppMessage::CurrentUserResolved {
+                        login: cu.login,
+                        name: cu.name,
+                        avatar_url: cu.avatar_url,
+                    })
+                    .await;
+                return;
+            }
+            Err(github::CurrentUserError::Rejected) => {
+                warn!("current user lookup refused; `@me` stays unexpanded this session");
+                return;
+            }
+            Err(github::CurrentUserError::Unreachable) => {
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
 /// One local cache-maintenance sweep: clear stale `body` blobs, prune each query's
 /// read overflow, then `VACUUM` to return the freed pages to the OS. All local
 /// (no GitHub API). Errors are logged and skipped so one failing step can't abort
@@ -1385,6 +1461,10 @@ impl Engine {
         let entries = load_left_pane_entries(&pool).await?;
 
         let cu = github::get_current_user(&gh).await;
+        // Whether the login is worth chasing in the background: a start with no
+        // network resolves nothing, and `@me` would stay literal all session.
+        let retry_current_user = matches!(cu, Err(github::CurrentUserError::Unreachable));
+        let cu = cu.ok();
         let current_user = cu.as_ref().map(|u| u.login.clone());
         let current_user_name = cu.as_ref().and_then(|u| u.name.clone());
         let current_user_avatar_url = cu.as_ref().and_then(|u| u.avatar_url.clone());
@@ -1429,6 +1509,11 @@ impl Engine {
         // Spawn the periodic local cache-maintenance sweep (body clears, overflow
         // prune, VACUUM). Purely local, so it ignores the rate-limit gate.
         tokio::spawn(maintenance_task(pool.clone(), maintenance));
+        // Chase the login in the background when the startup lookup couldn't reach
+        // GitHub, so `@me` starts working mid-session instead of after a restart.
+        if retry_current_user {
+            tokio::spawn(current_user_retry_task(gh.clone(), msg_tx.clone()));
+        }
         // Spawn the command-handling loop.
         tokio::spawn(command_loop(
             pool,
@@ -1925,6 +2010,34 @@ mod tests {
     use super::*;
     use crate::test_support::test_pool;
     use rstest::rstest;
+
+    #[rstest]
+    // Doubles from the base …
+    #[case::first_retry(0, CURRENT_USER_RETRY_BASE_SECS)]
+    #[case::second_retry(1, 60)]
+    #[case::third_retry(2, 120)]
+    // … then stops at the cap and stays there.
+    #[case::capped(6, CURRENT_USER_RETRY_MAX_SECS)]
+    #[case::still_capped(60, CURRENT_USER_RETRY_MAX_SECS)]
+    // Past 63 the doubling would overflow the shift; it must saturate into the cap
+    // rather than panic (a long-lived unreachable session keeps counting).
+    #[case::shift_overflow(u32::MAX, CURRENT_USER_RETRY_MAX_SECS)]
+    fn current_user_retry_delay(#[case] attempt: u32, #[case] expected: u64) {
+        assert_eq!(current_user_retry_delay_secs(attempt), expected);
+    }
+
+    /// Every wait is long enough to be a backoff and short enough to still heal the
+    /// session — a zero would spin, and an hour would be no better than a restart.
+    #[test]
+    fn current_user_retry_delay_stays_within_bounds() {
+        for attempt in 0..64 {
+            let d = current_user_retry_delay_secs(attempt);
+            assert!(
+                (CURRENT_USER_RETRY_BASE_SECS..=CURRENT_USER_RETRY_MAX_SECS).contains(&d),
+                "attempt {attempt} waits {d}s, outside the intended range"
+            );
+        }
+    }
 
     #[test]
     fn effective_interval_clamps_to_floor() {

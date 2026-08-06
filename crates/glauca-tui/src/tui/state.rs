@@ -261,6 +261,25 @@ impl App {
         self.apply_items_to_view(items);
     }
 
+    /// Adopt a login the engine resolved after startup (see
+    /// `AppMessage::CurrentUserResolved`) and redo the work that was wrong without
+    /// it: every `@me` filter had been matching nobody.
+    ///
+    /// The visible list needs no nudge — `filtered_items`'s cache keys on the login,
+    /// so the next frame recomputes it. Unread badges do: they are only recomputed
+    /// when a query's items load. Refreshing the selected query's badges here fixes
+    /// what the user is looking at; the rest correct themselves on their next
+    /// background sync, a minute or so later.
+    pub(crate) fn adopt_current_user(&mut self, login: String) {
+        self.status = Some(format!("signed in as {login}"));
+        self.current_user = Some(login);
+        if let Some(query_id) = self.selected_root_query_id() {
+            let items = std::mem::take(&mut self.items);
+            self.recompute_unread_counts_for_query(query_id, &items);
+            self.items = items;
+        }
+    }
+
     pub(crate) fn recompute_unread_counts_for_query(&mut self, query_id: i64, items: &[ItemEntry]) {
         for (key, unread) in glauca_core::logic::compute_unread_counts(
             &self.entries,
@@ -392,6 +411,61 @@ mod tests {
         app.filter = ta("fix");
         // Only "Fix bug" and "Fix crash closed" match "fix", and all pass stream filter
         assert_eq!(app.filtered_items().len(), 2);
+    }
+
+    /// The bug this whole path exists for: the app started before the network was
+    /// up, so the login never resolved and `author:@me` matched nobody all session.
+    /// Adopting a late-resolved login must un-break the list without a restart.
+    #[test]
+    fn adopting_a_late_login_revives_an_at_me_filter() {
+        let mut app = make_app_with_items(&["alice's PR"]);
+        app.stream_filter = Some("author:@me".into());
+        // Unresolved login: `@me` stays literal, so the stream shows nothing.
+        assert!(app.current_user.is_none());
+        assert!(app.filtered_items().is_empty());
+
+        app.adopt_current_user("alice".into());
+
+        // Same items, same filter — only the login changed.
+        assert_eq!(app.filtered_items().len(), 1);
+    }
+
+    /// Unread badges are computed against the same filters, so they were wrong for
+    /// the same reason and must be refreshed too — not just the visible list.
+    #[test]
+    fn adopting_a_late_login_refreshes_unread_counts() {
+        let mut app = App::new(vec![]);
+        app.entries = vec![
+            LeftPaneEntry::Query(QueryEntry {
+                id: 1,
+                label: "Open PRs".into(),
+                query_str: "is:pr is:open".into(),
+                kind: "pull_request".into(),
+            }),
+            LeftPaneEntry::FilterStream(FilterStreamEntry {
+                id: 2,
+                parent_id: 1,
+                name: "Mine".into(),
+                filter: "author:@me".into(),
+                kind: "pull_request".into(),
+            }),
+        ];
+        app.items = vec![ItemEntry {
+            updated_at: "2026-05-24T10:00:00Z".into(),
+            ..make_item(1, "alice's unread PR")
+        }];
+        let stream_key = app.entries[1].unread_key();
+
+        app.recompute_unread_counts_for_query(1, &app.items.clone());
+        assert_eq!(app.unread_counts.get(&stream_key), Some(&0));
+
+        app.adopt_current_user("alice".into());
+
+        assert_eq!(
+            app.unread_counts.get(&stream_key),
+            Some(&1),
+            "the stream's badge still counts nothing after the login resolved"
+        );
     }
 
     #[test]
