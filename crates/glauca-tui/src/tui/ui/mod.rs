@@ -163,6 +163,11 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     if let Some(badge) = app.icons.mode_badge {
         segments.push(badge.to_string());
     }
+    // Why an `@me` filter is showing nothing. Placed before `status` so a passing
+    // "Synced N items" doesn't sit between the empty list and its explanation.
+    if app.me_unexpanded() {
+        segments.push(glauca_core::logic::ME_UNEXPANDED_WARNING.to_string());
+    }
     if let Some(msg) = &app.status {
         segments.push(msg.clone());
     }
@@ -172,4 +177,44 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .alignment(Alignment::Left);
     f.render_widget(para, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::test_support::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    /// The rendered status bar, as one string.
+    fn status_bar(app: &App) -> String {
+        // Wide enough that the warning isn't cut off before the assertion sees it.
+        let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // The status bar is the frame's last row (see `draw`).
+        let y = buf.area.height - 1;
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    /// An `@me` filter with no login empties the list and, without this, explains
+    /// nothing. The warning has to reach the screen, not just the predicate.
+    #[test]
+    fn status_bar_warns_about_an_unexpandable_at_me() {
+        let mut app = make_app_with_items(&["alice's PR"]);
+        app.stream_filter = Some("author:@me".into());
+
+        assert!(
+            status_bar(&app).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
+            "no warning on screen while `@me` matches nothing"
+        );
+
+        app.adopt_current_user("alice".into());
+
+        assert!(
+            !status_bar(&app).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
+            "warning still on screen after the login resolved"
+        );
+    }
 }

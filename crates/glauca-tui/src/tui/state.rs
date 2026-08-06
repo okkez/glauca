@@ -261,6 +261,17 @@ impl App {
         self.apply_items_to_view(items);
     }
 
+    /// Whether the filters shaping the current view lean on `@me` while the login
+    /// is unknown — i.e. the list is empty for a reason the list itself can't show.
+    /// The status bar turns this into a warning; see
+    /// [`glauca_core::logic::has_unexpanded_me`].
+    pub fn me_unexpanded(&self) -> bool {
+        let unexpanded =
+            |f: &str| glauca_core::logic::has_unexpanded_me(self.current_user.as_deref(), f);
+        unexpanded(self.stream_filter.as_deref().unwrap_or_default())
+            || unexpanded(self.filter.value())
+    }
+
     /// Adopt a login the engine resolved after startup (see
     /// `AppMessage::CurrentUserResolved`) and redo the work that was wrong without
     /// it: every `@me` filter had been matching nobody.
@@ -411,6 +422,44 @@ mod tests {
         app.filter = ta("fix");
         // Only "Fix bug" and "Fix crash closed" match "fix", and all pass stream filter
         assert_eq!(app.filtered_items().len(), 2);
+    }
+
+    // An `@me` filter with no login matches nothing and says nothing about why, so
+    // the status bar has to. The warning follows whichever filter is in play.
+    #[rstest]
+    // Stream filter or search box — either one is enough to empty the list.
+    #[case::stream_filter(None, Some("author:@me"), "", true)]
+    #[case::inline_filter(None, None, "author:@me", true)]
+    #[case::both(None, Some("author:@me"), "assignee:@me", true)]
+    // Nothing to expand → nothing to warn about.
+    #[case::no_me_token(None, Some("state:open"), "fix", false)]
+    #[case::no_filters_at_all(None, None, "", false)]
+    // Login known → `@me` works, so warning here would be noise.
+    #[case::login_known(Some("alice"), Some("author:@me"), "", false)]
+    fn me_unexpanded(
+        #[case] current_user: Option<&str>,
+        #[case] stream_filter: Option<&str>,
+        #[case] inline_filter: &str,
+        #[case] expected: bool,
+    ) {
+        let mut app = App::new(vec![]);
+        app.current_user = current_user.map(Into::into);
+        app.stream_filter = stream_filter.map(Into::into);
+        app.filter = ta(inline_filter);
+        assert_eq!(app.me_unexpanded(), expected);
+    }
+
+    /// The warning must clear itself once the login lands — it is a live property of
+    /// the filters, not a flag someone has to remember to reset.
+    #[test]
+    fn me_unexpanded_clears_when_the_login_resolves() {
+        let mut app = make_app_with_items(&["alice's PR"]);
+        app.stream_filter = Some("author:@me".into());
+        assert!(app.me_unexpanded());
+
+        app.adopt_current_user("alice".into());
+
+        assert!(!app.me_unexpanded());
     }
 
     /// The bug this whole path exists for: the app started before the network was

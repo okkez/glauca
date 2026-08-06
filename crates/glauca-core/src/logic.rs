@@ -234,12 +234,15 @@ pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
     }
 }
 
+/// The stand-in for the authenticated user's login in a filter or saved query.
+pub const ME_TOKEN: &str = "@me";
+
 /// Replace `@me` with the authenticated user's login (case-insensitive).
 /// Falls back to `@me` unchanged if the user is not known yet.
 pub fn expand_me<'a>(current_user: Option<&str>, s: &'a str) -> Cow<'a, str> {
     match current_user {
         // Only rewrite when `@me` actually appears; otherwise borrow unchanged.
-        Some(login) if s.contains("@me") => Cow::Owned(
+        Some(login) if s.contains(ME_TOKEN) => Cow::Owned(
             // Expand per line so newline group separators survive: a filter
             // stream's `filter` holds one OR-group per line (see
             // `filter::StreamFilter`), and collapsing `\n` into a space here
@@ -269,6 +272,29 @@ fn expand_me_line(line: &str, login: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// `true` when `filter` leans on `@me` but the login is still unknown, so
+/// [`expand_me`] leaves the token literal and the filter matches nobody.
+///
+/// This is the *silent* failure mode worth surfacing: an unresolved login (an
+/// offline start, a failed `/user` call) turns a working filter into an empty
+/// list with nothing on screen to explain it. Front-ends call this for the
+/// filter they are about to apply and show a warning next to the result.
+///
+/// Deliberately the same `contains` test [`expand_me`] gates on, so the warning
+/// appears exactly when an `@me` survives expansion — never for a filter that
+/// still works, never silent for one that doesn't.
+pub fn has_unexpanded_me(current_user: Option<&str>, filter: &str) -> bool {
+    current_user.is_none() && filter.contains(ME_TOKEN)
+}
+
+/// What to tell the user when [`has_unexpanded_me`] holds. Lives here, next to the
+/// predicate, so the three front-ends explain the same empty list the same way.
+///
+/// States the fact and nothing more. It is tempting to add "retrying…", but the
+/// retry gives up on a refusal (`engine::current_user_retry_task`), and a promise
+/// of recovery that may never come is worse than the bare cause.
+pub const ME_UNEXPANDED_WARNING: &str = "@me not expanded: GitHub login unknown";
 
 /// Filter `items` by an optional stream filter ANDed with the inline filter.
 /// `@me` tokens are expanded against `current_user`.
@@ -400,6 +426,44 @@ mod tests {
         assert_eq!(
             expand_me(Some("bob"), "assignee:@me label:bug\n@me"),
             "assignee:bob label:bug\nbob"
+        );
+    }
+
+    // `@me` in a filter is silently inert while the login is unknown: it stays
+    // literal and matches nobody. These pin the predicate the front-ends warn on.
+    #[rstest]
+    // Unknown login + a filter that needs it → the filter is quietly broken.
+    #[case::unknown_login_with_me(None, "author:@me", true)]
+    #[case::unknown_login_in_one_or_group(None, "state:open\nauthor:@me", true)]
+    // Nothing to expand → nothing to warn about, login or not.
+    #[case::unknown_login_without_me(None, "author:alice", false)]
+    // Login known → `@me` expands, so the filter works.
+    #[case::known_login_with_me(Some("alice"), "author:@me", false)]
+    #[case::known_login_without_me(Some("alice"), "author:bob", false)]
+    fn has_unexpanded_me(
+        #[case] current_user: Option<&str>,
+        #[case] filter: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(super::has_unexpanded_me(current_user, filter), expected);
+    }
+
+    /// The warning must fire exactly when `expand_me` leaves an `@me` behind — if the
+    /// two disagree, either a working filter is flagged or a broken one stays silent.
+    #[rstest]
+    #[case::unknown_login(None, "author:@me")]
+    #[case::known_login(Some("alice"), "author:@me")]
+    #[case::no_me_token(Some("alice"), "author:bob")]
+    #[case::unknown_login_no_me(None, "author:bob")]
+    fn has_unexpanded_me_agrees_with_expand_me(
+        #[case] current_user: Option<&str>,
+        #[case] filter: &str,
+    ) {
+        let expanded = expand_me(current_user, filter);
+        assert_eq!(
+            super::has_unexpanded_me(current_user, filter),
+            expanded.contains(ME_TOKEN),
+            "warning disagrees with what expand_me actually left in {expanded:?}"
         );
     }
 

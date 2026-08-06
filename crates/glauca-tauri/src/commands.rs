@@ -15,7 +15,10 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use glauca_core::actions::CustomActions;
 use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
 use glauca_core::filter::{FilterQuery, StreamFilter};
-use glauca_core::logic::{ChangeCounts, compute_unread_counts, count_changes, expand_me};
+use glauca_core::logic::{
+    ChangeCounts, ME_UNEXPANDED_WARNING, compute_unread_counts, count_changes, expand_me,
+    has_unexpanded_me,
+};
 use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -205,6 +208,21 @@ pub struct FilteredItem {
     pub title_segments: Vec<TitleSegment>,
 }
 
+/// The result of [`filter_items`]: what matched, and whether the answer should be
+/// trusted at face value.
+///
+/// `me_warning` rides along instead of being derived in JS because this command is
+/// the one place that holds both halves of the question — the filters it just
+/// applied and the login it applied them with. It carries core's wording rather
+/// than a bool so the front-end has no copy of the message to drift from.
+#[derive(Serialize)]
+pub struct FilterResult {
+    pub items: Vec<FilteredItem>,
+    /// Set when a filter here leans on `@me` while the login is unknown, so it
+    /// matched nothing — see [`glauca_core::logic::has_unexpanded_me`].
+    pub me_warning: Option<&'static str>,
+}
+
 /// Split `title` on `ranges` (sorted, non-overlapping, char-boundary-snapped
 /// byte ranges from `FilterQuery::highlight_ranges`) into plain/highlighted
 /// segments.
@@ -246,29 +264,35 @@ pub async fn filter_items(
     items: Vec<ItemEntry>,
     stream_filter: Option<String>,
     inline_filter: String,
-) -> Result<Vec<FilteredItem>, String> {
+) -> Result<FilterResult, String> {
     let login = state.login();
     let su = login.as_deref();
     let stream_q = stream_filter.as_deref().map(|s| StreamFilter::parse(s, su));
     let inline_q = FilterQuery::parse(&expand_me(su, &inline_filter));
-    Ok(items
-        .iter()
-        .enumerate()
-        .filter(|(_, it)| {
-            stream_q.as_ref().is_none_or(|q| q.matches(it))
-                && (inline_q.is_empty() || inline_q.matches(it))
-        })
-        .map(|(index, it)| FilteredItem {
-            index,
-            // Only the inline (search-box) filter highlights, like the GUI;
-            // stream filters describe the list, not a search.
-            title_segments: if inline_q.is_empty() {
-                Vec::new()
-            } else {
-                split_title(&it.title, &inline_q.highlight_ranges(&it.title))
-            },
-        })
-        .collect())
+    let me_unexpanded = has_unexpanded_me(su, stream_filter.as_deref().unwrap_or_default())
+        || has_unexpanded_me(su, &inline_filter);
+    let me_warning = me_unexpanded.then_some(ME_UNEXPANDED_WARNING);
+    Ok(FilterResult {
+        items: items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| {
+                stream_q.as_ref().is_none_or(|q| q.matches(it))
+                    && (inline_q.is_empty() || inline_q.matches(it))
+            })
+            .map(|(index, it)| FilteredItem {
+                index,
+                // Only the inline (search-box) filter highlights, like the GUI;
+                // stream filters describe the list, not a search.
+                title_segments: if inline_q.is_empty() {
+                    Vec::new()
+                } else {
+                    split_title(&it.title, &inline_q.highlight_ranges(&it.title))
+                },
+            })
+            .collect(),
+        me_warning,
+    })
 }
 
 /// What the banner needs to know about a background sync's results: whether to show

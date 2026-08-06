@@ -63,8 +63,22 @@ function setStatus(msg, isError = false) {
   renderFooter();
 }
 
-// Sidebar footer: sync activity ("syncing…", "N bg") plus the latest status
-// message. Hidden entirely when there is nothing to show, like the GUI.
+// Core's warning about the current view's filter using `@me` with no login to
+// expand it to, or null when there is nothing to warn about — decided and worded
+// by the filter_items command (see refreshVisible). Unlike statusMsg this is a
+// standing condition, not a message, so it lives on until the filter or the login
+// changes.
+let meWarning = null;
+
+function setMeWarning(msg) {
+  if (meWarning === msg) return;
+  meWarning = msg;
+  renderFooter();
+}
+
+// Sidebar footer: sync activity ("syncing…", "N bg"), the `@me` warning, and the
+// latest status message. Hidden entirely when there is nothing to show, like the
+// GUI. Mirrors the same three-part footer in the GUI's render.rs.
 function renderFooter() {
   const footer = $("sidebar-footer");
   const bits = [];
@@ -72,6 +86,7 @@ function renderFooter() {
   if (state.bgSyncPending > 0) bits.push(`${state.bgSyncPending} bg`);
   const rows = [];
   if (bits.length) rows.push(el("div", { text: bits.join("  ") }));
+  if (meWarning) rows.push(el("div", { class: "warn-line", text: meWarning }));
   if (statusMsg) rows.push(el("div", { class: "status-line", text: statusMsg }));
   footer.classList.toggle("error", statusIsError);
   footer.replaceChildren(...rows);
@@ -752,14 +767,19 @@ async function refreshVisible() {
   // wrong list). Bail if a later call has already superseded us.
   const seq = ++state.filterSeq;
   try {
-    const matches = await invoke("filter_items", {
+    const result = await invoke("filter_items", {
       items: all,
       streamFilter: e.streamFilter,
       inlineFilter: state.filterText,
     });
     if (seq !== state.filterSeq) return;
-    state.visibleItems = matches.map((m) => all[m.index]);
-    state.visibleTitleSegments = matches.map((m) => m.title_segments);
+    state.visibleItems = result.items.map((m) => all[m.index]);
+    state.visibleTitleSegments = result.items.map((m) => m.title_segments);
+    // Why the list may be empty: the filter asked for `@me` and the engine has no
+    // login to expand it to. Rust decides and words this (it holds both the filters
+    // and the login); the footer just shows it, and it clears itself on the next
+    // filter once CurrentUserResolved lands.
+    setMeWarning(result.me_warning);
   } catch (err) {
     if (seq !== state.filterSeq) return;
     setStatus(`filter: ${err}`, true);

@@ -157,6 +157,9 @@ body {
 }
 #sidebar-footer .status-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #sidebar-footer.error .status-line { color: var(--red); }
+/* Standing warning (an `@me` filter with no login). Wraps rather than truncates:
+   unlike a status message it explains an empty list, so it has to stay readable. */
+#sidebar-footer .warn-line { color: var(--yellow); }
 
 /* Items pane header (selected entry name) and inline filter row. */
 #items-header {
