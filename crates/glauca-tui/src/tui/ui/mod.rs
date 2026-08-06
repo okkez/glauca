@@ -46,14 +46,27 @@ use widgets::{
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    // Split into status bar (1 line) + main content
+    // Split into main content + an optional warning line + the status bar.
+    //
+    // The warning gets a line of its own rather than a segment in the status bar:
+    // that bar doesn't wrap, and the key hints ahead of it already run past 120
+    // columns, so anything appended there is invisible on a normal terminal. It
+    // also matches where the GUI and Tauri front-ends put the same warning.
+    let warning_rows = if app.me_unexpanded() { 1 } else { 0 };
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(warning_rows),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     draw_main(f, app, root[0]);
-    draw_status_bar(f, app, root[1]);
+    if warning_rows > 0 {
+        draw_me_warning(f, root[1]);
+    }
+    draw_status_bar(f, app, root[2]);
 
     // Overlay the two-field input modal on top if one is active (no-op otherwise).
     draw_modal(f, app, area);
@@ -100,6 +113,20 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // ── Status bar ────────────────────────────────────────────────────────────────
+
+/// The line explaining that an `@me` filter has no login to expand to, drawn on
+/// its own row above the status bar so the key hints can't push it off-screen.
+fn draw_me_warning(f: &mut Frame, area: Rect) {
+    let para = Paragraph::new(format!(" {}", glauca_core::logic::ME_UNEXPANDED_WARNING))
+        .style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Left);
+    f.render_widget(para, area);
+}
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let on_item =
@@ -163,11 +190,6 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     if let Some(badge) = app.icons.mode_badge {
         segments.push(badge.to_string());
     }
-    // Why an `@me` filter is showing nothing. Placed before `status` so a passing
-    // "Synced N items" doesn't sit between the empty list and its explanation.
-    if app.me_unexpanded() {
-        segments.push(glauca_core::logic::ME_UNEXPANDED_WARNING.to_string());
-    }
     if let Some(msg) = &app.status {
         segments.push(msg.clone());
     }
@@ -184,37 +206,80 @@ mod tests {
     use super::*;
     use crate::tui::test_support::*;
     use ratatui::{Terminal, backend::TestBackend};
+    use rstest::rstest;
 
-    /// The rendered status bar, as one string.
-    fn status_bar(app: &App) -> String {
-        // Wide enough that the warning isn't cut off before the assertion sees it.
-        let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
+    /// The bottom two rows of a rendered frame — the warning line (when present)
+    /// and the status bar — as one string.
+    fn bottom_rows(app: &App, width: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        // The status bar is the frame's last row (see `draw`).
-        let y = buf.area.height - 1;
-        (0..buf.area.width)
-            .map(|x| buf[(x, y)].symbol())
-            .collect::<String>()
+        let h = buf.area.height;
+        (h - 2..h)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// An `@me` filter with no login empties the list and, without this, explains
     /// nothing. The warning has to reach the screen, not just the predicate.
     #[test]
-    fn status_bar_warns_about_an_unexpandable_at_me() {
+    fn warning_appears_and_clears_with_the_login() {
         let mut app = make_app_with_items(&["alice's PR"]);
         app.stream_filter = Some("author:@me".into());
 
         assert!(
-            status_bar(&app).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
+            bottom_rows(&app, 200).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
             "no warning on screen while `@me` matches nothing"
         );
 
         app.adopt_current_user("alice".into());
 
         assert!(
-            !status_bar(&app).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
+            !bottom_rows(&app, 200).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
             "warning still on screen after the login resolved"
+        );
+    }
+
+    /// Neither line wraps, and the status bar's key hints alone run past 120
+    /// columns — so a warning sharing that line is invisible on a normal terminal.
+    /// It has to survive the widths people actually use, not just the wide one the
+    /// first version of this test happened to pick.
+    #[rstest]
+    #[case::narrow(80)]
+    #[case::common(120)]
+    #[case::wide(200)]
+    fn warning_survives_realistic_widths(#[case] width: u16) {
+        let mut app = make_app_with_items(&["alice's PR"]);
+        app.stream_filter = Some("author:@me".into());
+        assert!(
+            bottom_rows(&app, width).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
+            "warning clipped off a {width}-column screen"
+        );
+    }
+
+    /// The warning takes a row from the panes, so it must give it back — otherwise
+    /// a resolved login leaves a blank strip above the status bar.
+    #[test]
+    fn warning_row_is_reclaimed_once_it_clears() {
+        let mut app = make_app_with_items(&["alice's PR"]);
+        app.stream_filter = Some("author:@me".into());
+        let with_warning = bottom_rows(&app, 120);
+
+        app.adopt_current_user("alice".into());
+        let without = bottom_rows(&app, 120);
+
+        assert_ne!(
+            with_warning, without,
+            "the warning row is still occupying the screen"
+        );
+        assert!(
+            without.lines().next().is_some_and(|l| l.trim() != ""),
+            "a blank row was left behind where the warning used to be"
         );
     }
 }

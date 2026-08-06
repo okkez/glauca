@@ -241,8 +241,12 @@ pub const ME_TOKEN: &str = "@me";
 /// Falls back to `@me` unchanged if the user is not known yet.
 pub fn expand_me<'a>(current_user: Option<&str>, s: &'a str) -> Cow<'a, str> {
     match current_user {
-        // Only rewrite when `@me` actually appears; otherwise borrow unchanged.
-        Some(login) if s.contains(ME_TOKEN) => Cow::Owned(
+        // Only rewrite when an `@me` token actually appears; otherwise borrow
+        // unchanged. Tokenised rather than a substring test, so the gate accepts
+        // exactly what the expansion below would rewrite — a case-sensitive
+        // `contains` used to swallow `AUTHOR:@ME` here and leave it unexpanded,
+        // despite the per-token rule accepting it.
+        Some(login) if has_me_token(s) => Cow::Owned(
             // Expand per line so newline group separators survive: a filter
             // stream's `filter` holds one OR-group per line (see
             // `filter::StreamFilter`), and collapsing `\n` into a space here
@@ -256,18 +260,38 @@ pub fn expand_me<'a>(current_user: Option<&str>, s: &'a str) -> Cow<'a, str> {
     }
 }
 
+/// The part of `tok` that survives `@me` substitution, or `None` when the token
+/// carries no `@me` to substitute.
+///
+/// The two accepted spellings are a bare `@me` (prefix `""`) and a qualifier's
+/// value, `author:@me` (prefix `author:`, case-insensitive). A token that merely
+/// *contains* the letters — a plain search for `@mentions` — is not one of them.
+///
+/// Both expansion and [`has_unexpanded_me`] route through here, so they cannot
+/// disagree about what counts as an `@me`: a warning about a filter that actually
+/// works is as wrong as silence about one that doesn't.
+fn me_token_prefix(tok: &str) -> Option<&str> {
+    if tok.eq_ignore_ascii_case(ME_TOKEN) {
+        return Some("");
+    }
+    // `split_at_checked` rather than slicing: a token can be multibyte, and a cut
+    // landing inside a character must yield "not an `@me`", not a panic.
+    let (prefix, suffix) = tok.split_at_checked(tok.len().checked_sub(ME_TOKEN.len())?)?;
+    (prefix.ends_with(':') && suffix.eq_ignore_ascii_case(ME_TOKEN)).then_some(prefix)
+}
+
+/// `true` when any token in `s` is an `@me` (see [`me_token_prefix`]).
+fn has_me_token(s: &str) -> bool {
+    s.split_whitespace()
+        .any(|tok| me_token_prefix(tok).is_some())
+}
+
 /// Replace `@me` / `:@me` tokens on a single (newline-free) line with `login`.
 fn expand_me_line(line: &str, login: &str) -> String {
     line.split_whitespace()
-        .map(|tok| {
-            if tok.to_lowercase().ends_with(":@me") {
-                let prefix = &tok[..tok.len() - 3]; // strip "@me"
-                format!("{prefix}{login}")
-            } else if tok == "@me" {
-                login.to_string()
-            } else {
-                tok.to_string()
-            }
+        .map(|tok| match me_token_prefix(tok) {
+            Some(prefix) => format!("{prefix}{login}"),
+            None => tok.to_string(),
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -281,11 +305,11 @@ fn expand_me_line(line: &str, login: &str) -> String {
 /// list with nothing on screen to explain it. Front-ends call this for the
 /// filter they are about to apply and show a warning next to the result.
 ///
-/// Deliberately the same `contains` test [`expand_me`] gates on, so the warning
-/// appears exactly when an `@me` survives expansion — never for a filter that
-/// still works, never silent for one that doesn't.
+/// Tokenised exactly as expansion is (see [`me_token_prefix`]) rather than by
+/// substring: `@mentions` is a search term, not a broken `@me`, and warning about
+/// it would teach the user to ignore the warning.
 pub fn has_unexpanded_me(current_user: Option<&str>, filter: &str) -> bool {
-    current_user.is_none() && filter.contains(ME_TOKEN)
+    current_user.is_none() && has_me_token(filter)
 }
 
 /// What to tell the user when [`has_unexpanded_me`] holds. Lives here, next to the
@@ -429,6 +453,24 @@ mod tests {
         );
     }
 
+    /// `expand_me` documents itself as case-insensitive, and the per-token rule
+    /// always was — but the gate in front of it wasn't, so an uppercase `@ME` was
+    /// quietly left literal and matched nobody.
+    #[rstest]
+    #[case::uppercase_qualifier(Some("alice"), "AUTHOR:@ME", "AUTHOR:alice")]
+    #[case::mixed_case_bare(Some("alice"), "@Me", "alice")]
+    // A token that only contains the letters is a search term, not an `@me`.
+    #[case::substring_lookalike(Some("alice"), "@mentions", "@mentions")]
+    // Multibyte tokens must not panic on the byte-offset split (they aren't `@me`).
+    #[case::multibyte(Some("alice"), "バグ修正", "バグ修正")]
+    fn expand_me_matches_me_tokens_case_insensitively(
+        #[case] current_user: Option<&str>,
+        #[case] input: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(expand_me(current_user, input), expected);
+    }
+
     // `@me` in a filter is silently inert while the login is unknown: it stays
     // literal and matches nobody. These pin the predicate the front-ends warn on.
     #[rstest]
@@ -448,22 +490,25 @@ mod tests {
         assert_eq!(super::has_unexpanded_me(current_user, filter), expected);
     }
 
-    /// The warning must fire exactly when `expand_me` leaves an `@me` behind — if the
-    /// two disagree, either a working filter is flagged or a broken one stays silent.
+    /// The warning must fire on exactly the filters a login would have changed. If
+    /// the two ever disagree, either a working filter gets flagged or a broken one
+    /// stays silent — and both teach the user to distrust the warning.
     #[rstest]
-    #[case::unknown_login(None, "author:@me")]
-    #[case::known_login(Some("alice"), "author:@me")]
-    #[case::no_me_token(Some("alice"), "author:bob")]
-    #[case::unknown_login_no_me(None, "author:bob")]
-    fn has_unexpanded_me_agrees_with_expand_me(
-        #[case] current_user: Option<&str>,
-        #[case] filter: &str,
-    ) {
-        let expanded = expand_me(current_user, filter);
+    #[case::qualifier("author:@me")]
+    #[case::bare_token("@me")]
+    #[case::uppercase_qualifier("AUTHOR:@ME")]
+    #[case::one_of_several_or_groups("state:open\nauthor:@me")]
+    #[case::no_me_at_all("author:bob label:bug")]
+    // A search term that merely contains the letters is not an `@me`: expansion
+    // leaves it alone, so the warning must too.
+    #[case::substring_lookalike("@mentions")]
+    #[case::substring_in_qualifier("label:@mention")]
+    fn warning_fires_exactly_when_a_login_would_change_the_filter(#[case] filter: &str) {
+        let a_login_changes_it = expand_me(Some("alice"), filter) != filter;
         assert_eq!(
-            super::has_unexpanded_me(current_user, filter),
-            expanded.contains(ME_TOKEN),
-            "warning disagrees with what expand_me actually left in {expanded:?}"
+            super::has_unexpanded_me(None, filter),
+            a_login_changes_it,
+            "warning and expansion disagree about {filter:?}"
         );
     }
 

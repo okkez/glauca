@@ -27,19 +27,33 @@ use tokio::sync::mpsc::Sender;
 
 use crate::settings::TauriSettings;
 
+/// The authenticated user as the front-end needs it. All three fields are
+/// `Option` because the lookup can fail (and, for `name`/`avatar_url`, because
+/// GitHub accounts may simply not have them).
+///
+/// Kept as a unit rather than three separate cells so `init` can hand back a
+/// consistent trio: a header showing a login with someone else's avatar would be
+/// worse than one showing nothing.
+#[derive(Default, Clone)]
+pub struct ResolvedUser {
+    pub login: Option<String>,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
 /// Shared state held by Tauri.
 pub struct AppState {
     pub tx: Sender<EngineCommand>,
     /// Pre-serialized initial state (left-pane entries + current user) for `init`.
     pub init: serde_json::Value,
-    /// Authenticated login, to expand `@me` when computing unread counts.
+    /// The authenticated user, for expanding `@me` and for the sidebar header.
     ///
     /// Shared and mutable because it can arrive late: when the lookup at startup
-    /// can't reach GitHub, the engine keeps retrying and reports the login over
+    /// can't reach GitHub, the engine keeps retrying and reports the user over
     /// `CurrentUserResolved`, which the message loop in `main.rs` writes here. The
     /// commands below must then expand `@me` for the rest of the session — reading
     /// a login captured at startup would keep every `@me` filter matching nothing.
-    pub current_user: Arc<RwLock<Option<String>>>,
+    pub current_user: Arc<RwLock<ResolvedUser>>,
     /// DB pool, to rebuild the left pane after structural changes.
     pub pool: SqlitePool,
     /// Whether desktop notifications fire (toggled at runtime via save_settings;
@@ -64,6 +78,12 @@ impl AppState {
     /// Poisoning is recovered from — the value is a plain `Option<String>`, which
     /// a panicking writer cannot leave half-updated.
     fn login(&self) -> Option<String> {
+        self.user().login
+    }
+
+    /// The authenticated user as it stands *now*, cloned for the same reasons as
+    /// [`AppState::login`].
+    fn user(&self) -> ResolvedUser {
         self.current_user
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -91,7 +111,22 @@ async fn dispatch(tx: &Sender<EngineCommand>, cmd: EngineCommand) -> Result<(), 
 /// startup. Synchronous: it is just a cached JSON value.
 #[tauri::command]
 pub fn init(state: State<'_, AppState>) -> serde_json::Value {
-    state.init.clone()
+    let mut init = state.init.clone();
+    // Overlay the user as it stands now. The snapshot was serialized at startup,
+    // where the lookup may have failed; a WebView reload re-runs the front-end's
+    // whole startup against this value, and would otherwise resurrect the stale
+    // "not authenticated" state — permanently, since `CurrentUserResolved` has
+    // already been sent and won't come again.
+    if let Some(obj) = init.as_object_mut() {
+        let user = state.user();
+        obj.insert("current_user".into(), serde_json::json!(user.login));
+        obj.insert("current_user_name".into(), serde_json::json!(user.name));
+        obj.insert(
+            "current_user_avatar_url".into(),
+            serde_json::json!(user.avatar_url),
+        );
+    }
+    init
 }
 
 /// Quit the app (Glauca > Quit). A command rather than a window close from JS,

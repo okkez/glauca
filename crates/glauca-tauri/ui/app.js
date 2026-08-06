@@ -759,6 +759,7 @@ async function refreshVisible() {
   const all = e ? state.itemsByQuery.get(e.rootQueryId) || [] : [];
   if (!e) {
     state.visibleItems = [];
+    setMeWarning(null); // nothing is filtered, so no filter to warn about
     renderItemList();
     return;
   }
@@ -785,6 +786,9 @@ async function refreshVisible() {
     setStatus(`filter: ${err}`, true);
     state.visibleItems = all;
     state.visibleTitleSegments = [];
+    // The list shown is now unfiltered, so a warning about the filter would be
+    // describing something the user isn't looking at.
+    setMeWarning(null);
   }
   renderItemList();
   // Also refresh the open detail pane from the reloaded items. renderDetail is

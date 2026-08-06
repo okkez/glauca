@@ -289,6 +289,10 @@ impl App {
             self.recompute_unread_counts_for_query(query_id, &items);
             self.items = items;
         }
+        // A resolved login can *shrink* the list as well as grow it — `-author:@me`
+        // matched everything while `@me` was literal — so the cursor can be left
+        // past the end, which empties the detail pane and makes `j` do nothing.
+        self.clamp_item_cursor();
     }
 
     pub(crate) fn recompute_unread_counts_for_query(&mut self, query_id: i64, items: &[ItemEntry]) {
@@ -477,6 +481,22 @@ mod tests {
 
         // Same items, same filter — only the login changed.
         assert_eq!(app.filtered_items().len(), 1);
+    }
+
+    /// A negated `@me` filter runs the other way: it matched everything while the
+    /// login was literal, and shrinks once it resolves. The cursor must come back
+    /// inside the list, or the detail pane goes blank and `j` stops responding.
+    #[test]
+    fn adopting_a_late_login_pulls_the_cursor_back_into_a_shrunken_list() {
+        let mut app = make_app_with_items(&["alice's PR", "alice's other PR"]);
+        app.stream_filter = Some("-author:@me".into());
+        assert_eq!(app.filtered_items().len(), 2);
+        app.item_cursor = 1;
+
+        app.adopt_current_user("alice".into());
+
+        assert!(app.filtered_items().is_empty());
+        assert_eq!(app.item_cursor, 0, "cursor left past the end of the list");
     }
 
     /// Unread badges are computed against the same filters, so they were wrong for

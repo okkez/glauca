@@ -78,7 +78,11 @@ fn main() -> anyhow::Result<()> {
             // the engine takes ownership of the original.
             let pool_for_state = pool.clone();
             let (engine, init) = Engine::start(pool, gh_client, sync, maintenance).await?;
-            let current_user = init.current_user.clone();
+            let current_user = commands::ResolvedUser {
+                login: init.current_user.clone(),
+                name: init.current_user_name.clone(),
+                avatar_url: init.current_user_avatar_url.clone(),
+            };
             let query_names = commands::query_name_map(&init.entries);
             let init_json = serde_json::to_value(&init)?;
             anyhow::Ok((engine, init_json, current_user, pool_for_state, query_names))
@@ -152,11 +156,20 @@ fn main() -> anyhow::Result<()> {
                     // unread_counts, mark_all_read) stop treating it as a literal.
                     // Written before the message reaches JS, so the re-filter the
                     // front-end runs on it already sees the new login.
-                    if let AppMessage::CurrentUserResolved { login, .. } = &msg {
+                    if let AppMessage::CurrentUserResolved {
+                        login,
+                        name,
+                        avatar_url,
+                    } = &msg
+                    {
                         *current_user_loop
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(login.clone());
+                            commands::ResolvedUser {
+                                login: Some(login.clone()),
+                                name: name.clone(),
+                                avatar_url: avatar_url.clone(),
+                            };
                     }
                     match serde_json::to_value(&msg) {
                         Ok(value) => {

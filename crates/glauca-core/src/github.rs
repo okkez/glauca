@@ -124,16 +124,22 @@ pub async fn get_current_user(client: &Octocrab) -> Result<CurrentUser, CurrentU
 fn classify_current_user_error(e: &octocrab::Error) -> CurrentUserError {
     match e {
         octocrab::Error::GitHub { source, .. } => {
-            classify_current_user_status(source.status_code.as_u16())
+            classify_current_user_status(source.status_code.as_u16(), &source.message)
         }
         _ => CurrentUserError::Unreachable,
     }
 }
 
-/// The status-code half of [`classify_current_user_error`], split out so the rule
-/// is unit-testable — octocrab's error variants carry a backtrace and are awkward
-/// to build by hand.
-fn classify_current_user_status(status: u16) -> CurrentUserError {
+/// The response half of [`classify_current_user_error`], split out so the rule is
+/// unit-testable — octocrab's error variants carry a backtrace and are awkward to
+/// build by hand.
+fn classify_current_user_status(status: u16, message: &str) -> CurrentUserError {
+    // A rate limit also arrives as 403, and it is the one refusal that lifts by
+    // itself. Treating it as final would leave `@me` dead for the whole session of
+    // an app that merely started inside a rate-limit window.
+    if is_rate_limit_response(status, message) {
+        return CurrentUserError::Unreachable;
+    }
     match status {
         401 | 403 => CurrentUserError::Rejected,
         _ => CurrentUserError::Unreachable,
@@ -270,20 +276,26 @@ pub enum SearchError {
     Other(anyhow::Error),
 }
 
+/// Whether a GitHub response is a rate limit rather than a real refusal.
+///
+/// GitHub overloads 403: it is both "you may not do this" and, with a telling
+/// message, "not right now". Every caller that treats a refusal as final has to
+/// make this distinction, so it lives in one place — reading it wrong means either
+/// hammering a wall or giving up on something that would work in an hour.
+fn is_rate_limit_response(status: u16, message: &str) -> bool {
+    let msg = message.to_lowercase();
+    status == 429
+        || (status == 403
+            && (msg.contains("rate limit") || msg.contains("abuse") || msg.contains("secondary")))
+}
+
 /// Classify an octocrab error: HTTP 429, or 403 whose message names a rate/abuse
 /// limit, is a rate limit; everything else is a generic failure.
 fn classify_octocrab_error(e: octocrab::Error) -> SearchError {
-    if let octocrab::Error::GitHub { source, .. } = &e {
-        let status = source.status_code.as_u16();
-        let msg = source.message.to_lowercase();
-        let rate_limited = status == 429
-            || (status == 403
-                && (msg.contains("rate limit")
-                    || msg.contains("abuse")
-                    || msg.contains("secondary")));
-        if rate_limited {
-            return SearchError::RateLimited;
-        }
+    if let octocrab::Error::GitHub { source, .. } = &e
+        && is_rate_limit_response(source.status_code.as_u16(), &source.message)
+    {
+        return SearchError::RateLimited;
     }
     SearchError::Other(anyhow::Error::new(e).context("GraphQL search failed"))
 }
@@ -662,17 +674,45 @@ mod tests {
     // and leave `@me` dead for the session.
     #[rstest]
     // GitHub answered "no" — the token can't change while the process runs.
-    #[case::unauthorized(401, CurrentUserError::Rejected)]
-    #[case::forbidden(403, CurrentUserError::Rejected)]
+    #[case::unauthorized(401, "Bad credentials", CurrentUserError::Rejected)]
+    #[case::forbidden(
+        403,
+        "Resource not accessible by personal access token",
+        CurrentUserError::Rejected
+    )]
+    // …except when the "no" is a rate limit, which lifts on its own. GitHub sends
+    // these as 403 too, so only the message tells them apart.
+    #[case::primary_rate_limit(
+        403,
+        "API rate limit exceeded for user ID 1.",
+        CurrentUserError::Unreachable
+    )]
+    #[case::secondary_rate_limit(
+        403,
+        "You have exceeded a secondary rate limit",
+        CurrentUserError::Unreachable
+    )]
+    #[case::abuse_detection(
+        403,
+        "You have triggered an abuse detection mechanism",
+        CurrentUserError::Unreachable
+    )]
+    #[case::too_many_requests(429, "Too many requests", CurrentUserError::Unreachable)]
     // GitHub answered, but not with a refusal: worth asking again.
-    #[case::server_error(500, CurrentUserError::Unreachable)]
-    #[case::bad_gateway(502, CurrentUserError::Unreachable)]
-    #[case::too_many_requests(429, CurrentUserError::Unreachable)]
+    #[case::server_error(500, "Internal server error", CurrentUserError::Unreachable)]
+    #[case::bad_gateway(502, "Bad gateway", CurrentUserError::Unreachable)]
     // A 404 on /user means the request never reached the account (proxy, enterprise
     // misroute), not that the account said no.
-    #[case::not_found(404, CurrentUserError::Unreachable)]
-    fn classify_current_user_status(#[case] status: u16, #[case] expected: CurrentUserError) {
-        assert_eq!(super::classify_current_user_status(status), expected);
+    #[case::not_found(404, "Not Found", CurrentUserError::Unreachable)]
+    fn classify_current_user_status(
+        #[case] status: u16,
+        #[case] message: &str,
+        #[case] expected: CurrentUserError,
+    ) {
+        assert_eq!(
+            super::classify_current_user_status(status, message),
+            expected
+        );
     }
 
     // Env lookup over a fixed map, for resolve_token tests.
