@@ -153,10 +153,10 @@ impl GlaucaApp {
     }
 
     /// Whether the filters shaping the current view lean on `@me` while the login
-    /// is unknown — i.e. the list is empty for a reason the list itself can't show.
-    /// The status footer turns this into a warning; see
-    /// [`glauca_core::logic::has_unexpanded_me`].
-    pub(crate) fn me_unexpanded(&self) -> bool {
+    /// is unknown — i.e. the list is wrong (empty, or unfiltered for a negated
+    /// `@me`) for a reason the list itself can't show. The status footer turns
+    /// this into a warning; see [`glauca_core::logic::has_unexpanded_me`].
+    pub(crate) fn has_unexpanded_me(&self) -> bool {
         glauca_core::logic::has_unexpanded_me(
             self.current_user.as_deref(),
             self.stream_filter.as_deref(),

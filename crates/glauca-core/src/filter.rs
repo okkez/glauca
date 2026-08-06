@@ -620,7 +620,7 @@ mod tests {
     /// never resolved: `author:@me` matches nobody (visibly empty), but
     /// `-author:@me` matches EVERYBODY. Harmless in a list; catastrophic in
     /// mark-all-read, which would wipe the query's unread state. This pins the
-    /// hazard that `engine::command_loop` refuses to act on.
+    /// hazard that `engine::mark_all_read_task` refuses to act on.
     #[test]
     fn negated_unexpanded_me_matches_everything() {
         let sf = StreamFilter::parse_expanded("-author:@me");

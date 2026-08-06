@@ -78,7 +78,7 @@ fn main() -> anyhow::Result<()> {
             // the engine takes ownership of the original.
             let pool_for_state = pool.clone();
             let (engine, init) = Engine::start(pool, gh_client, sync, maintenance).await?;
-            let current_user = commands::ResolvedUser {
+            let current_user = commands::CurrentUserState {
                 login: init.current_user,
                 name: init.current_user_name,
                 avatar_url: init.current_user_avatar_url,
@@ -170,7 +170,7 @@ fn main() -> anyhow::Result<()> {
                         *current_user_loop
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            commands::ResolvedUser {
+                            commands::CurrentUserState {
                                 login: Some(login.clone()),
                                 name: name.clone(),
                                 avatar_url: avatar_url.clone(),

@@ -262,10 +262,10 @@ impl App {
     }
 
     /// Whether the filters shaping the current view lean on `@me` while the login
-    /// is unknown — i.e. the list is empty for a reason the list itself can't show.
-    /// The status bar turns this into a warning; see
-    /// [`glauca_core::logic::has_unexpanded_me`].
-    pub fn me_unexpanded(&self) -> bool {
+    /// is unknown — i.e. the list is wrong (empty, or unfiltered for a negated
+    /// `@me`) for a reason the list itself can't show. The status bar turns this
+    /// into a warning; see [`glauca_core::logic::has_unexpanded_me`].
+    pub fn has_unexpanded_me(&self) -> bool {
         glauca_core::logic::has_unexpanded_me(
             self.current_user.as_deref(),
             self.stream_filter.as_deref(),
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(app.filtered_items().len(), 2);
     }
 
-    /// `me_unexpanded` only forwards `App`'s two filters to core, which owns and
+    /// `has_unexpanded_me` only forwards `App`'s two filters to core, which owns and
     /// tests the predicate itself. What's worth pinning here is that *both* fields
     /// are wired up — a wrapper that forgot the search box would look fine until
     /// someone typed `@me` into it. Whether it clears is covered end-to-end by the
@@ -449,17 +449,17 @@ mod tests {
     #[rstest]
     #[case::from_the_stream_filter(Some("author:@me"), "")]
     #[case::from_the_search_box(None, "author:@me")]
-    fn me_unexpanded_reads_both_filters(
+    fn has_unexpanded_me_reads_both_filters(
         #[case] stream_filter: Option<&str>,
         #[case] inline_filter: &str,
     ) {
         let mut app = App::new(vec![]);
         app.stream_filter = stream_filter.map(Into::into);
         app.filter = ta(inline_filter);
-        assert!(app.me_unexpanded());
+        assert!(app.has_unexpanded_me());
 
         app.current_user = Some("alice".into());
-        assert!(!app.me_unexpanded());
+        assert!(!app.has_unexpanded_me());
     }
 
     /// The bug this whole path exists for: the app started before the network was

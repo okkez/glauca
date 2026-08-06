@@ -161,10 +161,10 @@ impl GlaucaApp {
         if self.bg_sync_pending > 0 {
             sync_bits.push(format!("{} bg", self.bg_sync_pending));
         }
-        // Why an `@me` filter is showing an empty list. Worth a footer of its own
-        // when nothing else is happening — the empty list explains nothing by itself.
-        let me_unexpanded = self.me_unexpanded();
-        let has_footer = !sync_bits.is_empty() || self.status.is_some() || me_unexpanded;
+        // Why an `@me` filter is showing the wrong list. Worth a footer of its own
+        // when nothing else is happening — the list explains nothing by itself.
+        let has_unexpanded_me = self.has_unexpanded_me();
+        let has_footer = !sync_bits.is_empty() || self.status.is_some() || has_unexpanded_me;
         let footer = has_footer.then(|| {
             let mut footer = v_flex()
                 .w_full()
@@ -179,7 +179,7 @@ impl GlaucaApp {
             if !sync_bits.is_empty() {
                 footer = footer.child(SharedString::from(sync_bits.join("  ")));
             }
-            if me_unexpanded {
+            if has_unexpanded_me {
                 footer = footer.child(div().text_color(cx.theme().warning_foreground).child(
                     SharedString::from(glauca_core::logic::ME_UNEXPANDED_WARNING),
                 ));

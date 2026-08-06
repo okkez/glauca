@@ -276,7 +276,8 @@ fn me_token_prefix(tok: &str) -> Option<&str> {
     }
     // `split_at_checked` rather than slicing: a token can be multibyte, and a cut
     // landing inside a character must yield "not an `@me`", not a panic.
-    let (prefix, suffix) = tok.split_at_checked(tok.len().checked_sub(ME_TOKEN.len())?)?;
+    let me_starts_at = tok.len().checked_sub(ME_TOKEN.len())?;
+    let (prefix, suffix) = tok.split_at_checked(me_starts_at)?;
     (prefix.ends_with(':') && suffix.eq_ignore_ascii_case(ME_TOKEN)).then_some(prefix)
 }
 
@@ -303,12 +304,14 @@ fn expand_me_line(line: &str, login: &str) -> String {
 
 /// `true` when the filters shaping a view — the filter stream's (`None` for a root
 /// query) ANDed with the inline search box — lean on `@me` while the login is
-/// unknown, so [`expand_me`] leaves the token literal and they match nobody.
+/// unknown, so [`expand_me`] leaves the token literal.
 ///
-/// This is the *silent* failure mode worth surfacing: an unresolved login (an
-/// offline start, a failed `/user` call) turns a working filter into an empty list
-/// with nothing on screen to explain it. Front-ends call this for the view they are
-/// about to render and show [`ME_UNEXPANDED_WARNING`] next to the result.
+/// A literal `@me` doesn't fail in one direction: `author:@me` matches nobody,
+/// while `-author:@me` excludes only the login literally named "@me" and so
+/// matches *everybody*. Either way the list on screen is not the one asked for,
+/// and nothing about it says why — that silence is what this predicate exists to
+/// break. Front-ends call it for the view they are about to render and show
+/// [`ME_UNEXPANDED_WARNING`] next to the result.
 ///
 /// It takes both filters rather than one because all three front-ends ask about
 /// exactly this pair; three copies of "either of them" would drift the moment a
@@ -467,22 +470,27 @@ mod tests {
         );
     }
 
-    /// `expand_me` documents itself as case-insensitive, and the per-token rule
-    /// always was — but the gate in front of it wasn't, so an uppercase `@ME` was
-    /// quietly left literal and matched nobody.
+    /// `expand_me` documents itself as case-insensitive, but wasn't: the gate in
+    /// front of it was a case-sensitive `contains`, and the bare-token arm compared
+    /// with `==`. Only the qualifier arm (`:@me`) lowercased, so `AUTHOR:@ME` and
+    /// `@Me` were both left literal and matched nobody.
     #[rstest]
-    #[case::uppercase_qualifier(Some("alice"), "AUTHOR:@ME", "AUTHOR:alice")]
-    #[case::mixed_case_bare(Some("alice"), "@Me", "alice")]
-    // A token that only contains the letters is a search term, not an `@me`.
-    #[case::substring_lookalike(Some("alice"), "@mentions", "@mentions")]
-    // Multibyte tokens must not panic on the byte-offset split (they aren't `@me`).
-    #[case::multibyte(Some("alice"), "バグ修正", "バグ修正")]
-    fn expand_me_matches_me_tokens_case_insensitively(
-        #[case] current_user: Option<&str>,
+    #[case::uppercase_qualifier("AUTHOR:@ME", "AUTHOR:alice")]
+    #[case::mixed_case_bare("@Me", "alice")]
+    fn expand_me_rewrites_me_tokens_whatever_their_case(
         #[case] input: &str,
         #[case] expected: &str,
     ) {
-        assert_eq!(expand_me(current_user, input), expected);
+        assert_eq!(expand_me(Some("alice"), input), expected);
+    }
+
+    /// A token that only *contains* the letters is a search term, not an `@me`.
+    #[rstest]
+    #[case::substring_lookalike("@mentions")]
+    // Multibyte tokens must also not panic on the byte-offset split.
+    #[case::multibyte("バグ修正")]
+    fn expand_me_leaves_tokens_that_only_look_like_me(#[case] input: &str) {
+        assert_eq!(expand_me(Some("alice"), input), input);
     }
 
     // Either filter shaping the view can be the inert one, and the warning speaks
@@ -495,20 +503,23 @@ mod tests {
     #[case::one_of_several_or_groups(Some("state:open\nauthor:@me"), "", true)]
     #[case::neither(Some("state:open"), "fix", false)]
     #[case::no_filters(None, "", false)]
-    fn has_unexpanded_me(
+    fn warning_fires_when_either_filter_needs_a_login(
         #[case] stream_filter: Option<&str>,
         #[case] inline_filter: &str,
         #[case] expected: bool,
     ) {
         assert_eq!(
-            super::has_unexpanded_me(None, stream_filter, inline_filter),
+            has_unexpanded_me(None, stream_filter, inline_filter),
             expected
         );
-        // A known login silences it whatever the filters say.
-        assert!(!super::has_unexpanded_me(
+    }
+
+    #[test]
+    fn a_known_login_silences_the_warning() {
+        assert!(!has_unexpanded_me(
             Some("alice"),
-            stream_filter,
-            inline_filter
+            Some("author:@me"),
+            "assignee:@me"
         ));
     }
 
@@ -528,7 +539,7 @@ mod tests {
     fn warning_fires_exactly_when_a_login_would_change_the_filter(#[case] filter: &str) {
         let a_login_changes_it = expand_me(Some("alice"), filter) != filter;
         assert_eq!(
-            super::has_unexpanded_me(None, Some(filter), ""),
+            has_unexpanded_me(None, Some(filter), ""),
             a_login_changes_it,
             "warning and expansion disagree about {filter:?}"
         );

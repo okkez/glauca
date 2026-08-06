@@ -768,19 +768,19 @@ async function refreshVisible() {
   // wrong list). Bail if a later call has already superseded us.
   const seq = ++state.filterSeq;
   try {
-    const result = await invoke("filter_items", {
+    const filterResult = await invoke("filter_items", {
       items: all,
       streamFilter: e.streamFilter,
       inlineFilter: state.filterText,
     });
     if (seq !== state.filterSeq) return;
-    state.visibleItems = result.items.map((m) => all[m.index]);
-    state.visibleTitleSegments = result.items.map((m) => m.title_segments);
+    state.visibleItems = filterResult.items.map((m) => all[m.index]);
+    state.visibleTitleSegments = filterResult.items.map((m) => m.title_segments);
     // Why the list may be empty: the filter asked for `@me` and the engine has no
     // login to expand it to. Rust decides and words this (it holds both the filters
     // and the login); the footer just shows it, and it clears itself on the next
     // filter once CurrentUserResolved lands.
-    setMeWarning(result.me_warning);
+    setMeWarning(filterResult.me_warning);
   } catch (err) {
     if (seq !== state.filterSeq) return;
     setStatus(`filter: ${err}`, true);

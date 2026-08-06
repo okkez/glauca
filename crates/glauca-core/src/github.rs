@@ -74,13 +74,13 @@ pub struct CurrentUser {
 /// same client could ever give a different answer.
 ///
 /// The caller retries the lookup in the background (an app started while offline
-/// must not stay `@me`-less for its whole session), so it needs to tell "GitHub
-/// never answered" from "GitHub answered, and the answer was no".
+/// must not stay `@me`-less for its whole session), so it needs to tell a failure
+/// that will pass from one that never will.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurrentUserError {
-    /// No usable answer came back: offline, DNS/TLS failure, timeout, or a 5xx.
-    /// Transient by nature — retrying is exactly what fixes it.
-    Unreachable,
+    /// Nothing durable went wrong: offline, DNS/TLS failure, timeout, a 5xx, or a
+    /// rate limit. Retrying is exactly what fixes it.
+    Transient,
     /// GitHub answered and refused: 401 (no/expired token) or 403 (a token
     /// without the scope to read the user). The token is fixed for the life of
     /// the process, so retrying it cannot help.
@@ -108,7 +108,7 @@ pub async fn get_current_user(client: &Octocrab) -> Result<CurrentUser, CurrentU
         }),
         Err(e) => {
             let kind = classify_current_user_error(&e);
-            warn!(error = %e, retryable = (kind == CurrentUserError::Unreachable),
+            warn!(error = %e, transient = (kind == CurrentUserError::Transient),
                   "get_current_user failed (unauthenticated or API error)");
             Err(kind)
         }
@@ -126,7 +126,7 @@ fn classify_current_user_error(e: &octocrab::Error) -> CurrentUserError {
         octocrab::Error::GitHub { source, .. } => {
             classify_current_user_status(source.status_code.as_u16(), &source.message)
         }
-        _ => CurrentUserError::Unreachable,
+        _ => CurrentUserError::Transient,
     }
 }
 
@@ -138,11 +138,11 @@ fn classify_current_user_status(status: u16, message: &str) -> CurrentUserError 
     // itself. Treating it as final would leave `@me` dead for the whole session of
     // an app that merely started inside a rate-limit window.
     if is_rate_limit_response(status, message) {
-        return CurrentUserError::Unreachable;
+        return CurrentUserError::Transient;
     }
     match status {
         401 | 403 => CurrentUserError::Rejected,
-        _ => CurrentUserError::Unreachable,
+        _ => CurrentUserError::Transient,
     }
 }
 
@@ -690,34 +690,31 @@ mod tests {
     #[case::primary_rate_limit(
         403,
         "API rate limit exceeded for user ID 1.",
-        CurrentUserError::Unreachable
+        CurrentUserError::Transient
     )]
     #[case::secondary_rate_limit(
         403,
         "You have exceeded a secondary rate limit",
-        CurrentUserError::Unreachable
+        CurrentUserError::Transient
     )]
     #[case::abuse_detection(
         403,
         "You have triggered an abuse detection mechanism",
-        CurrentUserError::Unreachable
+        CurrentUserError::Transient
     )]
-    #[case::too_many_requests(429, "Too many requests", CurrentUserError::Unreachable)]
+    #[case::too_many_requests(429, "Too many requests", CurrentUserError::Transient)]
     // GitHub answered, but not with a refusal: worth asking again.
-    #[case::server_error(500, "Internal server error", CurrentUserError::Unreachable)]
-    #[case::bad_gateway(502, "Bad gateway", CurrentUserError::Unreachable)]
+    #[case::server_error(500, "Internal server error", CurrentUserError::Transient)]
+    #[case::bad_gateway(502, "Bad gateway", CurrentUserError::Transient)]
     // A 404 on /user means the request never reached the account (proxy, enterprise
     // misroute), not that the account said no.
-    #[case::not_found(404, "Not Found", CurrentUserError::Unreachable)]
-    fn classify_current_user_status(
+    #[case::not_found(404, "Not Found", CurrentUserError::Transient)]
+    fn only_a_real_refusal_is_treated_as_final(
         #[case] status: u16,
         #[case] message: &str,
         #[case] expected: CurrentUserError,
     ) {
-        assert_eq!(
-            super::classify_current_user_status(status, message),
-            expected
-        );
+        assert_eq!(classify_current_user_status(status, message), expected);
     }
 
     // Env lookup over a fixed map, for resolve_token tests.

@@ -351,9 +351,10 @@ impl GlaucaApp {
             }
 
             // ── Login resolved after a failed startup lookup ────────────────────
-            // Everything computed against `@me` so far excluded everything, so redo
-            // it: the visible list here, and the selected query's unread badges
-            // (other queries' badges correct themselves on their next load).
+            // Everything computed against `@me` so far answered the wrong question
+            // (matching nobody, or everybody for a negated `@me`), so redo it: the
+            // visible list here, and the selected query's unread badges (other
+            // queries' badges correct themselves on their next load).
             AppMessage::CurrentUserResolved {
                 login,
                 name,

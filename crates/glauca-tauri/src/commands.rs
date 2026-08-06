@@ -27,15 +27,15 @@ use tokio::sync::mpsc::Sender;
 
 use crate::settings::TauriSettings;
 
-/// The authenticated user as the front-end needs it. All three fields are
-/// `Option` because the lookup can fail (and, for `name`/`avatar_url`, because
-/// GitHub accounts may simply not have them).
+/// What is currently known about the authenticated user. All three fields are
+/// `Option` because the lookup can fail — `login: None` is the "not resolved yet"
+/// state — and because `name`/`avatar_url` may simply be unset on the account.
 ///
 /// Kept as a unit rather than three separate cells so `init` can hand back a
 /// consistent trio: a header showing a login with someone else's avatar would be
 /// worse than one showing nothing.
 #[derive(Default, Clone)]
-pub struct ResolvedUser {
+pub struct CurrentUserState {
     pub login: Option<String>,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
@@ -57,7 +57,7 @@ pub struct AppState {
     /// `CurrentUserResolved`, which the message loop in `main.rs` writes here. The
     /// commands below must then expand `@me` for the rest of the session — reading
     /// a login captured at startup would keep every `@me` filter matching nothing.
-    pub current_user: Arc<RwLock<ResolvedUser>>,
+    pub current_user: Arc<RwLock<CurrentUserState>>,
     /// DB pool, to rebuild the left pane after structural changes.
     pub pool: SqlitePool,
     /// Whether desktop notifications fire (toggled at runtime via save_settings;
@@ -79,8 +79,8 @@ impl AppState {
     ///
     /// Cloned rather than handing out the guard: callers only need a `&str`, and
     /// holding a read lock across their work would serialize them for no reason.
-    /// Poisoning is recovered from — the value is a plain `ResolvedUser`, which a
-    /// panicking writer cannot leave half-updated.
+    /// Poisoning is recovered from — the value is a plain [`CurrentUserState`],
+    /// which a panicking writer cannot leave half-updated.
     fn login(&self) -> Option<String> {
         self.current_user
             .read()
@@ -91,7 +91,7 @@ impl AppState {
 
     /// The authenticated user as it stands *now*, cloned for the same reasons as
     /// [`AppState::login`].
-    fn user(&self) -> ResolvedUser {
+    fn user(&self) -> CurrentUserState {
         self.current_user
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -121,8 +121,8 @@ async fn dispatch(tx: &Sender<EngineCommand>, cmd: EngineCommand) -> Result<(), 
 /// Rebuilt per call rather than served from a snapshot because the login can
 /// arrive after startup, and a WebView reload re-runs the front-end's whole
 /// startup against this payload — a snapshot would resurrect the stale
-/// "not authenticated" state permanently, since `CurrentUserResolved` has already
-/// been sent and won't come again.
+/// "login unknown" state permanently, since `CurrentUserResolved` has already been
+/// sent and won't come again.
 ///
 /// Assembled as an `EngineInit` so serde owns the field names. Spelling them out
 /// here instead would be a second, unchecked copy of that mapping.
@@ -315,25 +315,26 @@ pub async fn filter_items(
     let inline_q = FilterQuery::parse(&expand_me(su, &inline_filter));
     let me_warning = has_unexpanded_me(su, stream_filter.as_deref(), &inline_filter)
         .then_some(ME_UNEXPANDED_WARNING);
+    let matched: Vec<FilteredItem> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| {
+            stream_q.as_ref().is_none_or(|q| q.matches(it))
+                && (inline_q.is_empty() || inline_q.matches(it))
+        })
+        .map(|(index, it)| FilteredItem {
+            index,
+            // Only the inline (search-box) filter highlights, like the GUI;
+            // stream filters describe the list, not a search.
+            title_segments: if inline_q.is_empty() {
+                Vec::new()
+            } else {
+                split_title(&it.title, &inline_q.highlight_ranges(&it.title))
+            },
+        })
+        .collect();
     Ok(FilterResult {
-        items: items
-            .iter()
-            .enumerate()
-            .filter(|(_, it)| {
-                stream_q.as_ref().is_none_or(|q| q.matches(it))
-                    && (inline_q.is_empty() || inline_q.matches(it))
-            })
-            .map(|(index, it)| FilteredItem {
-                index,
-                // Only the inline (search-box) filter highlights, like the GUI;
-                // stream filters describe the list, not a search.
-                title_segments: if inline_q.is_empty() {
-                    Vec::new()
-                } else {
-                    split_title(&it.title, &inline_q.highlight_ranges(&it.title))
-                },
-            })
-            .collect(),
+        items: matched,
         me_warning,
     })
 }

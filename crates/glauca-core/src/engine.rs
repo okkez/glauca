@@ -105,7 +105,8 @@ pub enum AppMessage {
     /// The authenticated user, resolved by a retry after the lookup at startup
     /// failed (see [`current_user_retry_task`]). Front-ends adopt it so `@me`
     /// starts expanding: re-filter the visible list and recompute unread counts,
-    /// both of which silently excluded everything while the login was unknown.
+    /// both of which were answering the wrong question while the login was
+    /// unknown (matching nobody, or everybody for a negated `@me`).
     CurrentUserResolved {
         login: String,
         name: Option<String>,
@@ -1156,7 +1157,9 @@ pub async fn refresh_timer_task(
 const CURRENT_USER_RETRY_BASE_SECS: u64 = 30;
 
 /// Wait before retry number `attempt` (0-based): doubling from
-/// [`CURRENT_USER_RETRY_BASE_SECS`], capped at the sync interval.
+/// [`CURRENT_USER_RETRY_BASE_SECS`], capped at the sync interval — or at the base,
+/// whichever is larger, since a configured interval can be shorter than the base
+/// (`MIN_SYNC_INTERVAL_SECS` is below it) and must not shorten the wait.
 ///
 /// Backing off at all matters because the usual cause is "no network": hammering
 /// every 30s achieves nothing. But the cap is the *sync* interval, not something
@@ -1164,14 +1167,13 @@ const CURRENT_USER_RETRY_BASE_SECS: u64 = 30;
 /// refresh timer keeps re-enqueuing every stale query each interval, so one extra
 /// `/user` call per interval is lost in the noise. A longer ceiling would save
 /// nothing measurable and cost what it saves: the user reconnects and keeps
-/// staring at an empty list until the next wake-up.
+/// staring at the wrong list until the next wake-up.
 fn current_user_retry_delay_secs(attempt: u32, sync_interval_secs: u64) -> u64 {
     // `1 << attempt` overflows past 63; saturate instead, since anything beyond a
     // handful of doublings is already clamped by the cap.
     let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
-    CURRENT_USER_RETRY_BASE_SECS
-        .saturating_mul(factor)
-        .min(sync_interval_secs.max(CURRENT_USER_RETRY_BASE_SECS))
+    let cap = sync_interval_secs.max(CURRENT_USER_RETRY_BASE_SECS);
+    CURRENT_USER_RETRY_BASE_SECS.saturating_mul(factor).min(cap)
 }
 
 /// Keep asking GitHub who we are until it answers, then tell the front-end.
@@ -1223,7 +1225,7 @@ pub async fn current_user_retry_task(
                 warn!("current user lookup refused; `@me` stays unexpanded this session");
                 return;
             }
-            Err(github::CurrentUserError::Unreachable) => {
+            Err(github::CurrentUserError::Transient) => {
                 attempt = attempt.saturating_add(1);
             }
         }
@@ -1478,7 +1480,7 @@ impl Engine {
         let cu = github::get_current_user(&gh).await;
         // Whether the login is worth chasing in the background: a start with no
         // network resolves nothing, and `@me` would stay literal all session.
-        let retry_current_user = matches!(cu, Err(github::CurrentUserError::Unreachable));
+        let should_retry_current_user = matches!(cu, Err(github::CurrentUserError::Transient));
         let cu = cu.ok();
         let current_user = cu.as_ref().map(|u| u.login.clone());
         let current_user_name = cu.as_ref().and_then(|u| u.name.clone());
@@ -1526,7 +1528,7 @@ impl Engine {
         tokio::spawn(maintenance_task(pool.clone(), maintenance));
         // Chase the login in the background when the startup lookup couldn't reach
         // GitHub, so `@me` starts working mid-session instead of after a restart.
-        if retry_current_user {
+        if should_retry_current_user {
             tokio::spawn(current_user_retry_task(
                 gh.clone(),
                 msg_tx.clone(),
@@ -2058,8 +2060,8 @@ mod tests {
     use crate::test_support::test_pool;
     use rstest::rstest;
 
-    /// An unread PR by `alice`, cached under `query_id`.
-    async fn seed_unread_item(pool: &SqlitePool, query_id: i64) -> db::CachedItem {
+    /// Cache one unread PR by `alice` under `query_id`.
+    async fn seed_unread_item(pool: &SqlitePool, query_id: i64) {
         let item = db::CachedItem {
             query_id,
             kind: "pull_request".into(),
@@ -2088,7 +2090,6 @@ mod tests {
             last_read_updated_at: None,
         };
         db::upsert_item(pool, &item).await.expect("seed item");
-        item
     }
 
     /// Run one mark-all-read and report whether the seeded item ended up read, plus
@@ -2103,10 +2104,12 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel::<AppMessage>(16);
         mark_all_read_task(pool.clone(), msg_tx, query_id, filter.map(str::to_string)).await;
 
-        // It answers either way — reloaded items (it acted) or an error (it
-        // refused) — so the first message says which happened.
+        // It answers either way — reloaded items (it acted) or a complaint (it
+        // refused, or the DB write failed) — so the first message says which
+        // happened. Both complaint shapes are captured so a failing test shows the
+        // engine's own wording instead of just "nothing happened".
         let complaint = match msg_rx.recv().await {
-            Some(AppMessage::ActionError(e)) => Some(e),
+            Some(AppMessage::ActionError(e) | AppMessage::Status(e)) => Some(e),
             _ => None,
         };
         let read = db::fetch_items(&pool, query_id).await.expect("fetch")[0]
@@ -2139,11 +2142,13 @@ mod tests {
         assert_eq!(complaint, None);
     }
 
-    /// `(attempt, sync interval) -> wait`. A zero would spin; anything past the sync
-    /// interval would leave the user waiting after the network is demonstrably back.
+    /// `(attempt, sync interval) -> wait`, in seconds. Spelled as literals so the
+    /// doubling is visible in the table; the base is 30s and the cap is the sync
+    /// interval. A zero would spin; anything past the interval would leave the user
+    /// waiting after the network is demonstrably back.
     #[rstest]
     // Doubles from the base …
-    #[case::first_retry(0, 300, CURRENT_USER_RETRY_BASE_SECS)]
+    #[case::first_retry(0, 300, 30)]
     #[case::second_retry(1, 300, 60)]
     #[case::third_retry(2, 300, 120)]
     #[case::fourth_retry(3, 300, 240)]
@@ -2152,16 +2157,16 @@ mod tests {
     #[case::capped(4, 300, 300)]
     #[case::still_capped(60, 300, 300)]
     // Past 63 the doubling would overflow the shift; it must saturate into the cap
-    // rather than panic (a long-lived unreachable session keeps counting).
+    // rather than panic (a long-lived offline session keeps counting).
     #[case::shift_overflow(u32::MAX, 300, 300)]
-    // At the default interval the cap is reached on the second retry.
+    // At the default 60s interval the cap is reached on the second retry.
     #[case::default_interval(1, DEFAULT_SYNC_INTERVAL_SECS, 60)]
     #[case::default_interval_capped(9, DEFAULT_SYNC_INTERVAL_SECS, 60)]
     // A sync interval below the base must not invert the range into an empty one —
     // the base wins, rather than producing a busy-loop of ever-shorter waits.
-    #[case::interval_below_base(0, 10, CURRENT_USER_RETRY_BASE_SECS)]
-    #[case::interval_below_base_capped(9, 10, CURRENT_USER_RETRY_BASE_SECS)]
-    fn current_user_retry_delay(
+    #[case::interval_below_base(0, 10, 30)]
+    #[case::interval_below_base_capped(9, 10, 30)]
+    fn retry_delay_doubles_then_caps_at_the_sync_interval(
         #[case] attempt: u32,
         #[case] interval: u64,
         #[case] expected: u64,

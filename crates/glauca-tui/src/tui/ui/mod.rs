@@ -52,18 +52,18 @@ pub fn draw(f: &mut Frame, app: &App) {
     // that bar doesn't wrap, and the key hints ahead of it already run past 120
     // columns, so anything appended there is invisible on a normal terminal. It
     // also matches where the GUI and Tauri front-ends put the same warning.
-    let warning_rows = if app.me_unexpanded() { 1 } else { 0 };
+    let show_me_warning = app.has_unexpanded_me();
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
-            Constraint::Length(warning_rows),
+            Constraint::Length(u16::from(show_me_warning)),
             Constraint::Length(1),
         ])
         .split(area);
 
     draw_main(f, app, root[0]);
-    if warning_rows > 0 {
+    if show_me_warning {
         draw_me_warning(f, root[1]);
     }
     draw_status_bar(f, app, root[2]);
@@ -208,26 +208,21 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use rstest::rstest;
 
-    /// The bottom two rows of a rendered frame — the warning line (when present)
-    /// and the status bar — as one string.
-    fn bottom_rows(app: &App, width: u16) -> String {
+    /// The row above the status bar in a rendered frame — where the `@me` warning
+    /// goes when there is one, and pane content when there isn't.
+    fn row_above_status_bar(app: &App, width: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        let h = buf.area.height;
-        (h - 2..h)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        let y = buf.area.height - 2; // -1 is the status bar itself
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
     }
 
-    /// An `@me` filter with no login empties the list and, without this, explains
-    /// nothing — so the warning has to reach the screen, disappear once the login
-    /// lands, and give its row back when it does.
+    /// An `@me` filter with no login shows the wrong list and, without this,
+    /// explains nothing — so the warning has to reach the screen, disappear once the
+    /// login lands, and give its row back when it does.
     ///
     /// Run at several widths because neither line wraps and the status bar's key
     /// hints alone run past 120 columns: a warning sharing that line is invisible on
@@ -240,21 +235,20 @@ mod tests {
     fn warning_shows_clears_and_frees_its_row(#[case] width: u16) {
         let mut app = make_app_with_items(&["alice's PR"]);
         app.stream_filter = Some("author:@me".into());
-        let with_warning = bottom_rows(&app, width);
         assert!(
-            with_warning.contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
+            row_above_status_bar(&app, width).contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
             "warning missing or clipped off a {width}-column screen"
         );
 
         app.adopt_current_user("alice".into());
-        let without = bottom_rows(&app, width);
+        let reclaimed = row_above_status_bar(&app, width);
 
         assert!(
-            !without.contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
+            !reclaimed.contains(glauca_core::logic::ME_UNEXPANDED_WARNING),
             "warning still on screen after the login resolved"
         );
         assert!(
-            without.lines().next().is_some_and(|l| l.trim() != ""),
+            !reclaimed.trim().is_empty(),
             "a blank row was left behind where the warning used to be"
         );
     }
