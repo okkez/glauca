@@ -364,9 +364,7 @@ impl GlaucaApp {
                 self.current_user_name = name;
                 self.current_user_avatar_url = avatar_url;
                 if let Some(query_id) = self.selected_root_query_id() {
-                    let items = std::mem::take(&mut self.items);
-                    self.recompute_unread(query_id, &items);
-                    self.items = items;
+                    self.recompute_unread_live(query_id);
                 }
                 needs_refilter = true;
             }

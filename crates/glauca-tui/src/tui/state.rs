@@ -266,10 +266,11 @@ impl App {
     /// The status bar turns this into a warning; see
     /// [`glauca_core::logic::has_unexpanded_me`].
     pub fn me_unexpanded(&self) -> bool {
-        let unexpanded =
-            |f: &str| glauca_core::logic::has_unexpanded_me(self.current_user.as_deref(), f);
-        unexpanded(self.stream_filter.as_deref().unwrap_or_default())
-            || unexpanded(self.filter.value())
+        glauca_core::logic::has_unexpanded_me_in(
+            self.current_user.as_deref(),
+            self.stream_filter.as_deref(),
+            self.filter.value(),
+        )
     }
 
     /// Adopt a login the engine resolved after startup (see

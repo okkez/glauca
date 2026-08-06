@@ -157,9 +157,11 @@ impl GlaucaApp {
     /// The status footer turns this into a warning; see
     /// [`glauca_core::logic::has_unexpanded_me`].
     pub(crate) fn me_unexpanded(&self) -> bool {
-        let unexpanded =
-            |f: &str| glauca_core::logic::has_unexpanded_me(self.current_user.as_deref(), f);
-        unexpanded(self.stream_filter.as_deref().unwrap_or_default()) || unexpanded(&self.filter)
+        glauca_core::logic::has_unexpanded_me_in(
+            self.current_user.as_deref(),
+            self.stream_filter.as_deref(),
+            &self.filter,
+        )
     }
 
     /// Rebuild the `filtered` index cache from `items` + stream/inline filters.

@@ -235,7 +235,7 @@ pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
 }
 
 /// The stand-in for the authenticated user's login in a filter or saved query.
-pub const ME_TOKEN: &str = "@me";
+const ME_TOKEN: &str = "@me";
 
 /// Replace `@me` with the authenticated user's login (case-insensitive).
 /// Falls back to `@me` unchanged if the user is not known yet.
@@ -281,7 +281,11 @@ fn me_token_prefix(tok: &str) -> Option<&str> {
 }
 
 /// `true` when any token in `s` is an `@me` (see [`me_token_prefix`]).
-fn has_me_token(s: &str) -> bool {
+///
+/// Public for the one caller that has no login to compare against: code handed a
+/// string that [`expand_me`] has *already* run over. A surviving `@me` there means
+/// the login was unknown at expansion time — see `engine`'s `MarkAllRead`.
+pub fn has_me_token(s: &str) -> bool {
     s.split_whitespace()
         .any(|tok| me_token_prefix(tok).is_some())
 }
@@ -310,6 +314,21 @@ fn expand_me_line(line: &str, login: &str) -> String {
 /// it would teach the user to ignore the warning.
 pub fn has_unexpanded_me(current_user: Option<&str>, filter: &str) -> bool {
     current_user.is_none() && has_me_token(filter)
+}
+
+/// [`has_unexpanded_me`] over the pair of filters that shape a view: the filter
+/// stream's (`None` for a root query) ANDed with the inline search box.
+///
+/// Lives here rather than in each front-end so "which filters does the warning
+/// speak for?" has one answer. All three front-ends ask this exact question, and
+/// three copies of it would drift the moment a third filter layer appears.
+pub fn has_unexpanded_me_in(
+    current_user: Option<&str>,
+    stream_filter: Option<&str>,
+    inline_filter: &str,
+) -> bool {
+    has_unexpanded_me(current_user, stream_filter.unwrap_or_default())
+        || has_unexpanded_me(current_user, inline_filter)
 }
 
 /// What to tell the user when [`has_unexpanded_me`] holds. Lives here, next to the
@@ -469,6 +488,31 @@ mod tests {
         #[case] expected: &str,
     ) {
         assert_eq!(expand_me(current_user, input), expected);
+    }
+
+    // Either filter shaping the view can be the inert one, and the warning speaks
+    // for both — a stream filter the user can't see the text of, and the search box.
+    #[rstest]
+    #[case::stream_filter(Some("author:@me"), "", true)]
+    #[case::inline_filter(None, "author:@me", true)]
+    #[case::both(Some("author:@me"), "assignee:@me", true)]
+    #[case::neither(Some("state:open"), "fix", false)]
+    #[case::no_filters(None, "", false)]
+    fn has_unexpanded_me_in(
+        #[case] stream_filter: Option<&str>,
+        #[case] inline_filter: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            super::has_unexpanded_me_in(None, stream_filter, inline_filter),
+            expected
+        );
+        // A known login silences it whatever the filters say.
+        assert!(!super::has_unexpanded_me_in(
+            Some("alice"),
+            stream_filter,
+            inline_filter
+        ));
     }
 
     // `@me` in a filter is silently inert while the login is unknown: it stays

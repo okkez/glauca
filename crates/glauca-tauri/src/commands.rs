@@ -17,7 +17,7 @@ use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
 use glauca_core::filter::{FilterQuery, StreamFilter};
 use glauca_core::logic::{
     ChangeCounts, ME_UNEXPANDED_WARNING, compute_unread_counts, count_changes, expand_me,
-    has_unexpanded_me,
+    has_unexpanded_me_in,
 };
 use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
 use serde::Serialize;
@@ -119,12 +119,23 @@ pub fn init(state: State<'_, AppState>) -> serde_json::Value {
     // already been sent and won't come again.
     if let Some(obj) = init.as_object_mut() {
         let user = state.user();
-        obj.insert("current_user".into(), serde_json::json!(user.login));
-        obj.insert("current_user_name".into(), serde_json::json!(user.name));
-        obj.insert(
-            "current_user_avatar_url".into(),
-            serde_json::json!(user.avatar_url),
-        );
+        for (key, value) in [
+            ("current_user", serde_json::json!(user.login)),
+            ("current_user_name", serde_json::json!(user.name)),
+            (
+                "current_user_avatar_url",
+                serde_json::json!(user.avatar_url),
+            ),
+        ] {
+            // These key names track `EngineInit`'s serde field names by hand.
+            // Renaming a field there would otherwise leave this inserting a dead
+            // key while JS reads the stale serialized one — silently.
+            let replaced = obj.insert(key.into(), value);
+            debug_assert!(
+                replaced.is_some(),
+                "{key} is not a field of EngineInit's JSON; the overlay has drifted"
+            );
+        }
     }
     init
 }
@@ -304,9 +315,8 @@ pub async fn filter_items(
     let su = login.as_deref();
     let stream_q = stream_filter.as_deref().map(|s| StreamFilter::parse(s, su));
     let inline_q = FilterQuery::parse(&expand_me(su, &inline_filter));
-    let me_unexpanded = has_unexpanded_me(su, stream_filter.as_deref().unwrap_or_default())
-        || has_unexpanded_me(su, &inline_filter);
-    let me_warning = me_unexpanded.then_some(ME_UNEXPANDED_WARNING);
+    let me_warning = has_unexpanded_me_in(su, stream_filter.as_deref(), &inline_filter)
+        .then_some(ME_UNEXPANDED_WARNING);
     Ok(FilterResult {
         items: items
             .iter()

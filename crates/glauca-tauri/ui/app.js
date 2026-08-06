@@ -795,11 +795,18 @@ async function refreshVisible() {
   // imperative and otherwise keeps showing the object captured at selectItem
   // time, so without this an updated body (e.g. a transparently re-fetched
   // maintenance-cleared body) or an applied background update would not appear
-  // until reselect. No-op when nothing is selected or the selected item fell
-  // out of the current view.
+  // until reselect.
   if (state.selectedItemKey) {
     const selectedItem = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
-    if (selectedItem) renderDetail(selectedItem);
+    if (selectedItem) {
+      renderDetail(selectedItem);
+    } else {
+      // The selection fell out of the view (a resolved login can shrink the list,
+      // as can typing a filter). Leaving the pane up would show an item that is no
+      // longer in the list beside it — the TUI and GUI both move the cursor here.
+      state.selectedItemKey = null;
+      clearDetail();
+    }
   }
 }
 
@@ -2010,9 +2017,11 @@ async function main() {
     call("load_cached", { queryId: e.rootQueryId });
   }
 
-  // The signed-in user is shown in the sidebar header; only the unauthenticated
-  // case warrants a status message.
-  if (!state.currentUser) setStatus("Not authenticated (set GH_TOKEN)");
+  // The signed-in user is shown in the sidebar header; only the unresolved case
+  // warrants a status message. It names both causes rather than instructing the
+  // user to set a token: the lookup also fails when the app starts before the
+  // network is up, and "set GH_TOKEN" would send them off fixing the wrong thing.
+  if (!state.currentUser) setStatus("GitHub login unknown (no token, or GitHub unreachable)");
   if (state.entries.length) {
     // Startup selection mirrors the GUI: sync only if the cache is stale, then
     // let the engine background-sync the remaining stale queries.
