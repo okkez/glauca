@@ -1,6 +1,5 @@
-//! Construction and theming: the `GlaucaApp::new` bootstrap (engine wiring, the
-//! push-based message delivery loop, filter-input subscription, settings
-//! restore) and the theme /
+//! Construction and theming: the `GlaucaApp::new` bootstrap (engine wiring, message
+//! delivery loop, filter-input subscription, settings restore) and the theme /
 //! settings-save / notification-toggle handlers.
 
 use gpui::*;
@@ -25,17 +24,11 @@ impl GlaucaApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Deliver engine messages push-based: await the channel and repaint as
-        // soon as a message lands, like the TUI/Tauri front-ends. The old loop
-        // polled `try_recv` on a 50ms timer, which added up to 50ms of latency
-        // to every engine round trip (left-pane navigation reloads items from
-        // SQLite on each move) and woke the event loop 20×/s while idle.
-        // Awaiting a tokio mpsc receiver needs no tokio runtime context — the
-        // sender wakes the task directly, and gpui reschedules it on the main
-        // thread. After the first message, drain whatever else is queued so a
-        // background-sync burst is applied in one frame with a single repaint.
-        // `spawn_in` (not `spawn`) so `apply` gets a `&mut Window`: error
-        // messages surface as `push_notification` toasts, which need the window.
+        // Awaiting a tokio mpsc receiver needs no tokio runtime context — the sender wakes
+        // the task directly, and gpui reschedules it on the main thread. After the first
+        // message, drain whatever else is queued so a background-sync burst is applied in
+        // one frame with a single repaint. `spawn_in` (not `spawn`) so `apply` gets a
+        // `&mut Window`: error messages surface as toasts, which need the window.
         let cmd_tx = engine.sender();
         cx.spawn_in(window, async move |this, cx| {
             let mut engine = engine;
@@ -156,15 +149,11 @@ impl GlaucaApp {
             });
         });
         app._subscriptions.push(appearance_sub);
-        // Flush pending settings whenever the app quits. Every quit trigger funnels
-        // through `cx.quit()` → `shutdown()`, which runs quit observers synchronously
-        // before dropping the entity, so the write always completes. On non-macOS,
-        // closing the last window quits the app, so an OS-initiated close (title-bar
-        // ×, Alt-F4) reaches this hook too; the `q`/menu Quit action reaches it via
-        // `cx.quit()`. (On macOS the sole window closing leaves the app running with
-        // settings still in memory — the eventual Cmd-Q flushes them.) Without this
-        // hook, a change made inside the debounce window right before an OS-initiated
-        // quit would be lost — a regression from the old eager per-event save.
+        // Flush pending settings whenever the app quits, so a change made inside the
+        // debounce window is not lost. Every quit trigger funnels through `cx.quit()` →
+        // `shutdown()`, which runs quit observers synchronously before dropping the entity.
+        // On non-macOS an OS-initiated close (title-bar ×, Alt-F4) reaches this hook too;
+        // on macOS the sole window closing leaves the app running, and Cmd-Q flushes.
         let quit_sub = cx.on_app_quit(|app, _cx| {
             // Cancel the still-pending debounce first so it can't race this write,
             // then flush once synchronously.
@@ -174,21 +163,18 @@ impl GlaucaApp {
         });
         app._subscriptions.push(quit_sub);
         app.prime();
-        // Restore saved column widths into the authoritative ResizableState after
-        // the first frame is drawn (panels are synced and the container has a real
-        // size by then). The `.size()` initial_size hints on the panels lose to
-        // `adjust_to_container_size`, which overwrites `panel.size` on that first
-        // prepaint — so seed the widths explicitly here. `on_next_frame` is a
-        // one-shot, so no guard flag is needed.
+        // Restore saved column widths after the first frame is drawn, when the container
+        // has a real size. The `.size()` initial_size hints lose to
+        // `adjust_to_container_size`, which overwrites `panel.size` on that first prepaint,
+        // so the widths are seeded explicitly here. `on_next_frame` is a one-shot.
         let pane_state = app.pane_state.clone();
         let left = app.settings.pane_sizes.first().copied();
         let right = app.settings.pane_sizes.get(2).copied();
         if left.is_some() || right.is_some() {
             window.on_next_frame(move |window, cx| {
                 pane_state.update(cx, |state, cx| {
-                    // panels.len() == 3 and the container size is settled here;
-                    // out-of-range indices are a no-op. Apply left (ix 0) before
-                    // right (ix 2); both take from the flexible center pane.
+                    // Apply left (ix 0) before right (ix 2); both take from the flexible
+                    // center pane. Out-of-range indices are a no-op.
                     if let Some(w) = left {
                         state.resize_panel(0, px(w), window, cx);
                     }
@@ -203,10 +189,9 @@ impl GlaucaApp {
         app
     }
 
-    /// Apply `self.settings.theme` to the global gpui-component theme. `System`
-    /// follows the OS appearance; `Light`/`Dark` pin an explicit mode. When the
-    /// resolved mode is dark, overlay the GitHub-flavored palette (the stock
-    /// dark theme is near-black) — see `apply_github_dark_overlay`.
+    /// Apply `self.settings.theme` to the global gpui-component theme. When the resolved
+    /// mode is dark, overlay the GitHub-flavored palette — the stock dark theme is
+    /// near-black. See `apply_github_dark_overlay`.
     pub(crate) fn apply_theme(&self, window: Option<&mut Window>, cx: &mut App) {
         match self.settings.theme {
             ThemePreference::System => Theme::sync_system_appearance(window, cx),
@@ -218,11 +203,9 @@ impl GlaucaApp {
         }
     }
 
-    /// Flush the in-memory settings to disk after a short idle delay, off the UI
-    /// thread. Replacing the task cancels a still-pending flush (same pattern as
-    /// `filter_task`), so a burst of changes — a pane drag most of all — writes
-    /// once. The `on_app_quit` hook flushes synchronously so a change made inside
-    /// the debounce window right before quitting isn't lost.
+    /// Flush the in-memory settings to disk after a short idle delay, off the UI thread.
+    /// Replacing the task cancels a still-pending flush, so a burst of changes — a pane
+    /// drag most of all — writes once. `on_app_quit` flushes synchronously.
     pub(crate) fn schedule_settings_save(&mut self, cx: &mut Context<Self>) {
         self.settings_save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SETTINGS_SAVE_DEBOUNCE).await;

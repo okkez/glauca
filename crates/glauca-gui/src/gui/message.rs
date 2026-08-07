@@ -10,9 +10,8 @@ use glauca_core::types::*;
 use super::*;
 
 impl GlaucaApp {
-    /// Install `items` as the visible list. Caller refilters / notifies. `is_new`
-    /// (unread) is already set per item by `cached_item_to_item_entry` when the
-    /// engine builds them, so there is nothing to recompute here.
+    /// Install `items` as the visible list. Caller refilters / notifies. `is_new` is
+    /// already set per item by `cached_item_to_item_entry`, so nothing is recomputed here.
     pub(crate) fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
         self.items = items;
     }
@@ -47,11 +46,8 @@ impl GlaucaApp {
     }
 
     /// Recompute unread badges for `query_id` from the live `self.items`. The
-    /// compute-then-insert split keeps the borrow checker satisfied inside one
-    /// `&mut self` method (the compute reads `entries`/`items`, the insert
-    /// mutates the map), so callers no longer clone `self.items` just to call
-    /// `recompute_unread`. That variant stays for items not yet applied to the
-    /// view (ItemsLoaded / apply_pending).
+    /// compute-then-insert split keeps the borrow checker satisfied inside one `&mut self`
+    /// method. `recompute_unread` is the variant for items not yet applied to the view.
     pub(crate) fn recompute_unread_live(&mut self, query_id: i64) {
         let updates = compute_unread_counts(
             &self.entries,
@@ -64,11 +60,9 @@ impl GlaucaApp {
         }
     }
 
-    /// Mark the currently-selected item read (it is shown in the detail pane):
-    /// record the `updated_at` it was read at, clear its in-memory `is_new`,
-    /// recompute the current query's unread badges, and persist via the engine
-    /// (fire-and-forget). No-op if there is no selection or the item is already read
-    /// (not currently unread).
+    /// Mark the currently-selected item read: record the `updated_at` it was read at,
+    /// clear its in-memory `is_new`, recompute the query's unread badges, and persist via
+    /// the engine (fire-and-forget). No-op without a selection or on an already-read item.
     pub(crate) fn mark_current_item_read(&mut self, cx: &mut Context<Self>) {
         let Some(&idx) = self.filtered.get(self.item_cursor) else {
             return;
@@ -97,11 +91,10 @@ impl GlaucaApp {
 
     /// Transparently re-fetch the body of the viewed item when it is missing.
     ///
-    /// Cache maintenance clears the re-fetchable `body` of old items to save space
-    /// (`glauca_core::db::clear_stale_bodies`); a `None` body means "cleared", not
-    /// "no description" (an empty description is stored as `Some("")`). Fetch it
-    /// once via `RefreshItem`; the reload repopulates the detail pane.
-    /// `body_refresh_requested` dedups repeat selection of the same item.
+    /// Cache maintenance clears the re-fetchable `body` of old items, so a `None` body
+    /// means "cleared", not "no description" — an empty description is stored as
+    /// `Some("")`. Fetched once via `RefreshItem`; `body_refresh_requested` dedups repeat
+    /// selection of the same item.
     pub(crate) fn refetch_current_body_if_missing(&mut self) {
         let Some(&idx) = self.filtered.get(self.item_cursor) else {
             return;
@@ -128,19 +121,14 @@ impl GlaucaApp {
         });
     }
 
-    /// Apply a single engine message to GUI state. Mirrors the TUI's `run_app`
-    /// message handling (crates/glauca-tui/src/tui/mod.rs). `window` is used to
-    /// surface error messages as notification toasts (the status footer is
-    /// transient — the next status overwrites it, so errors alone would be easy
-    /// to miss).
+    /// Apply a single engine message to GUI state. `window` is used to surface errors as
+    /// notification toasts: the status footer is transient, so the next status would
+    /// overwrite an error before it is read.
     pub(crate) fn apply(&mut self, msg: AppMessage, window: &mut Window, cx: &mut Context<Self>) {
-        // Only rebuild the filtered-index cache when items/filter/stream_filter
-        // actually change. Background sync floods `apply` with messages that don't
-        // touch the visible list (other queries' ItemsLoaded, Status, BgSync*,
-        // …); recomputing on each would re-scan all items (~thousands)
-        // on the UI thread and make the app sluggish while sync runs. Selection and
-        // filter edits recompute in their own handlers (`select_index`,
-        // `preview_entry`, the filter debounce task).
+        // Only rebuild the filtered-index cache when items/filter/stream_filter actually
+        // change. Background sync floods `apply` with messages that don't touch the
+        // visible list, and recomputing on each would re-scan thousands of items on the UI
+        // thread. Selection and filter edits recompute in their own handlers.
         let mut needs_refilter = false;
         match msg {
             AppMessage::ItemsLoaded {
@@ -148,10 +136,9 @@ impl GlaucaApp {
                 items,
                 background,
             } => {
-                // Desktop notification, independent of which query is selected:
-                // a background sync surfacing new/updated items for any query
-                // should notify. Returns `None` on the query's first load this
-                // session (baseline only), suppressing the startup storm.
+                // Independent of which query is selected: a background sync surfacing new
+                // items for any query should notify. Returns `None` on that query's first
+                // load this session, suppressing the startup storm.
                 let to_notify = self
                     .notif_tracker
                     .changed_count_to_notify(
@@ -168,11 +155,9 @@ impl GlaucaApp {
                 }
                 let is_current = self.selected_root_query_id() == Some(query_id);
                 if is_current && background {
-                    // Don't change the list under the user. Stash the fresh items
-                    // and surface a change banner; applied on explicit action.
-                    // Unread badges are deferred too, so nothing moves until then.
-                    // Removals count as changes, so a sync that only pruned items
-                    // no longer matching the query still surfaces.
+                    // Don't change the list under the user: stash the fresh items behind a
+                    // banner, applied on explicit action. Unread badges are deferred too.
+                    // Removals count as changes, so a sync that only pruned still surfaces.
                     let changes = count_changes(&self.items, &items);
                     if changes.is_empty() {
                         self.clear_pending();
@@ -201,10 +186,8 @@ impl GlaucaApp {
             } => {
                 self.syncing = false;
                 self.status = Some(format!("Sync error: {error}"));
-                // Only foreground (user-driven) failures get a toast. A background
-                // worker fault keeps recurring every sync cycle; toasting each one
-                // would bury the notification layer, so those stay in the status
-                // line only.
+                // Only foreground failures get a toast. A background worker fault recurs
+                // every sync cycle, and toasting each would bury the notification layer.
                 if !background {
                     window
                         .push_notification(Notification::error(format!("Sync error: {error}")), cx);
@@ -216,7 +199,6 @@ impl GlaucaApp {
             }
             AppMessage::Status(s) => self.status = Some(s),
 
-            // ── Entry add / edit / delete / reorder (mirror TUI mod.rs) ─────────
             AppMessage::QueryAdded(q) => {
                 self.entries.push(LeftPaneEntry::Query(q));
                 self.entry_cursor = self.entries.len() - 1;
@@ -327,14 +309,12 @@ impl GlaucaApp {
                 }
             }
 
-            // ── Action results ──────────────────────────────────────────────────
             AppMessage::ActionDone(s) => self.status = Some(s),
             AppMessage::ActionError(e) => {
                 self.status = Some(format!("Error: {e}"));
                 window.push_notification(Notification::error(e), cx);
             }
 
-            // ── Comments overlay ────────────────────────────────────────────────
             AppMessage::CommentsLoaded(comments) => {
                 if self.comments_open {
                     self.comments = comments;
@@ -350,11 +330,9 @@ impl GlaucaApp {
                 );
             }
 
-            // ── Login resolved after a failed startup lookup ────────────────────
-            // Everything computed against `@me` so far answered the wrong question
-            // (matching nobody, or everybody for a negated `@me`), so redo it: the
-            // visible list here, and the selected query's unread badges (other
-            // queries' badges correct themselves on their next load).
+            // Everything computed against `@me` so far answered the wrong question —
+            // matching nobody, or everybody for a negated `@me` — so redo the visible list
+            // and the selected query's badges. Other queries correct themselves on load.
             AppMessage::CurrentUserResolved {
                 login,
                 name,

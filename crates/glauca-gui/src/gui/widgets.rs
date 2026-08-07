@@ -9,11 +9,10 @@ use gpui_component::{ActiveTheme, Sizable, StyledExt, Theme, h_flex};
 use glauca_core::logic::ReviewState;
 use glauca_core::types::{ActorKind, ItemEntry, UserRef};
 
-/// Overlay GitHub Dark (Primer "dark default") colors on gpui-component's stock
-/// dark theme, which is near-black and felt too dark. Only the fields the app
-/// actually reads via `cx.theme()` are overridden. Must run *after* the theme
-/// is switched to dark: `Theme::change` / `apply_config` rebuild `colors` from
-/// the base config and would otherwise discard these.
+/// Overlay GitHub Dark (Primer "dark default") colors on gpui-component's stock dark
+/// theme, which is near-black. Only the fields the app reads via `cx.theme()` are
+/// overridden. Must run *after* the theme switches to dark: `Theme::change` /
+/// `apply_config` rebuild `colors` from the base config and would discard these.
 pub(crate) fn apply_github_dark_overlay(cx: &mut App) {
     let c = &mut Theme::global_mut(cx).colors;
     c.background = rgb(0x0d1117).into(); // canvas.default
@@ -21,10 +20,9 @@ pub(crate) fn apply_github_dark_overlay(cx: &mut App) {
     c.border = rgb(0x30363d).into(); // border.default
     c.sidebar = rgb(0x161b22).into(); // canvas.subtle (left pane)
     c.sidebar_foreground = rgb(0xe6edf3).into();
-    // `accent` is gpui-component's inline-code background and our unread-badge /
-    // row-tint color. A bright blue there is hard to read, so use a neutral grey
-    // (GitHub neutral.muted) — links and the filter-match highlight use `link`
-    // instead so they stay blue.
+    // `accent` is gpui-component's inline-code background and our unread row tint. A
+    // bright blue there is hard to read, so use a neutral grey — links and the
+    // filter-match highlight use `link` instead so they stay blue.
     c.accent = rgb(0x373e47).into();
     c.accent_foreground = rgb(0xe6edf3).into();
     c.link = rgb(0x2f81f7).into(); // accent.fg — links + filter-match highlight
@@ -109,11 +107,9 @@ pub(crate) fn reviewer_chip(user: UserRef, state: ReviewState, cx: &App) -> impl
         .child(login)
 }
 
-/// Status glyph for a list row: a GitHub-style octicon (vendored under
-/// `assets/octicons`, served by [`assets::Assets`]) whose shape encodes
-/// issue-vs-PR and whose color encodes the state (open=green, merged=magenta,
-/// closed=red, draft=muted). gpui paints the SVG as a mask tinted by
-/// `text_color`.
+/// Status glyph for a list row: an octicon (vendored under `assets/octicons`) whose shape
+/// encodes issue-vs-PR and whose color encodes the state. gpui paints the SVG as a mask
+/// tinted by `text_color`.
 pub(crate) fn item_state_icon(item: &ItemEntry, cx: &App) -> impl IntoElement {
     let (path, color) = item_state_icon_info(item, cx);
     svg()
@@ -179,8 +175,7 @@ pub(crate) const HEADER_AVATAR_PX: f32 = 36.;
 /// Side length of the review-state badge overlaid on a reviewer avatar.
 pub(crate) const BADGE_PX: f32 = 14.;
 
-/// Corner radius for a team avatar. GitHub renders non-human actors (teams, orgs,
-/// bots) as a rounded square rather than a circle; Primer's 24px `.avatar-3` uses
+/// Corner radius for a team avatar. Primer's 24px `.avatar-3` uses
 /// `--borderRadius-medium`, which is 6px.
 pub(crate) const TEAM_AVATAR_RADIUS_PX: f32 = 6.;
 
@@ -196,9 +191,8 @@ pub(crate) fn sized_avatar_url(url: &str, target_px: f32) -> String {
     format!("{url}{sep}s={px}")
 }
 
-/// One participant avatar: the user's GitHub avatar image, falling back to the
-/// login's initials placeholder when there is no avatar URL (older cache rows).
-/// `name` also drives the alt/initials text. Teams go through [`team_avatar`].
+/// One participant avatar, falling back to the login's initials when there is no avatar
+/// URL (older cache rows). Teams go through [`team_avatar`].
 pub(crate) fn user_avatar(user: &UserRef) -> Avatar {
     let mut a = Avatar::new()
         .name(user.login.clone())
@@ -209,15 +203,12 @@ pub(crate) fn user_avatar(user: &UserRef) -> Avatar {
     a
 }
 
-/// A team's avatar: the same [`Avatar`] as a user's, squared off. GitHub renders
-/// non-human actors as a rounded square instead of a circle, which is the *only*
-/// cue at this size — a team with no image and a user with no image both fall back
-/// to a glyph.
+/// A team's avatar: the same [`Avatar`] as a user's, squared off. The rounded square is
+/// the *only* cue at this size — a team and a user with no image both fall back to a glyph.
 ///
-/// `rounded` reaches the inner image too: `Avatar` copies its own corner radii onto
-/// the `img` it builds, which a parent's `overflow_hidden` would not do (gpui clips
-/// with a rectangular mask). Passing no `name` selects the placeholder branch, so a
-/// team with no team/org image gets the `people` octicon rather than initials.
+/// `rounded` reaches the inner image too: `Avatar` copies its own corner radii onto the
+/// `img` it builds, which a parent's `overflow_hidden` would not do. Passing no `name`
+/// selects the placeholder branch, so an imageless team gets the `people` octicon.
 pub(crate) fn team_avatar(user: &UserRef) -> Avatar {
     let mut a = Avatar::new()
         .placeholder(Icon::empty().path("octicons/people.svg"))
@@ -241,11 +232,9 @@ pub(crate) fn review_decision_icon(decision: &str, cx: &App) -> (&'static str, H
     }
 }
 
-/// Octicon, icon color, and badge background for a reviewer's [`ReviewState`],
-/// shown as a small badge overlaid on the reviewer avatar. gpui tints the SVG
-/// mask with `text_color`; the badge background shows through the icon's
-/// knockout — white for the filled check/x (GitHub-style), otherwise the
-/// neutral background as a plain ring.
+/// Octicon, icon color, and badge background for a reviewer's [`ReviewState`]. gpui tints
+/// the SVG mask with `text_color`, and the badge background shows through the icon's
+/// knockout — white for the filled check/x, otherwise a plain neutral ring.
 pub(crate) fn review_state_icon(state: ReviewState, cx: &App) -> (&'static str, Hsla, Hsla) {
     let theme = cx.theme();
     match state {
@@ -298,9 +287,8 @@ pub(crate) fn reviewer_avatar(user: &UserRef, state: ReviewState, cx: &App) -> i
 
 /// Render an item title, emphasising the inline-filter match range if any.
 ///
-/// Uses `StyledText` (not flex spans) so the title wraps across lines and the
-/// row grows to fit — the highlight is an overlaid style range on the wrapping
-/// text rather than a separate box that can't break mid-word.
+/// Uses `StyledText`, not flex spans, so the title wraps and the row grows to fit: the
+/// highlight is an overlaid style range rather than a box that can't break mid-word.
 pub(crate) fn highlight_title(
     title: &str,
     ranges: Vec<(usize, usize)>,

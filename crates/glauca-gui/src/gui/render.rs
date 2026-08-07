@@ -23,9 +23,9 @@ impl GlaucaApp {
         if let Some(url) = &self.current_user_avatar_url {
             avatar = avatar.src(sized_avatar_url(url, HEADER_AVATAR_PX));
         }
-        // Names both causes rather than asserting the token is missing: the lookup
-        // also fails when the app starts before the network is up, and the engine
-        // may still be retrying. Matches the Tauri header's wording.
+        // Names both causes rather than asserting the token is missing: the lookup also
+        // fails when the app starts before the network is up, and the engine may still be
+        // retrying.
         let login_line = self
             .current_user
             .clone()
@@ -135,9 +135,8 @@ impl GlaucaApp {
             col = col.child(row);
         }
 
-        // Empty area below the entries: right-click → New query. Kept as its own
-        // flex_1 element so a right-click on a row hits the row handler, not this.
-        // It also pushes the status footer below to the bottom of the pane.
+        // Empty area below the entries: right-click → New query. Its own flex_1 element so
+        // a right-click on a row hits the row handler, and so the footer sits at the bottom.
         col = col.child(
             div()
                 .id("left-empty")
@@ -151,9 +150,8 @@ impl GlaucaApp {
                 ),
         );
 
-        // Status footer: sync state and the latest status message (the user
-        // identity now lives in the header). Only shown when there is something
-        // to report.
+        // Status footer: sync state and the latest status message, shown only when there
+        // is something to report.
         let mut sync_bits = Vec::new();
         if self.syncing {
             sync_bits.push("syncing…".to_string());
@@ -233,8 +231,7 @@ impl GlaucaApp {
             .when(!self.pending_changes.is_empty(), |this| {
                 let view = cx.entity();
                 let label = self.pending_changes.banner_label();
-                // Solid attention color (amber) with its matching foreground so the
-                // banner clearly stands out instead of blending into the pane.
+                // Solid amber so the banner stands out instead of blending into the pane.
                 let bg = cx.theme().warning;
                 let fg = cx.theme().warning_foreground;
                 let mut hover_bg = bg;
@@ -266,10 +263,9 @@ impl GlaucaApp {
     }
 
     pub(crate) fn render_items(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // `filtered` is precomputed (`recompute_filtered`); rows are built lazily
-        // per visible range by `list`, which measures variable-height rows
-        // (wrapped titles) with overdraw. `items_list`'s count is kept in sync
-        // by `recompute_filtered`, so indices here always map into `filtered`.
+        // `filtered` is precomputed; rows are built lazily per visible range by `list`,
+        // which measures variable-height rows with overdraw. `items_list`'s count is kept
+        // in sync by `recompute_filtered`, so indices here always map into `filtered`.
         let count = self.filtered.len();
 
         let container = v_flex()
@@ -287,14 +283,12 @@ impl GlaucaApp {
             );
         }
 
-        // The `list` render closure only receives `&App`, so it reads the view
-        // entity for row data and captures it for click handlers (which mutate
-        // via `update` since `cx.listener` is unavailable here).
+        // The `list` render closure only receives `&App`, so it reads the view entity for
+        // row data and mutates via `update` — `cx.listener` is unavailable here.
         let view = cx.entity();
-        // Parse the inline filter once per render (used to highlight matching
-        // title text) and share it across all visible rows — re-parsing it per
-        // row is wasted work, especially while a divider drag re-measures the
-        // visible rows every frame.
+        // Parse the inline filter once per render and share it across visible rows —
+        // re-parsing per row is wasted work, especially while a divider drag re-measures
+        // every frame.
         let fq = std::rc::Rc::new(FilterQuery::parse(&expand_me(
             self.current_user.as_deref(),
             &self.filter,
@@ -307,9 +301,8 @@ impl GlaucaApp {
         )
     }
 
-    /// Build one center-list row: optional `NEW` badge, a wrapping (multi-line)
-    /// title, and a single-line meta line. Height is intentionally unconstrained
-    /// so `list` grows the row to fit a wrapped title.
+    /// Build one center-list row. Height is intentionally unconstrained so `list` grows
+    /// the row to fit a wrapped title.
     pub(crate) fn render_item_row(
         &self,
         ix: usize,
@@ -352,8 +345,7 @@ impl GlaucaApp {
             .border_color(cx.theme().border)
             .cursor_pointer()
             .when(selected, |e| e.bg(cx.theme().list_active))
-            // Unread rows get a faint background tint (replaces the old NEW
-            // badge); selection still takes precedence.
+            // Unread rows get a faint background tint; selection takes precedence.
             .when(!selected && is_new, |e| {
                 let mut tint = cx.theme().accent;
                 tint.a = 0.10;
@@ -513,8 +505,7 @@ impl GlaucaApp {
     }
 
     /// Top dropdown menu bar. Deliberately minimal — item/entry actions stay on the
-    /// keyboard and right-click menus, not here. Only app-level commands: a Glauca
-    /// (app) menu and a Help menu.
+    /// keyboard and right-click menus, so only app-level commands live here.
     pub(crate) fn render_menu_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let app = cx.entity();
 
@@ -608,11 +599,9 @@ impl GlaucaApp {
 }
 
 impl GlaucaApp {
-    /// Perf diagnostics (RUST_LOG=glauca_gui=debug): log the gap between
-    /// element tree rebuilds. During a burst of repaints (key held down) a
-    /// growing gap means layout/paint can't keep up with input. The timestamp
-    /// is updated unconditionally — every frame, even with debug logging off —
-    /// so the first gap after enabling logging is still correct.
+    /// Perf diagnostics (RUST_LOG=glauca_gui=debug): the gap between element tree
+    /// rebuilds, where a growing gap under held-down input means paint can't keep up. The
+    /// timestamp updates every frame even with logging off, so the first gap is correct.
     fn log_frame_gap(&mut self) {
         let now = std::time::Instant::now();
         let Some(prev) = self.last_render_at.replace(now) else {
@@ -677,22 +666,18 @@ impl Render for GlaucaApp {
             .text_color(cx.theme().foreground)
             .child(self.render_menu_bar(cx))
             .child(
-                // Drag-resizable 3-pane row. The group container is `size_full`,
-                // so it's wrapped in a `flex_1`/`min_h_0` div to take the height
-                // left under the menu bar. The left/right panes carry explicit
-                // (persisted) widths and MUST be `.flex_none()` — otherwise their
-                // internal `flex_grow: 1` makes them absorb space during a drag,
-                // so resizing the center/right divider would visibly stretch the
-                // *left* pane instead. Only the center stays flexible (it soaks
-                // up whatever the sized panels don't take). Every drag persists
-                // all sizes via `on_resize`.
+                // Drag-resizable 3-pane row. The group container is `size_full`, so it is
+                // wrapped in a `flex_1`/`min_h_0` div to take the height left under the
+                // menu bar. The left/right panes MUST be `.flex_none()`: otherwise their
+                // internal `flex_grow: 1` absorbs space during a drag, and resizing the
+                // center/right divider visibly stretches the *left* pane instead. Only the
+                // center stays flexible.
                 div().w_full().flex_1().min_h_0().child(
                     h_resizable("panes")
                         .with_state(&self.pane_state)
                         .on_resize({
-                            // Mirror the drag into the in-memory settings (the
-                            // single source of truth) and let the debounced task
-                            // flush once the drag pauses — no disk I/O per event.
+                            // Mirror the drag into the in-memory settings and let the
+                            // debounced task flush once it pauses — no disk I/O per event.
                             let this = cx.entity().downgrade();
                             move |state, _window, cx| {
                                 let sizes: Vec<f32> = state
@@ -783,8 +768,7 @@ impl Render for GlaucaApp {
             // gpui-component stores open dialogs/sheets/notifications in `Root`, but
             // `Root`'s own render does NOT paint them — the inner view must mount the
             // overlay layers (see examples/dialog_overlay). Without these, every
-            // `open_dialog` (entry add/edit forms, action menu, comment/approve/merge)
-            // is invisible, which is why the editing keys appeared to do nothing.
+            // `open_dialog` is invisible.
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
