@@ -11,9 +11,8 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             items,
             background,
         } => {
-            // Desktop notification, independent of which query is
-            // selected. Returns `None` on the query's first load this
-            // session (baseline only), suppressing the startup storm.
+            // Independent of which query is selected. Returns `None` on that query's first
+            // load this session, suppressing the startup storm.
             let to_notify = app
                 .notif_tracker
                 .changed_count_to_notify(query_id, &items, background, app.notifications_enabled)
@@ -25,10 +24,9 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             }
             let is_current = app.selected_root_query_id() == Some(query_id);
             if is_current && background {
-                // Don't change the list under the user; stash the fresh
-                // items and show a change banner (applied via `u`). Removals
-                // count too, so a sync that only pruned items no longer
-                // matching the query still surfaces instead of being dropped.
+                // Don't change the list under the user: stash the fresh items behind a
+                // banner, applied via `u`. Removals count too, so a sync that only pruned
+                // still surfaces.
                 let changes = glauca_core::logic::count_changes(&app.items, &items);
                 if changes.is_empty() {
                     app.clear_pending();

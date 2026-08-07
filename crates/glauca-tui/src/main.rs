@@ -15,19 +15,16 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Parse args first so `--version`/`--help` print and exit before we touch the
-    // log dir, DB, or TLS provider. This also keeps those flags usable without a
-    // TTY (e.g. `gh glauca --version` in CI or piped output).
+    // Parse args first so `--version`/`--help` print and exit before we touch the log dir,
+    // DB, or TLS provider — which also keeps those flags usable without a TTY.
     let cli = Cli::parse();
 
-    // Keep the guard alive for the whole program so buffered logs are flushed on
-    // exit. The TUI owns the terminal, so logs go to a file (see logging::init).
+    // Keep the guard alive for the whole program so buffered logs are flushed on exit.
     let _log_guard = glauca_core::logging::init("glauca-tui", "glauca_core=info,glauca_tui=info");
     tracing::info!("glauca-tui starting");
 
-    // rustls needs a process-level CryptoProvider, but with both aws-lc-rs and
-    // ring in the dependency graph it can't auto-select one. Install ring before
-    // any TLS use (the GitHub HTTP client). Ignore the error if already set.
+    // rustls needs a process-level CryptoProvider, and with both aws-lc-rs and ring in the
+    // graph it can't auto-select. Install ring before any TLS use.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let pool = db::open_pool(&db::resolve_db_path(cli.db_path)).await?;

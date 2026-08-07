@@ -3,16 +3,15 @@
 
 use super::*;
 
-/// Item-index window whose rows are guaranteed to cover everything ratatui can
-/// display for a list of the given height, used to limit the per-row fuzzy
-/// highlight (a Smith-Waterman scan, too costly to run for every item in a
-/// 1000+ list). ratatui measures the variable row heights and chooses the
-/// scroll offset itself at render time, and we build the rows *before* that, so
-/// we can't know the exact visible range — we over-approximate instead: at most
-/// `list_height` rows fit (each row is at least one line), so `list_height`
-/// items on either side of the cursor always contain the viewport, no matter
-/// how the titles wrap. Off-window rows are never on screen, so skipping their
-/// highlight is invisible.
+/// Item-index window guaranteed to cover everything ratatui can display for a list of the
+/// given height, used to limit the per-row fuzzy highlight — a Smith-Waterman scan, too
+/// costly for every item in a 1000+ list.
+///
+/// ratatui measures the variable row heights and picks the scroll offset at render time,
+/// after the rows are built, so the exact visible range is unknowable here. This
+/// over-approximates: at most `list_height` rows fit, since each is at least one line, so
+/// `list_height` items either side of the cursor always contain the viewport however the
+/// titles wrap. Off-window rows are never on screen, so skipping them is invisible.
 pub(super) fn highlight_window(cursor: usize, list_height: u16) -> std::ops::Range<usize> {
     let radius = list_height as usize;
     cursor.saturating_sub(radius)..cursor.saturating_add(radius + 1)
@@ -66,11 +65,10 @@ pub(super) fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width.min(area.width), height.min(area.height))
 }
 
-/// Draw a fixed 2-column `prompt` (in `prompt_style`) followed by the editable
-/// `ta` in the remaining width. The prompt cell is 2 columns, so `prompt` must
-/// be 2 display columns (e.g. `"> "`, `"/ "`). `ta` renders its own cursor and
-/// scrolls horizontally when the text overflows. Shared by the modal fields and
-/// the filter bar so the prompt width and layout stay in one place.
+/// Draw a fixed 2-column `prompt` followed by the editable `ta` in the remaining width.
+/// The cell is 2 columns, so `prompt` must be 2 display columns (e.g. `"> "`). `ta` renders
+/// its own cursor and scrolls horizontally on overflow. Shared by the modal fields and the
+/// filter bar so the prompt width lives in one place.
 pub(super) fn draw_prompted_field(
     f: &mut Frame,
     area: Rect,

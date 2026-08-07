@@ -5,16 +5,13 @@ use super::*;
 /// Selection marker drawn in the item list's left gutter (reserved on every row).
 const HIGHLIGHT_SYMBOL: &str = "▶ ";
 
-/// Item-list left-gutter layout, in display columns. The unread marker and the
-/// non-unread blank are both `MARKER_CELL_W` wide so item icons line up across
-/// rows. `ROW_INDENT_W` is a fixed approximation of line 1's prefix width that
-/// keeps the line-2 (repo) column aligned across rows — intentionally not the
-/// per-row `prefix_w`, which shifts with the number's digit count. Keep both in
-/// sync with the prefix layout in `draw_item_list`.
+/// Item-list left-gutter layout, in display columns. The unread marker and the non-unread
+/// blank are both `MARKER_CELL_W` wide so item icons line up across rows. `ROW_INDENT_W` is
+/// a fixed approximation of line 1's prefix width that keeps the repo column aligned —
+/// intentionally not the per-row `prefix_w`, which shifts with the number's digit count.
+/// Keep both in sync with the prefix layout in `draw_item_list`.
 const MARKER_CELL_W: usize = 3;
 const ROW_INDENT_W: usize = 10;
-
-// ── Left pane: saved queries ─────────────────────────────────────────────────
 
 pub(super) fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::QueryList;
@@ -80,15 +77,12 @@ pub(super) fn draw_query_list(f: &mut Frame, app: &App, area: Rect) {
     regions.query_len = app.entries.len();
 }
 
-// ── Middle pane: item list ────────────────────────────────────────────────────
-
 pub(super) fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::ItemList;
     let filter_mode = app.input_mode == InputMode::Filter;
 
-    // Layout: optional change banner (1 line) + filter bar (3 lines) + list.
-    // The banner shows when a background sync brought results we held back; press
-    // `u` to apply them.
+    // Layout: optional change banner (1 line) + filter bar (3 lines) + list. The banner
+    // shows when a background sync brought results we held back; `u` applies them.
     let has_banner = !app.pending_changes.is_empty();
     let split = if has_banner {
         Layout::default()
@@ -196,12 +190,10 @@ pub(super) fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
                 vec![Span::styled(item.title.as_str(), match_normal)]
             };
 
-            // Line 1 prefix: "new-marker  item-icon  #number", then the title
-            // (appended, wrapped below). The item icon is one glyph encoding the
-            // kind (issue/PR/merge), coloured by state. Both marker branches are
-            // `MARKER_CELL_W` wide (see its doc) so the icons line up; kept as
-            // separate spans so we can measure the prefix width and indent the
-            // wrapped title continuation lines to match.
+            // Line 1 prefix: "new-marker  item-icon  #number", then the wrapped title.
+            // Both marker branches are `MARKER_CELL_W` wide so the icons line up, and the
+            // spans stay separate so the prefix width can be measured and the wrapped
+            // continuation lines indented to match.
             let mut prefix_spans = vec![if item.is_new {
                 Span::styled(
                     format!("{}{}", app.icons.new_item, " ".repeat(MARKER_CELL_W - 1)),
@@ -233,8 +225,8 @@ pub(super) fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(spans));
             }
 
-            // Last line: (indent)  [🔒]  repo  <pad>  updated (relative, right-aligned).
-            // Indent by the fixed `ROW_INDENT_W` so repo lines up across rows (see its doc).
+            // Last line: (indent)  [🔒]  repo  <pad>  updated. The indent is the fixed
+            // `ROW_INDENT_W` so repo lines up across rows.
             let mut line2_spans = vec![Span::raw(" ".repeat(ROW_INDENT_W))];
             if item.repo_private {
                 line2_spans.push(Span::styled(
