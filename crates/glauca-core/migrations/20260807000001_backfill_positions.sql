@@ -2,9 +2,11 @@
 --
 -- `position` arrived with a `DEFAULT 0` and, until now, was never assigned on insert:
 -- the two migrations that added the column backfilled the rows that existed then, and
--- every row created since sits at 0. A table of identical positions cannot express an
--- order, so `ORDER BY position, created_at, id` fell through to the creation order and
--- reordering had nothing to move.
+-- every row created since sits at 0. Reordering used to exchange two rows' positions,
+-- which for a table of zeros wrote 0 back over itself and lost the reorder; it renumbers
+-- now, so it no longer needs the stored values to be distinct. What still does is the
+-- order the list comes back in: while positions tie, `ORDER BY position, created_at, id`
+-- settles it by creation time — an order nobody chose.
 --
 -- Renumbering is in exactly the order the left pane already displays, so nothing the
 -- user can see moves: rows that do carry distinct positions (an order someone chose

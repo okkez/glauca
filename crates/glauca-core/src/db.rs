@@ -265,20 +265,27 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
 /// Exchange the places of two sibling filter streams (they must share the same parent).
 ///
 /// Renumbers that parent's streams for the reasons spelled out on
-/// [`swap_query_positions`]. Only the parent named by `upper_id` is touched, so the
-/// numbering of other queries' streams is left as it is.
+/// [`swap_query_positions`], including why the transaction is `IMMEDIATE`. Only the parent
+/// named by `upper_id` is touched, so the numbering of other queries' streams is left as it
+/// is.
+///
+/// A stream deleted from under the reorder fails it, whichever of the two it was: a missing
+/// `upper_id` has no parent to look up here, and a missing `lower_id` is caught by
+/// [`exchanged`]. Neither may report success — see there for what a front-end does with a
+/// confirmation.
 pub async fn swap_filter_stream_positions(
     pool: &SqlitePool,
     upper_id: i64,
     lower_id: i64,
 ) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let parent_id = sqlx::query_scalar!(
         "SELECT parent_id FROM filter_streams WHERE id = ?",
         upper_id
     )
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    .with_context(|| format!("reading the parent of filter stream {upper_id}"))?;
     let ids = sqlx::query_scalar!(
         "SELECT id FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC, id ASC",
         parent_id
@@ -289,7 +296,8 @@ pub async fn swap_filter_stream_positions(
         .into_iter()
         .map(|id| id.expect("id is NOT NULL"))
         .collect();
-    let ids = exchanged(ids, upper_id, lower_id);
+    let ids = exchanged(ids, upper_id, lower_id)
+        .with_context(|| format!("reordering filter streams {upper_id} and {lower_id}"))?;
     for (position, id) in ids.iter().enumerate() {
         let position = position as i64;
         sqlx::query!(
@@ -396,13 +404,22 @@ pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
 /// the engine's confirmation, so the user sees it applied and then sees it undone on the
 /// next launch. Renumbering makes the write succeed from any starting state, and doing it
 /// in a transaction means a crash mid-way cannot leave positions half-assigned.
+///
+/// `BEGIN IMMEDIATE` for the reason spelled out at `prune_missing_items`: this transaction
+/// reads before it writes, and SQLite refuses a SHARED→RESERVED promotion with an instant
+/// `SQLITE_BUSY` that never reaches the busy handler, so a concurrent `upsert_items` landing
+/// between the read and the first write would fail the reorder outright rather than wait out
+/// the 30s timeout. Under the previous autocommit `UPDATE`s the handler did apply, so the
+/// deferred default would have made a keypress lose its reorder to whichever sync happened
+/// to be mid-commit.
 pub async fn swap_query_positions(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let ids =
         sqlx::query_scalar!("SELECT id FROM queries ORDER BY position ASC, created_at ASC, id ASC")
             .fetch_all(&mut *tx)
             .await?;
-    let ids = exchanged(ids, upper_id, lower_id);
+    let ids = exchanged(ids, upper_id, lower_id)
+        .with_context(|| format!("reordering queries {upper_id} and {lower_id}"))?;
     for (position, id) in ids.iter().enumerate() {
         let position = position as i64;
         sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", position, id)
@@ -413,16 +430,21 @@ pub async fn swap_query_positions(pool: &SqlitePool, upper_id: i64, lower_id: i6
     Ok(())
 }
 
-/// `ids` with the entries `a` and `b` in each other's place, or unchanged if either is
-/// absent — a reorder that names a row someone else has just deleted is a no-op, not an
-/// error, since the front-end is about to reload the list either way.
-fn exchanged(mut ids: Vec<i64>, a: i64, b: i64) -> Vec<i64> {
-    let a_idx = ids.iter().position(|id| *id == a);
-    let b_idx = ids.iter().position(|id| *id == b);
-    if let (Some(a_idx), Some(b_idx)) = (a_idx, b_idx) {
-        ids.swap(a_idx, b_idx);
-    }
-    ids
+/// `ids` with the entries `a` and `b` in each other's place, or `None` if either is absent
+/// — another front-end sharing this cache deleted the row after the caller last read the
+/// list.
+///
+/// `None` has to reach the caller as an error rather than as a silent success. The engine
+/// only tells the front-ends a reorder happened when the DB write returns `Ok`
+/// (`EngineCommand::SwapQueryPositions`), and the TUI and GUI answer that confirmation by
+/// moving the entry in their own `entries` vec without re-reading the DB. Reporting a move
+/// that nothing recorded would put back exactly the bug this renumbering exists to remove:
+/// an order that looks applied and is gone on the next launch.
+fn exchanged(mut ids: Vec<i64>, a: i64, b: i64) -> Option<Vec<i64>> {
+    let a_idx = ids.iter().position(|id| *id == a)?;
+    let b_idx = ids.iter().position(|id| *id == b)?;
+    ids.swap(a_idx, b_idx);
+    Some(ids)
 }
 
 /// Upsert a query record and return its id.
@@ -430,10 +452,13 @@ fn exchanged(mut ids: Vec<i64>, a: i64, b: i64) -> Vec<i64> {
 /// `name` is the optional display name shown in the left pane.
 /// If `None` (or empty string), the query string itself is used as the label.
 ///
-/// A newly saved query lands at the end of the left pane, which means its `position` is
-/// assigned here: the column's `DEFAULT 0` would put every query ever created at the same
-/// position, and since reordering exchanges two rows' positions (see
-/// [`swap_query_positions`]) a table of identical values cannot express any order at all.
+/// A newly saved query lands at the end of the left pane, which is what the assigned
+/// `position` says and the column's `DEFAULT 0` would not: at 0 the new query would sort
+/// among the oldest ones, and where exactly would be left to the `created_at` tie-break.
+/// Assigning it here is also what keeps the stored order the authority on what the user
+/// sees — a table of identical positions has no order in it to reorder, and would leave
+/// [`swap_query_positions`] renumbering rows into whatever sequence the tie-breaks
+/// happened to produce.
 ///
 /// The conflicting branch deliberately leaves `position` alone. Re-submitting an existing
 /// query string is how a rename reaches the DB, and a rename must not move the query out
@@ -1480,11 +1505,10 @@ mod tests {
         assert_eq!(filter_stream_order(&pool, parent).await, vec![5, 6, 7]);
     }
 
-    /// A new query has to be given a `position` of its own, one past the last. Left
-    /// at the schema's `DEFAULT 0` the whole table shares one value, and since the
-    /// reorder exchanges two rows' values it would then write 0 over 0 — the
-    /// front-end would still move the entry in its own `entries` vec, so the reorder
-    /// would look applied until the next launch read the rows back in creation order.
+    /// A new query has to be given a `position` of its own, one past the last, so that it
+    /// appends. At the schema's `DEFAULT 0` it would instead join whatever block of rows is
+    /// already sitting at 0 and take its place among them from the `created_at` tie-break,
+    /// which is not an order anyone chose.
     #[tokio::test]
     async fn upsert_query_appends_after_the_existing_queries() {
         let (pool, _file) = test_pool().await;
@@ -1560,6 +1584,28 @@ mod tests {
             .expect("swap");
 
         assert_eq!(query_order(&pool).await, vec![first, third, second]);
+    }
+
+    /// Front-ends sharing one cache can be showing a query another of them has deleted, so
+    /// a reorder can name a row that is no longer there. That has to fail rather than
+    /// report a move the DB never made: the TUI and GUI move the entry in their own
+    /// `entries` vec on the engine's confirmation, so an `Ok` here would show the user an
+    /// order that is gone again on the next launch — the bug this all exists to remove.
+    #[tokio::test]
+    async fn swap_query_positions_fails_when_a_query_is_gone() {
+        let (pool, _file) = test_pool().await;
+
+        let first = upsert_query(&pool, "query:first", "issue", None)
+            .await
+            .expect("upsert");
+        let second = upsert_query(&pool, "query:second", "issue", None)
+            .await
+            .expect("upsert");
+        delete_query(&pool, second).await.expect("delete");
+
+        assert!(swap_query_positions(&pool, first, second).await.is_err());
+        assert!(swap_query_positions(&pool, second, first).await.is_err());
+        assert_eq!(query_position(&pool, first).await, 0);
     }
 
     #[tokio::test]
@@ -1814,6 +1860,37 @@ mod tests {
             vec![second, first]
         );
         assert_eq!(filter_stream_position(&pool, untouched).await, 0);
+    }
+
+    /// The sibling counterpart of `swap_query_positions_fails_when_a_query_is_gone`. Both
+    /// arguments are covered because the two ids reach the DB by different routes here: the
+    /// upper one through the parent lookup, the lower one through `exchanged`.
+    #[tokio::test]
+    async fn swap_filter_stream_positions_fails_when_a_stream_is_gone() {
+        let (pool, _file) = test_pool().await;
+
+        let parent = upsert_query(&pool, "query:parent", "issue", None)
+            .await
+            .expect("upsert query");
+        let first = upsert_filter_stream(&pool, parent, "first", "state:open")
+            .await
+            .expect("upsert filter stream");
+        let second = upsert_filter_stream(&pool, parent, "second", "state:closed")
+            .await
+            .expect("upsert filter stream");
+        delete_filter_stream(&pool, second).await.expect("delete");
+
+        assert!(
+            swap_filter_stream_positions(&pool, first, second)
+                .await
+                .is_err()
+        );
+        assert!(
+            swap_filter_stream_positions(&pool, second, first)
+                .await
+                .is_err()
+        );
+        assert_eq!(filter_stream_position(&pool, first).await, 0);
     }
 
     #[tokio::test]
