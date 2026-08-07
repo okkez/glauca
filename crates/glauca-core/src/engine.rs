@@ -20,24 +20,20 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, info, instrument, warn};
 
-// ── Background messages ──────────────────────────────────────────────────────
-
 /// Messages the engine emits to the front-end.
 ///
-/// Serialized adjacently tagged (`{"type": "ItemsLoaded", "data": {…}}`) for the
-/// web front-end (glauca-tauri), which forwards each one to JavaScript over the
-/// Tauri event bus. The adjacent representation handles every variant shape
-/// (struct/newtype/tuple/unit) uniformly. The TUI/GUI never serialize it.
+/// Serialized adjacently tagged (`{"type": "ItemsLoaded", "data": {…}}`) for glauca-tauri,
+/// which forwards each one to JavaScript over the Tauri event bus. The adjacent
+/// representation handles every variant shape uniformly. The TUI/GUI never serialize it.
 #[derive(serde::Serialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AppMessage {
     ItemsLoaded {
         query_id: i64,
         items: Vec<ItemEntry>,
-        /// True when this load came from a background sync (the periodic worker),
-        /// false for user-driven loads (select/manual sync/refresh/mark-read). The
-        /// front-ends defer applying background updates to the currently-viewed
-        /// query so the list doesn't change under the user.
+        /// True when this load came from a background sync, false for user-driven
+        /// loads. The front-ends defer applying background updates to the
+        /// currently-viewed query so the list doesn't change under the user.
         background: bool,
     },
     QueryAdded(QueryEntry),
@@ -64,10 +60,9 @@ pub enum AppMessage {
     SyncError {
         query_id: i64,
         error: String,
-        /// True when the failure came from the background sync worker rather than
-        /// a user-driven sync. Front-ends surface foreground errors prominently
-        /// (e.g. a toast) but keep background failures quiet (status line only) so
-        /// a persistent fault doesn't spam a notification every sync cycle.
+        /// True when the failure came from the background sync worker. Front-ends
+        /// surface foreground errors prominently but keep background failures quiet,
+        /// so a persistent fault doesn't spam a notification every sync cycle.
         background: bool,
     },
     /// N background sync jobs were added to the worker queue.
@@ -103,10 +98,9 @@ pub enum AppMessage {
         active_id: i64,
     },
     /// The authenticated user, resolved by a retry after the lookup at startup
-    /// failed (see [`current_user_retry_task`]). Front-ends adopt it so `@me`
-    /// starts expanding: re-filter the visible list and recompute unread counts,
-    /// both of which were answering the wrong question while the login was
-    /// unknown (matching nobody, or everybody for a negated `@me`).
+    /// failed (see [`current_user_retry_task`]). Front-ends adopt it so `@me` starts
+    /// expanding: re-filter the visible list and recompute unread counts, both of
+    /// which matched nobody (or everybody, for a negated `@me`) until now.
     CurrentUserResolved {
         login: String,
         name: Option<String>,
@@ -121,8 +115,7 @@ pub struct SyncJob {
 }
 
 /// Coalesces background sync jobs: tracks which queries already have a queued or
-/// in-flight job so a long offline stretch can't pile up duplicate jobs. A thin
-/// newtype over shared state, mirroring `RateLimitGate`.
+/// in-flight job so a long offline stretch can't pile up duplicate jobs.
 #[derive(Clone, Default)]
 pub struct SyncCoalescer {
     /// query_ids that are queued or in flight.
@@ -152,8 +145,6 @@ impl SyncCoalescer {
         self.pending.lock().unwrap().remove(&query_id);
     }
 }
-
-// ── Background task helpers ───────────────────────────────────────────────────
 
 /// Fetch issue/PR comments from GitHub API (up to 100 most recent).
 pub async fn fetch_comments_task(
@@ -439,10 +430,9 @@ pub async fn load_items_task(
 }
 
 /// How a sync runs. `background` drives the front-end's deferred-refresh banner;
-/// `incremental` *permits* narrowing the fetch to items updated since the last one,
-/// but does not guarantee it — `resolve_since` still promotes the fetch to a full
-/// one when the query was never fetched, constrains `updated:` itself, or is due a
-/// pruning full fetch. `incremental: false` forces a full fetch unconditionally.
+/// `incremental` *permits* narrowing the fetch to items updated since the last one but
+/// does not guarantee it — see `resolve_since` for what promotes it to a full fetch.
+/// `incremental: false` forces a full fetch unconditionally.
 #[derive(Clone, Copy)]
 pub struct SyncOpts {
     pub background: bool,
@@ -473,10 +463,9 @@ const SEARCH_RESULT_CAP: usize = 1000;
 /// - **Truncated** (`total_count >= SEARCH_RESULT_CAP`): GitHub may have cut the
 ///   result set off, so we can't tell an item that left the query from one that was
 ///   cut off.
-/// - **Incomplete** (`!complete`): this walk lost data (an unparseable node, a
-///   partial GraphQL error, a page walk that couldn't continue), so a missing key
-///   doesn't prove the item left. Pruning would delete live rows and their read
-///   markers.
+/// - **Incomplete** (`!complete`): this walk lost data (an unparseable node, a partial
+///   GraphQL error, a page walk that couldn't continue), so a missing key doesn't prove
+///   the item left. Pruning would delete live rows and their read markers.
 fn may_prune(is_full: bool, total_count: usize, complete: bool) -> bool {
     is_full && total_count < SEARCH_RESULT_CAP && complete
 }
@@ -494,10 +483,8 @@ fn item_key_labels(keys: &[db::ItemKey]) -> Vec<String> {
 ///
 /// Stated per sync rather than inferred from `incremental`: that flag is about fetch
 /// *scope* (and `resolve_since` promotes incremental walks to full ones freely), so
-/// reading a deletion policy out of it would mean the next `incremental: false`
-/// construction site added for some non-user reason silently acquires
-/// delete-on-first-absence. This is the only safety property in the prune path, so it
-/// gets said out loud.
+/// reading a deletion policy out of it would let the next `incremental: false`
+/// construction site silently acquire delete-on-first-absence.
 #[derive(Clone, Copy)]
 pub enum PruneTrust {
     /// Automatic sync: require `db::PRUNE_STRIKES` consecutive absences, so a paged
@@ -522,24 +509,21 @@ impl PruneTrust {
 /// items updated since `ts`; `None` means a full fetch — the authoritative result
 /// set, and the only kind that may prune.
 ///
-/// A full fetch is chosen when the caller forced one (`incremental: false`), the
-/// query was never fetched, the query already constrains `updated:` itself (so it
-/// would not be narrowed anyway, and its fetch is authoritative), a forced full
-/// fetch is due, or a DB read fails (degrading to a full fetch is safe, just more
-/// work).
+/// A full fetch is chosen when the caller forced one (`incremental: false`), the query
+/// was never fetched, the query already constrains `updated:` itself (so it would not be
+/// narrowed anyway), a forced full fetch is due, or a DB read fails (degrading to a full
+/// fetch is safe, just more work).
 ///
-/// The periodic upgrade exists because an incremental fetch can never observe an
-/// item *leaving* the result set: `updated:>=` is ANDed onto the query, so an item
-/// that stopped matching is simply never returned again and its cached row lingers
-/// with a stale `state`. Only the prune after a full fetch removes it.
+/// The periodic upgrade exists because an incremental fetch can never observe an item
+/// *leaving* the result set: `updated:>=` is ANDed onto the query, so an item that
+/// stopped matching is simply never returned again. Only a prune removes it.
 async fn resolve_since(
     pool: &SqlitePool,
     query_id: i64,
     query_str: &str,
     opts: SyncOpts,
 ) -> Option<String> {
-    // Phrased as the reasons to fetch in full, matching the list above; the
-    // equivalent `want_incremental` form needs three nested negations to read.
+    // Phrased as reasons to fetch in full; `want_incremental` needs three negations.
     let must_fetch_full = !opts.incremental
         || github::constrains_updated(query_str)
         || db::is_full_fetch_due(pool, query_id, opts.full_fetch_interval_secs)
@@ -573,18 +557,13 @@ pub async fn sync_task(
     tx: mpsc::Sender<AppMessage>,
     gate: RateLimitGate,
 ) {
-    // Incremental fetches narrow the query to items updated since the last fetch;
-    // `None` means a full fetch. See `resolve_since` for when each is chosen — in
-    // particular, an incremental sync is periodically upgraded to a full one so the
-    // prune below can drop items that silently stopped matching the query.
+    // `None` means a full fetch; see `resolve_since` for when each is chosen.
     let since = resolve_since(&pool, query_id, &query_str, opts).await;
-    // Only a full fetch (no `since`) can tell us what fell out, so only then do we
-    // collect keys to prune against. Being full is necessary but not sufficient — a
-    // truncated or lossy walk is disqualified too; see `may_prune`.
+    // Only a full fetch can tell us what fell out, so only then do we collect keys to prune
+    // against. Necessary but not sufficient — see `may_prune`.
     let is_full = since.is_none();
-    // `incremental` on the span is the *permission* to narrow the fetch; this is what the walk
-    // actually did, and it decides whether pruning is even possible. Recorded on the span so
-    // every line of this sync — "sync done", the prune outcome, any warning — carries it.
+    // `incremental` on the span is the *permission* to narrow; this is what the walk did.
+    // Recorded on the span so every line of this sync carries it.
     tracing::Span::current().record("full_fetch", is_full);
     let mut keep_keys: Vec<db::ItemKey> = Vec::new();
     // `last_full_fetch_at` as it stands *before* the walk. Handed to the prune so it
@@ -593,9 +572,9 @@ pub async fn sync_task(
         db::last_full_fetch_at(&pool, query_id)
             .await
             .unwrap_or_else(|e| {
-                // `None` will mismatch a non-NULL current stamp and so skip this
-                // cycle's prune — the safe direction, but log it rather than leaving a
-                // query that mysteriously never prunes.
+                // `None` mismatches a non-NULL current stamp and so skips this cycle's
+                // prune — the safe direction, but log it rather than leaving a query
+                // that mysteriously never prunes.
                 warn!(error = %e, "could not read last_full_fetch_at; prune may be skipped");
                 None
             })
@@ -608,16 +587,14 @@ pub async fn sync_task(
     let reload = || load_items_task(pool.clone(), query_id, opts.background, tx.clone());
 
     let mut after: Option<String> = None;
-    // Raw `nodes` feed the `SEARCH_RESULT_CAP` comparison, which must reflect what
-    // GitHub returned; cached items are what the UI's "Synced N items" reports. They
-    // differ whenever a node failed to parse.
+    // Raw `nodes` feed the `SEARCH_RESULT_CAP` comparison, which must reflect what GitHub
+    // returned; cached items are what "Synced N items" reports. They differ whenever a node
+    // failed to parse.
     let mut total_node_count = 0usize;
     let mut total_item_count = 0usize;
-    // Whether `keep_keys` may be trusted as the complete result set. Cleared by any
-    // page that lost nodes (parse failure or partial GraphQL error) and by a walk
-    // that ended without exhausting the pages — in either case a key could be
-    // missing for a reason other than "left the query", and pruning would delete a
-    // live row along with its read marker.
+    // Whether `keep_keys` may be trusted as the complete result set. Cleared by any page
+    // that lost nodes and by a walk that ended without exhausting the pages — either way a
+    // key could be missing for a reason other than "left the query".
     let mut complete = true;
 
     loop {
@@ -654,8 +631,7 @@ pub async fn sync_task(
             Err(github::SearchError::Other(api_err)) => {
                 warn!(error = %api_err, "sync failed");
                 // Record the failed attempt so the full walk isn't retried every sync.
-                // Stamps only `last_full_fetch_attempt_at`, so this can't be mistaken
-                // for a completed walk — see `mark_full_fetch_attempted`.
+                // Stamps only the attempt column — see `mark_full_fetch_attempted`.
                 if is_full && let Err(db_err) = db::mark_full_fetch_attempted(&pool, query_id).await
                 {
                     warn!(error = %db_err, "failed to record full-fetch attempt");
@@ -679,7 +655,6 @@ pub async fn sync_task(
                     .map(|item| (item.repo_owner.clone(), item.repo_name.clone(), item.number)),
             );
         }
-        // Upsert this page's items into SQLite in one transaction.
         if let Err(e) = db::upsert_items(&pool, &page.items).await {
             let _ = tx
                 .send(AppMessage::SyncError {
@@ -701,19 +676,16 @@ pub async fn sync_task(
             "fetched page"
         );
 
-        // Reload from DB after each page so the UI shows results immediately.
-        // A page that produced no items wrote nothing, so re-reading the whole
-        // list would ship an identical snapshot — skip it. That matters in
-        // steady state, where most incremental syncs find nothing at all and
-        // would otherwise re-read (and re-diff) every cached row every minute.
+        // Reload from DB after each page so the UI shows results immediately. A page that
+        // produced no items wrote nothing, so re-reading would ship an identical snapshot
+        // — which matters in steady state, where most incremental syncs find nothing.
         if !page.items.is_empty() {
             reload().await;
         }
 
-        // Stop when GitHub reports no further pages, or defensively if
-        // it claims another page but hands back no cursor to fetch it —
-        // the latter leaves the result set unfinished, so it must not be
-        // treated as authoritative for pruning.
+        // Stop when GitHub reports no further pages, or defensively if it claims another
+        // page but hands back no cursor — that leaves the result set unfinished, so it
+        // must not be treated as authoritative for pruning.
         if !page.has_next_page {
             break;
         }
@@ -739,9 +711,8 @@ pub async fn sync_task(
         .await
         {
             // One line per prunable walk, even when nothing was absent: these lines are the
-            // denominator when reading how often a transient absence happens — how many there
-            // are, and the `cached` each one carries. A skip is logged separately because it
-            // observed nothing, so it is not evidence.
+            // denominator when reading how often a transient absence happens. A skip is
+            // logged separately because it observed nothing, so it is not evidence.
             Ok(db::PruneOutcome::Skipped { reason }) => info!(reason, "prune skipped"),
             Ok(db::PruneOutcome::Considered {
                 cached,
@@ -751,8 +722,8 @@ pub async fn sync_task(
                 deleted_keys,
             }) => {
                 // `strikes` distinguishes a corroborating walk from a `PruneTrust::Immediate`
-                // one, which deletes on the first absence: read as if they were the same, an
-                // immediate deletion looks like an item that left after two observations.
+                // one: read as the same, an immediate deletion looks like an item that left
+                // after two observations.
                 info!(
                     strikes,
                     cached,
@@ -769,10 +740,9 @@ pub async fn sync_task(
                 }
             }
             Err(e) => {
-                // Logged as well as surfaced: without this line a failed prune leaves no trace
-                // of its own, so a query whose prune keeps erroring would just be missing from
-                // the log rather than visibly broken — and its walks would drop silently out
-                // of the denominator the absence measurement is read against.
+                // Logged as well as surfaced: without this line a query whose prune keeps
+                // erroring would just be missing from the log rather than visibly broken,
+                // and its walks would drop out of the denominator silently.
                 warn!(error = %e, "prune failed");
                 let _ = tx
                     .send(AppMessage::Status(format!("prune error: {e}")))
@@ -780,26 +750,21 @@ pub async fn sync_task(
             }
         }
     } else if is_full && total_node_count < SEARCH_RESULT_CAP {
-        // Reaching here with a full, untruncated fetch leaves only one disqualifier,
-        // so `may_prune`'s rule doesn't have to be restated to name it. Truncation is
-        // not worth a warning: it's a property of the query, not of this attempt.
+        // Reaching here with a full, untruncated fetch leaves only one disqualifier.
+        // Truncation is not worth a warning: it's a property of the query, not this walk.
         warn!("skipping prune: incomplete result set");
     }
 
-    // Mark the query as freshly fetched only after all pages are done. Nothing stamps
-    // `last_full_fetch_at` before the paging loop finishes: the API-error return above
-    // records its failed attempt in `last_full_fetch_attempt_at` instead, which defers
+    // Mark the query as freshly fetched only after all pages are done. The API-error return
+    // above records its failed attempt in `last_full_fetch_attempt_at` instead, which defers
     // the retry without claiming a completion the prune guard would trust.
     //
-    // A completed full fetch stamps even when it couldn't prune (truncated, or the
-    // walk lost data). Withholding the stamp to "retry sooner" is a trap: some
-    // conditions are permanent, not transient — a query spanning a SAML/SSO- or
-    // OAuth-App-restricted org gets `FORBIDDEN` errors alongside its `data` on every
-    // single request, so `complete` would be false forever. That would promote every
-    // background sync to a full re-page (10+ requests per minute for a large query,
-    // into a secondary rate limit) while never once pruning. Stamping bounds the
-    // retry to one attempt per `full_fetch_interval_secs`; the cost is that a ghost
-    // may survive one extra interval.
+    // A completed full fetch stamps even when it couldn't prune. Withholding the stamp to
+    // "retry sooner" is a trap: some conditions are permanent — a query spanning a SAML/SSO-
+    // or OAuth-App-restricted org gets `FORBIDDEN` alongside its `data` on every request, so
+    // `complete` would be false forever, promoting every background sync to a full re-page
+    // (into a secondary rate limit) while never once pruning. The cost of stamping is that a
+    // ghost may survive one extra interval.
     if let Err(e) = db::mark_fetched(&pool, query_id, is_full).await {
         let _ = tx
             .send(AppMessage::SyncError {
@@ -819,19 +784,16 @@ pub async fn sync_task(
         .await;
 }
 
-// ── Background sync worker & refresh timer ────────────────────────────────────
-
 /// Default background auto-refresh interval / cache-staleness threshold, used
 /// when the front-end's settings file doesn't specify one.
 pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 60;
 /// Floor for the configured interval: avoids hammering the GitHub API and a
 /// zero-duration `tokio::time::interval` (which panics).
 pub const MIN_SYNC_INTERVAL_SECS: u64 = 10;
-/// Default interval at which an incremental background sync is upgraded to a full
-/// fetch, so `db::prune_missing_items` can drop rows that silently left the result
-/// set. For a query whose results fit one 100-item page this costs the exact same
-/// single GraphQL request as an incremental sync, so it is nearly free for typical
-/// queries; a large result set pays one extra request per 100 items per interval.
+/// Default interval at which an incremental background sync is upgraded to a full fetch,
+/// so `db::prune_missing_items` can drop rows that silently left the result set. A query
+/// whose results fit one 100-item page costs the same single GraphQL request either way;
+/// a large result set pays one extra request per 100 items per interval.
 pub const DEFAULT_FULL_FETCH_INTERVAL_SECS: u64 = 1800;
 /// Fallback backoff when a rate limit is hit but no reset time is available
 /// (e.g. a secondary/abuse limit, where `/rate_limit` still shows remaining>0).
@@ -856,12 +818,10 @@ pub const MAINTENANCE_STARTUP_DELAY_SECS: u64 = 60;
 /// while the user scrolls through cleared items.
 pub const MAX_CONCURRENT_ITEM_REFRESH: usize = 4;
 
-/// Tunables for the background cache-maintenance pass. Sized generously by default
-/// because clearing `body` is non-destructive (re-fetched on open) and overflow
-/// pruning never touches unread rows.
-///
-/// Built via [`MaintenanceConfig::effective`], like [`SyncConfig`], so the clamping
-/// happens once at the front-end boundary rather than silently on every sweep.
+/// Tunables for the background cache-maintenance pass. Sized generously because clearing
+/// `body` is non-destructive (re-fetched on open) and overflow pruning never touches unread
+/// rows. Built via [`MaintenanceConfig::effective`] so the clamping happens once at the
+/// front-end boundary rather than silently on every sweep.
 #[derive(Debug, Clone, Copy)]
 pub struct MaintenanceConfig {
     /// Age (days) past which an item's `body` is cleared. Terminal-state items are
@@ -875,15 +835,10 @@ pub struct MaintenanceConfig {
 impl MaintenanceConfig {
     /// Clamp both values to floors that keep the sweep from fighting the sync.
     ///
-    /// `retention_days = 0` would clear essentially every body. `max_items_per_query`
-    /// below `SEARCH_RESULT_CAP` cannot be honoured at all: the rows it deletes as
-    /// overflow are still inside the query's live result set, so the next full fetch
-    /// re-inserts them, unread (see `db::upsert_item`).
-    ///
-    /// Back when a full fetch happened at most once per session, that delete/re-insert
-    /// flap happened at most once too. Now that full fetches are on a timer it would
-    /// repeat every `full_fetch_interval_secs`, so the setting is ruled out rather
-    /// than documented.
+    /// `retention_days = 0` would clear essentially every body. `max_items_per_query` below
+    /// `SEARCH_RESULT_CAP` cannot be honoured at all: the rows it deletes as overflow are
+    /// still inside the query's live result set, so the next full fetch re-inserts them
+    /// unread — and with full fetches on a timer, that flap repeats every interval.
     pub fn effective(retention_days: u64, max_items_per_query: u64) -> Self {
         let effective = Self {
             retention_days: retention_days.max(1),
@@ -955,10 +910,9 @@ impl SyncConfig {
         Self::to_secs(self.full_fetch_interval_secs)
     }
 
-    /// Saturate rather than cast: a configured value above `i64::MAX` would wrap
-    /// *negative*, and the DB reads a negative threshold as "always overdue" — so a
-    /// nonsensically large setting would silently mean the exact opposite of what it
-    /// says. Saturating keeps an absurd value merely absurd.
+    /// Saturate rather than cast: a value above `i64::MAX` would wrap *negative*, and the
+    /// DB reads a negative threshold as "always overdue" — the exact opposite of what a
+    /// nonsensically large setting asks for.
     fn to_secs(secs: u64) -> i64 {
         i64::try_from(secs).unwrap_or(i64::MAX)
     }
@@ -1059,9 +1013,8 @@ pub async fn sync_worker_task(
             )
             .await;
         }
-        // Every exit path (rate-limited, synced, skipped-as-fresh, or failed):
-        // release the coalescing slot so the next timer tick can re-enqueue this
-        // query, then report the job as done.
+        // Every exit path releases the coalescing slot so the next timer tick can
+        // re-enqueue this query, then reports the job as done.
         pending.release(job.query_id);
         let _ = tx.send(AppMessage::BgSyncJobDone).await;
     }
@@ -1099,10 +1052,8 @@ async fn enqueue_stale_queries(
             .await
             .unwrap_or(true)
         {
-            // try_claim re-checks membership under the lock (a concurrent enqueue
-            // could have claimed this query during the await above), so enqueue
-            // only when we newly claim the slot — a long offline stretch can't
-            // pile up duplicate jobs.
+            // try_claim re-checks membership under the lock, since a concurrent enqueue
+            // could have claimed this query during the await above.
             if pending.try_claim(q.id) {
                 let _ = sync_tx
                     .send(SyncJob {
@@ -1131,8 +1082,6 @@ pub async fn refresh_timer_task(
     gate: RateLimitGate,
     pending: SyncCoalescer,
 ) {
-    // `SyncConfig` rather than a bare `u64`, for the invariants its constructor
-    // enforces — see [`SyncConfig`].
     let mut interval =
         tokio::time::interval(tokio::time::Duration::from_secs(sync.interval_secs()));
     interval.tick().await; // skip the immediate first tick
@@ -1161,13 +1110,10 @@ const CURRENT_USER_RETRY_BASE_SECS: u64 = 30;
 /// whichever is larger, since a configured interval can be shorter than the base
 /// (`MIN_SYNC_INTERVAL_SECS` is below it) and must not shorten the wait.
 ///
-/// Backing off at all matters because the usual cause is "no network": hammering
-/// every 30s achieves nothing. But the cap is the *sync* interval, not something
-/// longer, because that is the cadence the app already runs at — while offline the
-/// refresh timer keeps re-enqueuing every stale query each interval, so one extra
-/// `/user` call per interval is lost in the noise. A longer ceiling would save
-/// nothing measurable and cost what it saves: the user reconnects and keeps
-/// staring at the wrong list until the next wake-up.
+/// The cap is the *sync* interval rather than something longer because that is the cadence
+/// the app already runs at: while offline the refresh timer re-enqueues every stale query
+/// each interval, so one extra `/user` call per interval is lost in the noise. A longer
+/// ceiling would only leave the user staring at the wrong list after reconnecting.
 fn current_user_retry_delay_secs(attempt: u32, sync_interval_secs: u64) -> u64 {
     // `1 << attempt` overflows past 63; saturate instead, since anything beyond a
     // handful of doublings is already clamped by the cap.
@@ -1178,10 +1124,9 @@ fn current_user_retry_delay_secs(attempt: u32, sync_interval_secs: u64) -> u64 {
 
 /// Keep asking GitHub who we are until it answers, then tell the front-end.
 ///
-/// Spawned only when the lookup at startup failed. Without it a single failure —
-/// most often an app launched before the network was up — left `current_user`
-/// `None` for the entire session, and every `@me` filter silently matched nothing
-/// long after connectivity returned.
+/// Spawned only when the lookup at startup failed. Without it a single failure — most often
+/// an app launched before the network was up — left `current_user` `None` for the entire
+/// session, and every `@me` filter silently matched nothing.
 ///
 /// Stops on the first success, on a refusal that a retry cannot change (see
 /// [`github::CurrentUserError`]), or once the front-end has hung up.
@@ -1202,9 +1147,8 @@ pub async fn current_user_retry_task(
             return;
         }
         // Honour the same gate the sync worker does: while it is closed the app has
-        // decided not to talk to GitHub at all, and this task is not the exception
-        // that gets to keep knocking. Not counted as an attempt — nothing was tried,
-        // so the backoff shouldn't grow.
+        // decided not to talk to GitHub at all. Not counted as an attempt — nothing was
+        // tried, so the backoff shouldn't grow.
         if !gate.is_open(Utc::now().timestamp()) {
             debug!("skip current-user retry: rate-limited");
             continue;
@@ -1265,10 +1209,9 @@ async fn run_maintenance(pool: &SqlitePool, cfg: MaintenanceConfig) {
     }
 }
 
-/// Runs `run_maintenance` shortly after startup, then every
-/// `MAINTENANCE_INTERVAL_SECS`. The startup delay lets the initial burst of syncs
-/// settle before the first sweep, so its `VACUUM` (which needs exclusive access)
-/// doesn't contend with the initial `upsert_item` writes.
+/// Runs `run_maintenance` shortly after startup, then every `MAINTENANCE_INTERVAL_SECS`.
+/// The startup delay lets the initial burst of syncs settle before the first sweep, so its
+/// `VACUUM` (which needs exclusive access) doesn't contend with the initial writes.
 pub async fn maintenance_task(pool: SqlitePool, cfg: MaintenanceConfig) {
     tokio::time::sleep(tokio::time::Duration::from_secs(
         MAINTENANCE_STARTUP_DELAY_SECS,
@@ -1281,8 +1224,6 @@ pub async fn maintenance_task(pool: SqlitePool, cfg: MaintenanceConfig) {
         run_maintenance(&pool, cfg).await;
     }
 }
-
-// ── Engine: command-driven async facade ───────────────────────────────────────
 
 /// Initial state produced by `Engine::start`: the left-pane entries (root queries
 /// interleaved with their filter streams) and the authenticated user login.
@@ -1419,18 +1360,15 @@ pub enum EngineCommand {
     },
 }
 
-/// Build the left-pane entries from the DB: root queries in position order, each
-/// followed by its filter streams. This is the single source of the left-pane
-/// ordering — `Engine::start` uses it for the initial state and front-ends
-/// (glauca-tauri's `list_entries`) reuse it to rebuild the pane after structural
-/// changes, so the interleaving logic is never re-implemented per front-end.
+/// Build the left-pane entries from the DB: root queries in position order, each followed
+/// by its filter streams. The single source of the left-pane ordering — `Engine::start` uses
+/// it for the initial state and front-ends reuse it to rebuild the pane after structural
+/// changes, so the interleaving is never re-implemented per front-end.
 ///
-/// A DB read failure here is propagated, not swallowed — so `Engine::start`
-/// aborts launch rather than starting with an empty left pane. This is
-/// deliberate: the reads run against a freshly-opened, freshly-migrated pool, so
-/// a failure means something is genuinely wrong (corruption, disk error, schema
-/// mismatch), and showing an empty pane would look like the user's saved queries
-/// silently vanished — worse than failing loudly.
+/// A DB read failure is propagated, not swallowed, so `Engine::start` aborts launch rather
+/// than starting with an empty left pane that would look like the user's saved queries
+/// silently vanished. The reads run against a freshly-migrated pool, so a failure means
+/// something is genuinely wrong.
 pub async fn load_left_pane_entries(pool: &SqlitePool) -> anyhow::Result<Vec<LeftPaneEntry>> {
     let query_rows = db::list_queries(pool).await?;
     let mut entries: Vec<LeftPaneEntry> = Vec::new();
@@ -1490,21 +1428,15 @@ impl Engine {
         let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(64);
 
-        // One interval drives both the timer tick and the staleness threshold, so
-        // a query syncs roughly every `interval` seconds.
         let interval = sync.interval_secs;
         info!(
             sync_interval_secs = interval,
             full_fetch_interval_secs = sync.full_fetch_interval_secs,
             "engine started"
         );
-        // Shared gate that pauses background sync after a rate limit is hit.
         let gate = RateLimitGate::new();
-        // Coalesces background sync jobs: at most one queued/in-flight job per
-        // query, so a long offline stretch can't pile up duplicates.
         let pending = SyncCoalescer::new();
 
-        // Spawn the sequential background sync worker.
         tokio::spawn(sync_worker_task(
             pool.clone(),
             gh.clone(),
@@ -1514,7 +1446,6 @@ impl Engine {
             gate.clone(),
             pending.clone(),
         ));
-        // Spawn the periodic refresh timer.
         tokio::spawn(refresh_timer_task(
             pool.clone(),
             sync_job_tx.clone(),
@@ -1523,8 +1454,7 @@ impl Engine {
             gate.clone(),
             pending.clone(),
         ));
-        // Spawn the periodic local cache-maintenance sweep (body clears, overflow
-        // prune, VACUUM). Purely local, so it ignores the rate-limit gate.
+        // Purely local, so the maintenance sweep ignores the rate-limit gate.
         tokio::spawn(maintenance_task(pool.clone(), maintenance));
         // Chase the login in the background when the startup lookup couldn't reach
         // GitHub, so `@me` starts working mid-session instead of after a restart.
@@ -1536,7 +1466,6 @@ impl Engine {
                 gate.clone(),
             ));
         }
-        // Spawn the command-handling loop.
         tokio::spawn(command_loop(
             pool,
             gh,
@@ -1584,7 +1513,7 @@ impl Engine {
 }
 
 /// Dispatch `EngineCommand`s, spawning the underlying async tasks so the loop never
-/// blocks on a single command (mirrors the previous in-`run_app` `tokio::spawn` use).
+/// blocks on a single command.
 #[allow(clippy::too_many_arguments)] // pool/gh/channels/sync/gate/pending are all genuinely needed
 async fn command_loop(
     pool: SqlitePool,
@@ -1633,9 +1562,8 @@ async fn command_loop(
                 query_id,
                 query_str,
             } => {
-                // Forced full fetch (incremental: false → no `updated:>=` filter),
-                // which re-pages the whole result set and prunes items that no
-                // longer match. Foreground so it applies live.
+                // Forced full fetch: re-pages the whole result set and prunes items that
+                // no longer match. Foreground so it applies live.
                 tokio::spawn(sync_task(
                     pool.clone(),
                     gh.clone(),
@@ -1691,16 +1619,13 @@ async fn command_loop(
                 repo_name,
                 number,
             } => {
-                // Re-fetch one item, upsert it into this query's cache, reload the
-                // list, and report via Status (a light notice, not the sync spinner).
                 let pool2 = pool.clone();
                 let gh2 = gh.clone();
                 let tx2 = msg_tx.clone();
                 // Cap concurrency: front-ends fire this automatically to re-fetch a
-                // maintenance-cleared body when an item is viewed, so scrolling
-                // quickly through a backlog of cleared items could otherwise spawn a
-                // burst of concurrent GitHub requests and trip a secondary rate
-                // limit. The permit is held for the whole fetch.
+                // maintenance-cleared body when an item is viewed, so scrolling through a
+                // backlog of cleared items could otherwise trip a secondary rate limit.
+                // The permit is held for the whole fetch.
                 let sem = item_refresh_sem.clone();
                 tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
@@ -2000,20 +1925,18 @@ async fn command_loop(
 /// reload it so the front-end's `ItemsLoaded` handler recomputes unread counts for
 /// the query's entries (whether or not one is currently selected).
 ///
-/// Split out of `command_loop` so the refusal below can be tested without a GitHub
-/// client: this path never makes a request, and building an `Octocrab` in a test
-/// drags in TLS setup that the test process has no reason to need.
+/// Split out of `command_loop` so the refusal below can be tested without a GitHub client:
+/// this path never makes a request, and building an `Octocrab` in a test drags in TLS setup.
 async fn mark_all_read_task(
     pool: SqlitePool,
     msg_tx: mpsc::Sender<AppMessage>,
     query_id: i64,
     filter: Option<String>,
 ) {
-    // Refuse a filter whose `@me` never expanded. Callers expand before sending, so
-    // a surviving token means the login was unknown — and here that doesn't merely
-    // under-match, it can wildly over-match: `-author:@me` excludes only the literal
-    // login "@me", i.e. nobody, so it selects EVERY item and marks the whole query
-    // read. Silent, irreversible, and the opposite of what was asked for.
+    // Refuse a filter whose `@me` never expanded. Callers expand before sending, so a
+    // surviving token means the login was unknown — and here that can wildly over-match:
+    // `-author:@me` excludes only the literal login "@me", i.e. nobody, so it selects
+    // EVERY item and marks the whole query read. Silent and irreversible.
     if filter.as_deref().is_some_and(has_me_token) {
         let _ = msg_tx
             .send(AppMessage::ActionError(format!(
@@ -2036,10 +1959,9 @@ async fn mark_all_read_task(
     }
 }
 
-/// Mark every cached item of `query_id` whose fields match `expanded_filter` read.
-/// The filter is parsed application-side (`StreamFilter`) since it is not expressible
-/// in SQL; already-read items are skipped. `expanded_filter` already has `@me`
-/// substituted, so it is parsed without a second expansion.
+/// Mark every cached item of `query_id` whose fields match `expanded_filter` read. The
+/// filter is parsed application-side since it is not expressible in SQL; already-read items
+/// are skipped. `expanded_filter` already has `@me` substituted.
 async fn mark_filtered_items_read(
     pool: &SqlitePool,
     query_id: i64,
@@ -2102,8 +2024,8 @@ mod tests {
         db::upsert_item(pool, &item).await.expect("seed item");
     }
 
-    /// Run one mark-all-read and report whether the seeded item ended up read, plus
-    /// whatever the engine said about it.
+    /// Run one mark-all-read and report whether the seeded item ended up read, plus what
+    /// the engine said about it.
     async fn mark_all_read_outcome(filter: Option<&str>) -> (bool, Option<String>) {
         let (pool, _file) = test_pool().await;
         let query_id = db::upsert_query(&pool, "repo:o/r is:pr", "pull_request", None)
@@ -2114,10 +2036,8 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel::<AppMessage>(16);
         mark_all_read_task(pool.clone(), msg_tx, query_id, filter.map(str::to_string)).await;
 
-        // It answers either way — reloaded items (it acted) or a complaint (it
-        // refused, or the DB write failed) — so the first message says which
-        // happened. Both complaint shapes are captured so a failing test shows the
-        // engine's own wording instead of just "nothing happened".
+        // It answers either way — reloaded items (it acted) or a complaint (it refused, or
+        // the DB write failed) — so the first message says which happened.
         let complaint = match msg_rx.recv().await {
             Some(AppMessage::ActionError(e) | AppMessage::Status(e)) => Some(e),
             _ => None,
@@ -2128,9 +2048,8 @@ mod tests {
         (read, complaint)
     }
 
-    /// The dangerous case: with the login unknown, `-author:@me` excludes only the
-    /// literal login "@me" — nobody — so it selects every item. Acting on it would
-    /// silently wipe the query's unread state, which nothing can undo.
+    /// The dangerous case: with the login unknown, `-author:@me` excludes nobody and so
+    /// selects every item, silently wiping unread state that nothing can restore.
     #[tokio::test]
     async fn mark_all_read_refuses_an_unexpanded_negated_me() {
         let (read, complaint) = mark_all_read_outcome(Some("-author:@me")).await;
@@ -2152,10 +2071,8 @@ mod tests {
         assert_eq!(complaint, None);
     }
 
-    /// `(attempt, sync interval) -> wait`, in seconds. Spelled as literals so the
-    /// doubling is visible in the table; the base is 30s and the cap is the sync
-    /// interval. A zero would spin; anything past the interval would leave the user
-    /// waiting after the network is demonstrably back.
+    /// `(attempt, sync interval) -> wait`, in seconds. Spelled as literals so the doubling
+    /// is visible in the table; the base is 30s and the cap is the sync interval.
     #[rstest]
     // Doubles from the base …
     #[case::first_retry(0, 300, 30)]
@@ -2400,9 +2317,8 @@ mod tests {
         );
     }
 
-    /// Regression test for the ghost bug: once the full-fetch deadline passes, an
-    /// otherwise-incremental sync is upgraded to a full fetch so `prune_missing_items`
-    /// can drop items that silently stopped matching the query.
+    /// The ghost bug: once the full-fetch deadline passes, an otherwise-incremental sync is
+    /// upgraded to a full fetch so `prune_missing_items` can drop what stopped matching.
     #[tokio::test]
     async fn resolve_since_none_when_full_fetch_overdue() {
         let (pool, _file) = test_pool().await;
@@ -2417,10 +2333,9 @@ mod tests {
         );
     }
 
-    /// A query that constrains `updated:` itself is never narrowed further by
-    /// `apply_updated_since`, so its fetch is authoritative and must count as full
-    /// — otherwise `sync_task` would skip the prune for a result set it did fetch
-    /// in full.
+    /// A query that constrains `updated:` itself is never narrowed further, so its fetch is
+    /// authoritative and must count as full — otherwise `sync_task` would skip the prune
+    /// for a result set it did fetch in full.
     #[tokio::test]
     async fn resolve_since_none_when_query_constrains_updated() {
         let (pool, _file) = test_pool().await;
@@ -2436,9 +2351,8 @@ mod tests {
         );
     }
 
-    /// While the worker isn't draining (e.g. offline, jobs stuck in flight),
-    /// repeated timer ticks must not pile up duplicate jobs for the same query:
-    /// each stale query is enqueued at most once until its slot is released.
+    /// While the worker isn't draining (e.g. offline), repeated timer ticks must not pile
+    /// up duplicate jobs: each stale query is enqueued once until its slot is released.
     #[tokio::test]
     async fn enqueue_stale_coalesces_duplicate_jobs() {
         let (pool, _file) = test_pool().await;
@@ -2471,10 +2385,9 @@ mod tests {
         assert_eq!(ids, vec![q1, q2], "each stale query enqueued exactly once");
     }
 
-    /// The other half of coalescing: once the worker releases a query's slot,
-    /// a still-stale query must be re-enqueued on the next pass. This is what
-    /// keeps an offline query retrying roughly once per interval rather than
-    /// getting stuck forever after its first (failed) attempt.
+    /// The other half of coalescing: once the worker releases a query's slot, a still-stale
+    /// query must be re-enqueued, so an offline query retries once per interval rather than
+    /// getting stuck forever after its first failed attempt.
     #[tokio::test]
     async fn enqueue_stale_reenqueues_after_slot_released() {
         let (pool, _file) = test_pool().await;
