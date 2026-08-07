@@ -10,15 +10,12 @@ use tracing::info;
 /// Open the cache at `db_path`, creating the file and any missing parent directories
 /// and applying pending migrations.
 ///
-/// Fails without touching a SQLite file that glauca did not create — see
-/// [`ensure_glauca_cache`], which the caller cannot anticipate from the path alone.
+/// Refuses a SQLite file that glauca did not create — see [`ensure_glauca_cache`].
 ///
-/// Every failure names the path: it comes from `--db-path` / `GLAUCA_DB_PATH`, so a bare
-/// `Permission denied (os error 13)` would leave the user without the one detail they
-/// need to fix it.
+/// Every failure names the path: it is user-supplied via `--db-path` / `GLAUCA_DB_PATH`,
+/// and a bare `Permission denied (os error 13)` would not say which file it meant.
 pub async fn open_pool(db_path: &Path) -> Result<SqlitePool> {
-    // Logged before the work below, so a failure to create or open the path still
-    // leaves a record of which path was tried.
+    // Logged first, so a failure below still records which path was tried.
     info!(path = %db_path.display(), "opening cache");
 
     create_parent_dir(db_path)?;
@@ -27,9 +24,7 @@ pub async fn open_pool(db_path: &Path) -> Result<SqlitePool> {
         .with_context(|| format!("opening cache database {}", db_path.display()))?;
     ensure_glauca_cache(&pool, db_path).await?;
 
-    // A cache from an older or newer glauca gets past that guard and fails here instead.
-    // sqlx's error names the offending migration version but not the database file, so
-    // attach the path.
+    // sqlx's migration error names the offending version but not the database file.
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
@@ -37,11 +32,9 @@ pub async fn open_pool(db_path: &Path) -> Result<SqlitePool> {
     Ok(pool)
 }
 
-/// `create_if_missing` creates the cache file but not its directory, and the path can now
-/// come from `--db-path` / `GLAUCA_DB_PATH` rather than only the data dir — so make the
-/// parent here instead of in each front-end's startup. The empty check matters for a bare
-/// relative path like `cache.db`, where `parent()` is `Some("")` and `create_dir_all("")`
-/// fails.
+/// `create_if_missing` creates the cache file but not its directory. The empty check
+/// matters for a bare relative path like `cache.db`, where `parent()` is `Some("")` and
+/// `create_dir_all("")` fails.
 fn create_parent_dir(db_path: &Path) -> Result<()> {
     if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
@@ -55,52 +48,37 @@ fn connect_options(db_path: &Path) -> SqliteConnectOptions {
     SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
-        // WAL + `synchronous = NORMAL`. sqlx deliberately leaves `journal_mode`
-        // alone, which leaves SQLite's default rollback journal and
-        // `synchronous = FULL`: two to three fsyncs per commit. This cache commits
-        // constantly — `upsert_items` commits once per page, per query, per sync
-        // cycle — and under a rollback journal a reader blocks on the writer, so the
-        // UI's reloads queue behind whichever sync holds the lock (and behind
-        // `prune_missing_items`' `BEGIN IMMEDIATE`). Under WAL a commit is an append
-        // with the fsync deferred to a checkpoint, and readers never block on the
-        // writer — which also matters because a TUI and a GUI can share one cache.
+        // sqlx leaves `journal_mode` alone, which would leave SQLite's rollback journal
+        // and `synchronous = FULL`: two to three fsyncs per commit, and a reader blocked
+        // on the writer. This cache commits once per page, per query, per sync cycle, and
+        // a TUI and a GUI can share one file, so the UI's reloads would queue behind
+        // whichever sync holds the lock.
         //
-        // What NORMAL gives up: not durability against an application crash (WAL survives
-        // that either way, without corruption) but durability against a power loss or
-        // kernel panic, which can lose the last few commits. For cached items that cost is
-        // cheap — they're re-fetchable from GitHub, so the visible effect is a ghost
-        // surviving one extra full-fetch interval. But `cache.db` also holds the user's
-        // saved searches (`queries`, `filter_streams`) and the local-only unread markers
-        // (`items.last_read_updated_at`, by design never synced anywhere) — none of that is
-        // re-fetchable, so a crash within seconds of a save can cost a just-created query or
-        // a few read marks. Accepted anyway: the window is seconds and everything in it is
-        // cheap for the user to redo. Two sidecar files (`cache.db-wal`, `cache.db-shm`) now
-        // live next to the DB.
+        // NORMAL gives up durability against power loss, not against an application crash
+        // (WAL survives that without corruption). The few commits a power loss can lose
+        // include saved queries and the local-only read marks, which are not re-fetchable;
+        // accepted because the window is seconds. Adds two sidecar files (`cache.db-wal`,
+        // `cache.db-shm`) next to the DB.
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        // Block briefly on a locked DB instead of failing immediately — chiefly so
-        // a concurrent write during the maintenance pass's VACUUM (which needs
-        // exclusive access) waits its turn instead of erroring out its sync cycle.
+        // Block on a locked DB rather than failing: chiefly so a write during the
+        // maintenance pass's VACUUM (which needs exclusive access) waits its turn.
         .busy_timeout(Duration::from_secs(30))
 }
 
 /// Require `db_path` to be a glauca cache, refusing to migrate a SQLite file that belongs
 /// to something else.
 ///
-/// Now that the path is user-supplied, `--db-path` can name an existing database by
-/// mistake — and migrating one is destructive rather than merely wrong. The initial
-/// migration's `CREATE TABLE IF NOT EXISTS` quietly skips a same-named table, while the
-/// later `ALTER TABLE ADD COLUMN` migrations still run: aiming glauca at a file holding
-/// `queries(foo int)` leaves that table as
-/// `queries(foo int, name TEXT, position INTEGER NOT NULL DEFAULT 0, …)` plus the rest of
-/// our schema, with no way back. A glauca cache always carries `_sqlx_migrations`, so its
-/// absence beside other tables means this database is someone else's.
+/// Migrating one is destructive, not merely wrong: `CREATE TABLE IF NOT EXISTS` skips a
+/// same-named table while the later `ALTER TABLE ADD COLUMN` migrations still run, so a
+/// file holding `queries(foo int)` comes back with our columns grafted on and no way back.
+/// A glauca cache always carries `_sqlx_migrations`, so its absence beside other tables
+/// means this database is someone else's.
 ///
-/// FIXME: the protection is scoped to schema and rows, which is what "with no way back"
-/// above refers to. The pool has already applied `journal_mode = WAL` by the time this
-/// runs and that is a persistent header flag, so a database we refuse can still be left
-/// in WAL mode. Inspecting the schema over a connection that sets no pragmas (or before
-/// `connect_with`) would remove the side effect.
+/// FIXME: the protection covers schema and rows only. `journal_mode = WAL` is already
+/// applied by the time this runs and is a persistent header flag, so a database we refuse
+/// can still be left in WAL mode. Inspecting the schema over a connection that sets no
+/// pragmas would remove the side effect.
 async fn ensure_glauca_cache(pool: &SqlitePool, db_path: &Path) -> Result<()> {
     let mut tables: Vec<String> =
         sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -108,7 +86,6 @@ async fn ensure_glauca_cache(pool: &SqlitePool, db_path: &Path) -> Result<()> {
             .await
             .with_context(|| format!("reading the schema of {}", db_path.display()))?;
 
-    // A brand-new file has no tables at all, which is the normal path.
     let is_fresh_file = tables.is_empty();
     let is_glauca_cache = tables.iter().any(|t| t == "_sqlx_migrations");
     if is_fresh_file || is_glauca_cache {
@@ -127,29 +104,27 @@ async fn ensure_glauca_cache(pool: &SqlitePool, db_path: &Path) -> Result<()> {
 }
 
 /// Env var that overrides the cache path at runtime. Deliberately not `DATABASE_URL`:
-/// that one is sqlx's compile-time query-verification target (pointed at
-/// `crates/glauca-core/dev.db` by `mise.toml` for the whole repo) and has no runtime
-/// effect, so reusing it would silently redirect every in-repo `cargo run` to the
-/// empty dev schema.
+/// that is sqlx's compile-time verification target (`mise.toml` points it at
+/// `crates/glauca-core/dev.db`), so reusing it would redirect every in-repo `cargo run`
+/// to the empty dev schema.
 const DB_PATH_ENV: &str = "GLAUCA_DB_PATH";
 
 /// Resolve the cache path: an explicit CLI override wins, then [`DB_PATH_ENV`], then the
-/// platform data dir. The single entry point for this — front-ends never build the path
-/// themselves, so none of them can bypass the override.
+/// platform data dir. The single entry point — front-ends never build the path themselves,
+/// so none of them can bypass the override.
 pub fn resolve_db_path(cli_override: Option<PathBuf>) -> PathBuf {
     resolve_db_path_with(cli_override, |k| std::env::var_os(k).map(PathBuf::from))
 }
 
-/// Split out of [`resolve_db_path`] so the precedence can be unit-tested without
-/// mutating the process environment (which tests share, and run in parallel).
-/// Mirrors `github::resolve_token`.
+/// Split out of [`resolve_db_path`] so the precedence can be unit-tested without mutating
+/// the process environment, which tests share and run in parallel.
 fn resolve_db_path_with(
     cli_override: Option<PathBuf>,
     env: impl Fn(&str) -> Option<PathBuf>,
 ) -> PathBuf {
     cli_override
-        // An empty value reads as "unset" rather than as the empty path, which would
-        // otherwise reach SQLite as an unhelpful open error.
+        // An empty value reads as "unset"; as a path it would reach SQLite as an
+        // unhelpful open error.
         .or_else(|| env(DB_PATH_ENV).filter(|p| !p.as_os_str().is_empty()))
         .unwrap_or_else(default_db_path)
 }
@@ -196,8 +171,6 @@ where
         })
         .collect())
 }
-
-// ── Filter stream types & functions ─────────────────────────────────────────
 
 pub struct FilterStreamRecord {
     pub id: i64,
@@ -314,17 +287,14 @@ pub async fn swap_filter_stream_positions(
 /// Update an existing query's display name and/or search string.
 /// Passing `None` for `name` clears the display name (falls back to query string).
 ///
-/// When the *search string* actually changed, resets both fetch timestamps — the cache
-/// is stale, and the edited query needs a fresh full fetch to prune items the *old*
-/// query matched but the new one doesn't — and arms every cached row one strike short
-/// of deletion, so that first fetch drops whatever it no longer returns instead of
-/// making the user stare at the old result set for another full-fetch interval.
+/// A changed *search string* resets both fetch timestamps and arms every cached row one
+/// strike short of deletion, so the first fetch under the new definition drops whatever it
+/// no longer returns instead of leaving it for another full-fetch interval.
 ///
-/// Renames must not do any of that: the result set is unchanged, so the cache is
-/// exactly as fresh as it was, and the transient absences corroboration exists to
-/// absorb (pagination races, search-index lag) are fully live — a single one would
-/// cost a live row its read marker. The front-ends submit name and query together
-/// from one form, so telling the two cases apart has to happen here.
+/// A rename must do neither: the result set is unchanged, so the transient absences the
+/// strike count exists to absorb are fully live and one would cost a live row its read
+/// marker. The front-ends submit name and query from one form, so the two cases can only
+/// be told apart here.
 pub async fn update_query(
     pool: &SqlitePool,
     id: i64,
@@ -448,7 +418,6 @@ pub async fn upsert_query(
     kind: &str,
     name: Option<&str>,
 ) -> Result<i64> {
-    // Treat empty string the same as None.
     let name = name.filter(|s| !s.trim().is_empty());
     let row = sqlx::query!(
         r#"
@@ -471,10 +440,9 @@ pub async fn upsert_query(
 /// *and* pruned (or couldn't) — and `last_full_fetch_attempt_at`, which is what defers
 /// the next full walk. Pass `true` only when both hold.
 ///
-/// This is the only writer of `last_full_fetch_at`, and it writes it in the same
-/// statement as `last_fetched_at`, so `last_full_fetch_at <= last_fetched_at` always
-/// holds. `mark_full_fetch_attempted` records a *failed* walk and touches only the
-/// attempt column, which is therefore always the later of the two.
+/// The only writer of `last_full_fetch_at`, and it writes it in the same statement as
+/// `last_fetched_at`, so `last_full_fetch_at <= last_fetched_at` always holds. Only
+/// `mark_full_fetch_attempted` moves the attempt column on its own.
 pub async fn mark_fetched(pool: &SqlitePool, query_id: i64, full_fetch: bool) -> Result<()> {
     sqlx::query!(
         r#"
@@ -525,33 +493,28 @@ pub type ItemKey = (String, String, i64);
 /// why one absence isn't proof.
 pub const PRUNE_STRIKES: i64 = 2;
 
-/// How many item keys a prune outcome samples. Bounded because a query edit arms every cached
-/// row, so one walk can legitimately find hundreds absent and the only consumer is a log line.
+/// How many item keys a prune outcome samples. Bounded because a query edit arms every
+/// cached row, so one walk can legitimately find hundreds absent.
 pub const PRUNE_LOG_KEY_CAP: usize = 20;
 
 /// What one prune attempt observed.
 ///
-/// `Skipped` and "nothing was absent" are different facts: a skipped attempt observed nothing
-/// at all, so it is not evidence about any row. Returning `0` for both is what used to make
-/// the concurrency guard invisible in the logs, and what stopped a test from telling them
-/// apart.
+/// `Skipped` and "nothing was absent" are different facts: a skipped attempt observed
+/// nothing at all, so it is not evidence about any row.
 #[derive(Debug)]
 pub enum PruneOutcome {
     Skipped {
         reason: &'static str,
     },
     Considered {
-        /// Rows the query had cached when this walk examined it. The denominator an absence
-        /// rate is read against: without it, "0 absences" from a query holding 30 rows and
-        /// one holding 1000 look the same.
+        /// Rows the query had cached when this walk examined it — the denominator an
+        /// absence count is read as a rate against.
         cached: usize,
         /// Rows this walk did not return. The full count, not the sample length.
         absent: usize,
         /// Of those, the ones that reached `strikes_required` and were deleted.
         deleted: usize,
-        /// Which items were absent, capped at [`PRUNE_LOG_KEY_CAP`]. Identities rather than
-        /// rendered strings: how they read is the log's business, and a caller that wants to
-        /// act on them shouldn't have to parse `owner/repo#number` back apart.
+        /// Which items were absent, capped at [`PRUNE_LOG_KEY_CAP`].
         absent_keys: Vec<ItemKey>,
         /// Which of those were deleted, under the same cap.
         deleted_keys: Vec<ItemKey>,
@@ -559,8 +522,7 @@ pub enum PruneOutcome {
 }
 
 impl PruneOutcome {
-    /// Rows deleted; `0` for a skipped attempt. Only the test helpers that predate this enum
-    /// want the count without the rest, so it is not part of the crate's API.
+    /// Rows deleted; `0` for a skipped attempt.
     #[cfg(test)]
     fn deleted(&self) -> usize {
         match self {
@@ -571,40 +533,33 @@ impl PruneOutcome {
 }
 
 /// Record that this full fetch didn't return the cached rows absent from `keep`, and
-/// delete the ones that have reached `strikes_required` consecutive absences. Returns what the
-/// attempt observed — see [`PruneOutcome`], which distinguishes "nothing was absent" from
-/// "the guard below skipped this walk entirely".
+/// delete the ones that have reached `strikes_required` consecutive absences. Returns what
+/// the attempt observed — see [`PruneOutcome`].
 ///
-/// `upsert_items` zeroes the counter, so any search that returns the item again
-/// disarms it, and the threshold is only ever reached by *consecutive* absences.
+/// `upsert_items` zeroes the counter, so any search that returns the item again disarms
+/// it, and the threshold is only ever reached by *consecutive* absences.
 /// `strikes_required` comes from `engine::PruneTrust`.
 ///
-/// Read state is lost on deletion: `last_read_updated_at` lives on the row, and a
-/// re-insert always arrives with it unset (see `upsert_item`), so an item that leaves a
-/// query and later matches again comes back as unread. Unlike `prune_query_overflow` —
-/// which reasons at length about avoiding exactly that, and protects the newest rows —
-/// pruning has no such protection, because deleting rows that no longer match is its
-/// whole purpose. The behaviour is intended: a re-requested review or a reopened issue
-/// is new actionable work, so surfacing it as unread is correct. What is *not* intended
-/// is deleting a row that still matches, which is what the strike count guards against.
+/// Deletion loses read state: `last_read_updated_at` lives on the row and a re-insert
+/// always arrives with it unset, so an item that leaves a query and later matches again
+/// comes back as unread. That is intended — a reopened issue is new actionable work. What
+/// is *not* intended is deleting a row that still matches, which the strike count guards
+/// against.
 ///
-/// `last_full_fetch_before_walk` is `last_full_fetch_at` as read *before* this walk began. If it has
-/// moved by now, a concurrent full fetch finished first and this walk's absences are
-/// not an independent observation — counting them would let two overlapping walks land
-/// both strikes against one transient, deleting a live row. Nothing is pruned then.
-/// (Foreground `Sync`/`SyncIfStale` don't go through `SyncCoalescer`, so they really can
-/// overlap a background sync of the same query.)
+/// `last_full_fetch_before_walk` is `last_full_fetch_at` as read *before* this walk began.
+/// If it has moved, a concurrent full fetch finished first and this walk's absences are not
+/// an independent observation — counting them would let two overlapping walks land both
+/// strikes against one transient. Nothing is pruned then. (Foreground `Sync`/`SyncIfStale`
+/// bypass `SyncCoalescer`, so they really can overlap a background sync of one query.)
 ///
 /// TODO: fold the stamp check and the stamp write into one transaction (check-and-claim
-/// here, demoting `mark_fetched` to `last_fetched_at`). The current check narrows the
-/// race rather than closing it: `sync_task` stamps *after* this returns, so a second
-/// walk committing inside that gap still sees the old value; `datetime('now')` has
-/// one-second resolution; and two walks predating a query's first completed full fetch
-/// both observe `NULL`. Moving the write is not enough on its own — `sync_task` also
-/// stamps on the paths where `may_prune` is false and this function never runs, so
-/// those need a second stamping route. Deferred because each window needs overlapping
-/// full walks *and* a transiently-absent row, and costs one row's read marker when it
-/// fires.
+/// here, demoting `mark_fetched` to `last_fetched_at`). The check narrows the race rather
+/// than closing it: `sync_task` stamps *after* this returns, `datetime('now')` has
+/// one-second resolution, and two walks predating a query's first completed full fetch both
+/// observe `NULL`. Moving the write is not enough on its own — `sync_task` also stamps on
+/// the paths where `may_prune` is false and this never runs. Deferred because the window
+/// needs overlapping full walks *and* a transiently-absent row, and costs one row's read
+/// marker when it fires.
 ///
 /// Caller must only pass `keep` from an untruncated, complete full fetch — see
 /// `engine::may_prune`.
@@ -621,24 +576,20 @@ pub async fn prune_missing_items(
         .map(|(owner, name, number)| (owner.as_str(), name.as_str(), *number))
         .collect();
 
-    // Increment then delete in one transaction, so a crash between the two can't
-    // leave a strike recorded against a row that was about to be deleted anyway
-    // (harmless) or, worse, delete without having counted (impossible here). Reading
-    // the stamp inside the same transaction is what makes the concurrency check
-    // meaningful: the winning walk's `mark_fetched` can't land between our read and
-    // our writes.
+    // Increment then delete in one transaction, so a crash between the two cannot delete
+    // without having counted. Reading the stamp inside the same transaction is what makes
+    // the concurrency check meaningful: the winning walk's `mark_fetched` can't land
+    // between our read and our writes.
     //
-    // BEGIN IMMEDIATE, not the default deferred BEGIN: this transaction reads before
-    // it writes, and SQLite answers a SHARED→RESERVED promotion with an instant
-    // SQLITE_BUSY *without consulting the busy handler* (waiting there could
-    // deadlock), so `busy_timeout` would not save us from a concurrent writer —
-    // another query's `upsert_items`, a read-marking update, or the maintenance
-    // sweep. Taking the write lock up front makes the 30s timeout apply as intended.
+    // BEGIN IMMEDIATE, not the default deferred BEGIN: this transaction reads before it
+    // writes, and SQLite answers a SHARED→RESERVED promotion with an instant SQLITE_BUSY
+    // *without consulting the busy handler* (waiting there could deadlock), so
+    // `busy_timeout` would not save us from a concurrent writer. Taking the write lock up
+    // front makes the 30s timeout apply as intended.
     //
-    // The guard runs before the "nothing was absent" exit, not after: a stale walk that
-    // happens to find everything present still observed nothing independent, and reporting
-    // that as `absent = 0` would feed a non-observation into the denominator the
-    // transient-absence measurement is read against.
+    // The guard runs before the "nothing was absent" exit: a stale walk that happens to
+    // find everything present still observed nothing independent, and reporting that as
+    // `absent = 0` would feed a non-observation into the rate it is read as.
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     if last_full_fetch_at(&mut *tx, query_id).await?.as_deref() != last_full_fetch_before_walk {
         tx.rollback().await?;
@@ -648,9 +599,8 @@ pub async fn prune_missing_items(
     }
 
     // Read the cached rows inside the transaction, not before it: another front-end's
-    // `upsert_items` landing in that gap would otherwise let this walk strike a row the cache
-    // had just re-acquired — the same "not an independent observation" the guard above rules
-    // out, one step earlier.
+    // `upsert_items` landing in that gap would let this walk strike a row the cache had
+    // just re-acquired.
     let cached_rows = sqlx::query!(
         r#"SELECT id AS "id!: i64", repo_owner, repo_name, number FROM items WHERE query_id = ?"#,
         query_id,
@@ -685,10 +635,9 @@ pub async fn prune_missing_items(
 
     let missing_ids: Vec<i64> = missing.iter().map(|r| r.id).collect();
 
-    // Bind the id list once as JSON and let SQLite's json_each expand it, rather than
-    // building `IN (?, ?, …)` by hand: that would need chunking under the
-    // bound-variable limit, and a hand-built `QueryBuilder` opts out of sqlx's
-    // compile-time checking for the two statements that do the actual deleting.
+    // Bind the id list as JSON and let `json_each` expand it: `IN (?, ?, …)` would need
+    // chunking under the bound-variable limit, and a hand-built `QueryBuilder` opts out of
+    // sqlx's compile-time checking for the two statements that do the deleting.
     let ids = serde_json::to_string(&missing_ids)?;
     sqlx::query!(
         r#"
@@ -699,9 +648,8 @@ pub async fn prune_missing_items(
     )
     .execute(&mut *tx)
     .await?;
-    // `RETURNING` rather than `rows_affected()` plus a Rust-side re-derivation of which rows
-    // met the threshold: the deleted keys then come from the statement that did the deleting,
-    // so the log can't disagree with the database about what went.
+    // `RETURNING` rather than `rows_affected()`: the deleted keys then come from the
+    // statement that did the deleting, so the log can't disagree with the database.
     let deleted_rows = sqlx::query!(
         r#"
         DELETE FROM items
@@ -728,14 +676,12 @@ pub async fn prune_missing_items(
     })
 }
 
-/// Free cache space by clearing the (re-fetchable) `body` of items unlikely to be
-/// read soon: those in a terminal state (`closed`/`merged`) or whose last activity
-/// (`updated_at`) is older than `retention_days`. The row itself — title, state,
-/// and the `last_read_updated_at` unread marker — is kept, so this never affects
-/// unread state (`logic::is_item_unread`); the body is re-fetched on demand when
-/// the item is opened. `body` is by far the largest column, so this reclaims most
-/// of the cache size without the churn hazards of deleting rows. Returns the
-/// number of rows whose body was cleared.
+/// Free cache space by clearing the (re-fetchable) `body` of items unlikely to be read
+/// soon: those in a terminal state (`closed`/`merged`) or whose `updated_at` is older than
+/// `retention_days`. The row itself — including the `last_read_updated_at` unread marker —
+/// is kept, so this never affects unread state (`logic::is_item_unread`), and the body is
+/// re-fetched on demand. `body` is by far the largest column, so this reclaims most of the
+/// cache size without the churn of deleting rows. Returns the number of rows cleared.
 pub async fn clear_stale_bodies(pool: &SqlitePool, retention_days: i64) -> Result<u64> {
     let modifier = format!("-{retention_days} days");
     let res = sqlx::query!(
@@ -757,14 +703,12 @@ pub async fn clear_stale_bodies(pool: &SqlitePool, retention_days: i64) -> Resul
 /// read, so an unread item is never dropped. The "read" predicate mirrors the
 /// negation of `logic::is_item_unread`. Returns the number of rows deleted.
 ///
-/// Deleting a read row that *still matched* the query would resurface it as unread
-/// on the next sync (re-inserted with `last_read_updated_at = NULL`). That does not
-/// happen here because overflow only exists once a query has accumulated more than
-/// `max_rows` rows, the newest `max_rows` by `updated_at` are protected, and GitHub
-/// search caps a query's live result set (~1000, `SEARCH_RESULT_CAP`) — so with a
-/// `max_rows` comfortably above that cap the pruned old-`updated_at` rows are
-/// effectively never re-returned by a sync. The `id` tiebreaker keeps the boundary
-/// deterministic when `updated_at` values collide.
+/// Deleting a read row that *still matched* would resurface it as unread on the next sync
+/// (re-inserted with `last_read_updated_at = NULL`). That cannot happen here: overflow only
+/// exists past `max_rows` rows, the newest `max_rows` are protected, and GitHub search caps
+/// a query's live result set (~1000, `SEARCH_RESULT_CAP`), so with `max_rows` above that
+/// cap the pruned rows are effectively never re-returned. The `id` tiebreaker keeps the
+/// boundary deterministic when `updated_at` values collide.
 pub async fn prune_query_overflow(pool: &SqlitePool, query_id: i64, max_rows: i64) -> Result<u64> {
     let res = sqlx::query!(
         r#"
@@ -788,10 +732,9 @@ pub async fn prune_query_overflow(pool: &SqlitePool, query_id: i64, max_rows: i6
     Ok(res.rows_affected())
 }
 
-/// Minimum freelist pages before a `VACUUM` is worth its full-file rewrite
-/// (~1 MiB at the 4 KiB default page size). Below this the maintenance pass skips
-/// it, so a 6-hourly sweep with nothing to reclaim doesn't needlessly rewrite the
-/// whole DB (and briefly lock it).
+/// Minimum freelist pages before a `VACUUM` is worth its full-file rewrite (~1 MiB at the
+/// 4 KiB default page size), so a 6-hourly sweep with nothing to reclaim doesn't rewrite
+/// the whole DB and briefly lock it.
 const VACUUM_MIN_FREELIST_PAGES: i64 = 256;
 
 /// Reclaim disk space freed by `clear_stale_bodies`/prunes, but only when enough
@@ -846,11 +789,10 @@ pub struct CachedItem {
 
 /// Insert or replace one cached item, out of band from a search.
 ///
-/// Does *not* clear the item's prune strikes: `github::fetch_item` looks an item up by
-/// repo and number and says nothing about whether it still matches the query, so this
-/// is no evidence of membership. Front-ends call it automatically to re-fetch a
-/// maintenance-cleared body, and letting that disarm a ghost the user merely clicked on
-/// would keep it alive for another full-fetch interval.
+/// Does *not* clear the item's prune strikes: `github::fetch_item` looks an item up by repo
+/// and number and says nothing about whether it still matches the query. Front-ends call it
+/// to re-fetch a maintenance-cleared body, and letting that disarm a ghost the user merely
+/// clicked on would keep it alive for another full-fetch interval.
 pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
     upsert_item_with(pool, item, false).await
 }
@@ -858,12 +800,9 @@ pub async fn upsert_item(pool: &SqlitePool, item: &CachedItem) -> Result<()> {
 /// Insert or replace a whole page of *search results* in one transaction, clearing
 /// each item's prune strikes — the query returned them, so they still match.
 ///
-/// Each `upsert_item` is otherwise its own implicit transaction, and SQLite's default
-/// `synchronous=FULL` makes that a couple of fsyncs apiece. That was tolerable when a
-/// sync only wrote the handful of items whose `updated_at` had moved, but a periodic
-/// full fetch re-upserts a query's entire result set — up to `SEARCH_RESULT_CAP` rows
-/// — so the per-item commits turn into a visible stall on the same file the UI reads
-/// from. One transaction per page also makes the page atomic: a mid-page failure no
+/// One transaction per page, not per item: a full fetch re-upserts a query's entire result
+/// set — up to `SEARCH_RESULT_CAP` rows — and per-item commits turn into a visible stall on
+/// the same file the UI reads from. It also makes the page atomic: a mid-page failure no
 /// longer leaves half of it applied.
 pub async fn upsert_items(pool: &SqlitePool, items: &[CachedItem]) -> Result<()> {
     if items.is_empty() {
@@ -914,14 +853,11 @@ where
             head_ref            = excluded.head_ref,
             review_decision     = excluded.review_decision,
             milestone           = excluded.milestone,
-            -- A search that returned this item proves it still matches, so clear the
-            -- prune strikes it may have accumulated (see `prune_missing_items`). A
-            -- by-number re-fetch proves nothing about membership, so it leaves them.
+            -- A search that returned this item proves it still matches, so clear its
+            -- prune strikes; a by-number re-fetch proves nothing, so it leaves them.
             missing_count       = CASE WHEN ? THEN 0 ELSE missing_count END
-            -- `last_read_updated_at` is intentionally NOT updated: it records the
-            -- `updated_at` the user had read up to. `updated_at` above IS refreshed,
-            -- so once a re-sync advances it past `last_read_updated_at` the item
-            -- becomes unread again (is_item_unread). New rows insert it as NULL.
+            -- `last_read_updated_at` is intentionally NOT updated: `updated_at` above is,
+            -- so a re-sync advancing it past the read marker makes the item unread again.
         "#,
         item.query_id,
         item.kind,
@@ -1038,9 +974,8 @@ pub async fn mark_all_items_read(pool: &SqlitePool, query_id: i64) -> Result<()>
     Ok(())
 }
 
-/// Whether `ts` (a SQLite datetime string) is more than `max_age_secs` old.
-/// SQLite does the arithmetic, so there is no Rust-side timestamp parse. Shared by
-/// `is_cache_stale` and `is_full_fetch_due` so both use one definition of "too old".
+/// Whether `ts` (a SQLite datetime string) is more than `max_age_secs` old. SQLite does the
+/// arithmetic, and `is_cache_stale` and `is_full_fetch_due` share this one definition.
 async fn older_than(pool: &SqlitePool, ts: &str, max_age_secs: i64) -> Result<bool> {
     let old: bool = sqlx::query_scalar!(
         r#"SELECT (strftime('%s', 'now') - strftime('%s', ?)) > ? AS "old: bool""#,
@@ -1073,10 +1008,9 @@ pub async fn is_cache_stale(pool: &SqlitePool, query_id: i64, max_age_secs: i64)
 
 /// When `query_id` last *completed* a full fetch, or `None` if never.
 ///
-/// Reads the completion stamp that the prune concurrency guard compares against: generic
-/// over the executor because [`prune_missing_items`] must re-read it *inside* its
-/// transaction for that comparison to mean anything, while the only other production
-/// caller — `sync_task`'s pre-walk snapshot (`engine.rs`) — reads it from the pool.
+/// Generic over the executor because [`prune_missing_items`] must re-read it *inside* its
+/// transaction for its concurrency guard to mean anything, while `sync_task`'s pre-walk
+/// snapshot reads it from the pool.
 pub async fn last_full_fetch_at<'e, E>(exec: E, query_id: i64) -> Result<Option<String>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -1093,22 +1027,19 @@ where
 /// Stamp `last_full_fetch_attempt_at` without touching `last_fetched_at` or the
 /// completion stamp: a full walk was attempted and failed.
 ///
-/// Leaving the stamp alone would promote *every* subsequent sync to a full re-page for
-/// as long as the failure lasts — a query that reliably errors on page 3 would walk
-/// three pages a minute forever, with no backoff on the non-rate-limited error path.
-/// `last_fetched_at` is deliberately left stale so the query is still retried next
-/// cycle; only the expensive *full* walk is deferred.
+/// Leaving the stamp alone would promote *every* subsequent sync to a full re-page for as
+/// long as the failure lasts — a query that reliably errors on page 3 would walk three
+/// pages a minute forever. `last_fetched_at` is deliberately left stale so the query is
+/// still retried next cycle; only the expensive *full* walk is deferred.
 ///
-/// The deferral only helps a query that completed a fetch at least once before it
-/// started failing. One that has never succeeded has `last_fetched_at = NULL`, so
-/// `updated_since` yields nothing to be incremental against and `resolve_since` must
-/// keep choosing a full fetch regardless — there is no cheaper retry to fall back to.
-/// Editing a query re-enters that state.
+/// The deferral only helps a query that completed a fetch at least once before. One that
+/// never has keeps `last_fetched_at = NULL`, so `resolve_since` must choose a full fetch
+/// regardless — there is no cheaper retry to fall back to. Editing a query re-enters that
+/// state.
 ///
-/// Only the attempt column is written: `last_full_fetch_at` means "a full walk
-/// completed" and is the prune concurrency guard's comparison value, so a failure
-/// moving it would make a *concurrent* successful walk mistake this for the winner and
-/// skip its prune. See the `20260730000002` migration.
+/// Only the attempt column is written: `last_full_fetch_at` is the prune concurrency
+/// guard's comparison value, so a failure moving it would make a *concurrent* successful
+/// walk mistake this for the winner and skip its prune.
 pub async fn mark_full_fetch_attempted(pool: &SqlitePool, query_id: i64) -> Result<()> {
     sqlx::query!(
         "UPDATE queries SET last_full_fetch_attempt_at = datetime('now') WHERE id = ?",
@@ -1123,12 +1054,11 @@ pub async fn mark_full_fetch_attempted(pool: &SqlitePool, query_id: i64) -> Resu
 /// ever been attempted (NULL) or the last attempt is older than `max_age_secs`.
 ///
 /// Reads the *attempt* stamp, not the completion stamp: a query whose full walk keeps
-/// failing must not re-page on every sync (see `mark_full_fetch_attempted`). Because
-/// `mark_fetched` stamps both, a completed walk defers the retry just the same.
+/// failing must not re-page on every sync (see `mark_full_fetch_attempted`). `mark_fetched`
+/// stamps both, so a completed walk defers the retry just the same.
 ///
-/// Only a full fetch is an authoritative result set, so only a full fetch may prune
-/// rows that left the query ([`prune_missing_items`]). This is therefore what bounds
-/// how long a stale row can linger; see `engine::resolve_since`.
+/// Only a full fetch may prune rows that left the query ([`prune_missing_items`]), so this
+/// bounds how long a stale row can linger.
 pub async fn is_full_fetch_due(
     pool: &SqlitePool,
     query_id: i64,
@@ -1151,8 +1081,6 @@ mod tests {
     use super::*;
     use crate::test_support::{foreign_database, make_item, raw_pool, test_pool};
 
-    /// The three front-ends resolve their cache path through one function, so the
-    /// precedence is pinned here rather than left to whichever one is read first.
     /// Driving `resolve_db_path_with` directly keeps this off the process environment,
     /// which every other test in this binary shares.
     #[test]
@@ -1170,9 +1098,8 @@ mod tests {
         assert_eq!(resolve_db_path_with(None, |_| None), default_db_path());
     }
 
-    /// `GLAUCA_DB_PATH=` (exported but empty) is the shape a shell profile or CI job
-    /// produces by accident. Treating it as the empty path would hand SQLite something
-    /// it can only fail to open, so it has to read as unset.
+    /// `GLAUCA_DB_PATH=` (exported but empty) is what a shell profile or CI job produces
+    /// by accident.
     #[test]
     fn resolve_db_path_treats_an_empty_env_value_as_unset() {
         assert_eq!(
@@ -1181,9 +1108,7 @@ mod tests {
         );
     }
 
-    /// `create_if_missing` creates the file but not its directory — the assumption
-    /// behind `open_pool` doing the `create_dir_all` itself. A user-supplied
-    /// `--db-path` can name a directory that does not exist yet.
+    /// A user-supplied `--db-path` can name a directory that does not exist yet.
     #[tokio::test]
     async fn open_pool_creates_a_missing_parent_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1194,18 +1119,15 @@ mod tests {
             .unwrap_or_else(|e| panic!("open pool: {e:#}"));
 
         assert!(db_path.exists(), "database file was not created");
-        // Migrated, not merely touched: the front-ends expect a usable cache, so the
-        // query itself is the assertion.
+        // Migrated, not merely touched: the query itself is the assertion.
         sqlx::query("SELECT id FROM queries LIMIT 1")
             .fetch_optional(&pool)
             .await
             .expect("a migrated cache has a queries table");
     }
 
-    /// A `--db-path` naming an unwritable or nonsensical location surfaces as an
-    /// `io::Error` with no path in it (`Permission denied (os error 13)` and nothing
-    /// else), which says nothing about what to fix. Pin the path into the message.
-    /// Uses a file as the parent because that fails the same way everywhere, unlike a
+    /// The bare `io::Error` (`Permission denied (os error 13)`) says nothing about what to
+    /// fix. Uses a file as the parent because that fails the same way everywhere, unlike a
     /// permissions test.
     #[tokio::test]
     async fn open_pool_names_the_directory_it_could_not_create() {
@@ -1224,9 +1146,8 @@ mod tests {
         );
     }
 
-    /// The table a foreign database and glauca both want to own, which is what makes
-    /// migrating one destructive. Shared by the two tests below so the "unchanged" claim
-    /// is compared against the very string that created it.
+    /// The table a foreign database and glauca both want to own. Shared by the two tests
+    /// below so the "unchanged" claim is compared against the string that created it.
     const FOREIGN_SCHEMA: &str = "CREATE TABLE queries (foo INTEGER)";
 
     /// Aiming `--db-path` at another application's database has to say so, and say which
@@ -1246,9 +1167,8 @@ mod tests {
         );
     }
 
-    /// Refusing used to come too late: `CREATE TABLE IF NOT EXISTS` skipped the same-named
-    /// table but the `ALTER TABLE` migrations still ran, so the user's `queries` table came
-    /// back with glauca's columns grafted on. Nothing may be added or altered.
+    /// Refusing too late leaves the user's `queries` table with glauca's columns grafted
+    /// on, so nothing may be added or altered.
     #[tokio::test]
     async fn open_pool_leaves_a_refused_database_untouched() {
         let file = foreign_database(FOREIGN_SCHEMA).await;
@@ -1269,9 +1189,8 @@ mod tests {
         );
     }
 
-    /// Opening a cache written by a newer glauca — or an older binary reading one it
-    /// cannot understand — must not be mistaken for a fresh file. sqlx reports the
-    /// offending migration version but not the file, so the path has to come from us.
+    /// A cache written by a newer glauca must not be mistaken for a fresh file. sqlx
+    /// reports the offending version but not the file, so the path has to come from us.
     #[tokio::test]
     async fn open_pool_names_the_database_it_could_not_migrate() {
         let (pool, file) = test_pool().await;
@@ -1289,9 +1208,8 @@ mod tests {
         );
     }
 
-    /// Mark `version` as already applied even though this build has no such migration —
-    /// what a rollback to an older binary looks like from sqlx's side. The other columns
-    /// are `NOT NULL` filler that no assertion reads.
+    /// Mark `version` as already applied even though this build has no such migration.
+    /// The other columns are `NOT NULL` filler that no assertion reads.
     async fn record_a_migration_from_the_future(pool: &SqlitePool, version: i64) {
         sqlx::query(
             "INSERT INTO _sqlx_migrations
@@ -1304,9 +1222,8 @@ mod tests {
         .expect("record a migration this build does not have");
     }
 
-    /// The cache commits per page, per query, per sync cycle, so the journal mode is a
-    /// performance decision worth pinning down rather than inheriting from sqlx's
-    /// defaults. `PRAGMA synchronous` answers with an integer: 1 is NORMAL.
+    /// The journal mode is pinned rather than inherited from sqlx's defaults.
+    /// `PRAGMA synchronous` answers with an integer: 1 is NORMAL.
     #[tokio::test]
     async fn open_pool_uses_wal_with_normal_synchronous() {
         let (pool, _file) = test_pool().await;
@@ -1324,9 +1241,8 @@ mod tests {
         assert_eq!(synchronous, 1);
     }
 
-    /// `vacuum` is the one place the cache takes an exclusive lock, and the journal
-    /// mode changes how that lock is taken — so drive both of its branches against a
-    /// real WAL database instead of trusting that `VACUUM` and WAL compose.
+    /// `vacuum` is the one place the cache takes an exclusive lock, and the journal mode
+    /// changes how that lock is taken — so drive both branches against a real WAL database.
     #[tokio::test]
     async fn vacuum_runs_only_once_enough_pages_are_free() {
         let (pool, _file) = test_pool().await;
@@ -1377,7 +1293,6 @@ mod tests {
 
         delete_query(&pool, qid).await.expect("delete query");
 
-        // Items should be gone via ON DELETE CASCADE.
         let items = fetch_items(&pool, qid).await.expect("fetch after delete");
         assert_eq!(items.len(), 0);
     }
@@ -1867,9 +1782,7 @@ mod tests {
         );
     }
 
-    /// Filter streams are ordered within their parent query, so their positions are
-    /// numbered per parent: a second query's first stream starts over at 0 instead of
-    /// continuing the first query's numbering.
+    /// Positions are numbered per parent: a second query's first stream starts over at 0.
     #[tokio::test]
     async fn upsert_filter_stream_appends_within_its_own_parent() {
         let (pool, _file) = test_pool().await;
@@ -1911,7 +1824,6 @@ mod tests {
         );
     }
 
-    /// The sibling counterpart for streams.
     #[tokio::test]
     async fn swap_filter_stream_positions_persists_the_new_order_when_positions_are_all_equal() {
         let (pool, _file) = test_pool().await;
@@ -2069,8 +1981,7 @@ mod tests {
         ns
     }
 
-    /// The search string `query_with_items` saves. Named so a test can say "unchanged"
-    /// without duplicating the literal.
+    /// The search string `query_with_items` saves, so a test can say "unchanged".
     const CACHED_QUERY: &str = "repo:owner/r is:pr";
 
     /// A query whose cache holds `numbers`, all with zero strikes.
@@ -2095,8 +2006,7 @@ mod tests {
     }
 
     /// What a search returned — i.e. the rows a prune must leave alone. Same values as
-    /// [`item_keys`]; the two names keep an argument ("these came back") from reading like an
-    /// expectation ("these went missing").
+    /// [`item_keys`]; the two names keep an argument from reading like an expectation.
     fn keep(numbers: &[i64]) -> Vec<ItemKey> {
         item_keys(numbers)
     }
@@ -2148,9 +2058,8 @@ mod tests {
         .deleted()
     }
 
-    /// An automatic sync's prune of a query that has never been full fetched (so the
-    /// stamp it observed is `None`), as [`PruneOutcome`] rather than a count — for tests that
-    /// need to tell a skip from an attempt that found nothing absent.
+    /// An automatic sync's prune of a query never full fetched (so the stamp it observed is
+    /// `None`), as [`PruneOutcome`] rather than a count.
     async fn auto_prune_outcome(
         pool: &SqlitePool,
         query_id: i64,
@@ -2176,9 +2085,9 @@ mod tests {
         forced_prune_outcome(pool, query_id, keep).await.deleted()
     }
 
-    /// The corroboration rule: one absence only records a strike, the second deletes.
-    /// This is what stops the pagination race (an item updated mid-walk moves past the
-    /// cursor and is never returned) from destroying a live row and its read marker.
+    /// The corroboration rule: one absence only records a strike, the second deletes. This
+    /// is what stops the pagination race (an item updated mid-walk moves past the cursor)
+    /// from destroying a live row and its read marker.
     #[tokio::test]
     async fn prune_requires_two_consecutive_absences() {
         let (pool, _file) = test_pool().await;
@@ -2204,9 +2113,8 @@ mod tests {
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
     }
 
-    /// An item that comes back must be disarmed by the next search, not deleted by a
-    /// later unrelated absence. This is the property that makes the strike count safe
-    /// to persist: it can only ever reach the threshold on *consecutive* misses.
+    /// An item that comes back must be disarmed by the next search: the strike count is
+    /// only safe to persist because it reaches the threshold on *consecutive* misses.
     #[tokio::test]
     async fn prune_strikes_reset_when_an_item_comes_back() {
         let (pool, _file) = test_pool().await;
@@ -2222,9 +2130,8 @@ mod tests {
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 2]);
     }
 
-    /// A by-number re-fetch (`RefreshItem`, e.g. re-loading a cleared body) says
-    /// nothing about query membership, so it must NOT disarm a ghost the user happened
-    /// to click on.
+    /// A by-number re-fetch (`RefreshItem`, e.g. re-loading a cleared body) says nothing
+    /// about query membership, so it must NOT disarm a ghost the user clicked on.
     #[tokio::test]
     async fn single_item_refresh_does_not_reset_prune_strikes() {
         let (pool, _file) = test_pool().await;
@@ -2284,9 +2191,8 @@ mod tests {
         );
     }
 
-    /// The guard runs even when nothing was absent. A stale walk observed nothing
-    /// independent, so reporting it as `absent=0` would put a non-observation into the
-    /// denominator the transient-absence measurement is read against.
+    /// The guard runs even when nothing was absent: a stale walk observed nothing
+    /// independent, and reporting `absent=0` would pass a non-observation off as one.
     #[tokio::test]
     async fn prune_reports_a_skip_even_when_nothing_was_absent() {
         let (pool, _file) = test_pool().await;
@@ -2345,9 +2251,8 @@ mod tests {
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
     }
 
-    /// `cached` is the row count the walk examined, so an absence count can be read as a rate
-    /// rather than a bare number. It counts what was there when the walk started, including
-    /// the rows the same walk goes on to delete.
+    /// `cached` counts what was there when the walk started, including the rows the same
+    /// walk goes on to delete.
     #[tokio::test]
     async fn prune_reports_how_many_rows_it_examined() {
         let (pool, _file) = test_pool().await;
@@ -2431,9 +2336,8 @@ mod tests {
         assert_eq!(remaining_numbers(&pool, qb).await, vec![1]);
     }
 
-    /// Editing a query arms its rows: the definition changed, so whatever the first
-    /// fetch under the new query doesn't return is stale by construction and should go
-    /// immediately rather than after another full-fetch interval.
+    /// Editing a query arms its rows, so whatever the first fetch under the new definition
+    /// doesn't return is stale by construction and goes immediately.
     #[tokio::test]
     async fn editing_a_query_prunes_on_the_next_fetch() {
         let (pool, _file) = test_pool().await;
@@ -2449,10 +2353,8 @@ mod tests {
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
     }
 
-    /// Renaming must NOT arm: the search string is unchanged, so the result set is too,
-    /// and a single transient absence would then cost a live row its read marker. The
-    /// front-ends submit name and query together, so only `update_query` can tell the
-    /// two edits apart.
+    /// Renaming must NOT arm: the result set is unchanged, so a single transient absence
+    /// would cost a live row its read marker.
     #[tokio::test]
     async fn renaming_a_query_does_not_arm_prune_strikes() {
         let (pool, _file) = test_pool().await;
@@ -2469,9 +2371,8 @@ mod tests {
         assert_eq!(auto_prune(&pool, qid, &[]).await, 1);
     }
 
-    /// Renaming must not reset the fetch timestamps either: the search string is
-    /// unchanged, so the cache is exactly as fresh as it was, and a spurious reset
-    /// buys nothing but a full re-page of an unchanged result set on the next sync.
+    /// Nor the fetch timestamps: the cache is exactly as fresh as it was, and a reset buys
+    /// nothing but a full re-page of an unchanged result set.
     #[tokio::test]
     async fn renaming_a_query_keeps_fetch_timestamps() {
         let (pool, _file) = test_pool().await;
@@ -2488,9 +2389,8 @@ mod tests {
         assert!(!is_full_fetch_due(&pool, id, 300).await.unwrap());
     }
 
-    /// The arming must not outlive the first post-edit fetch: a row the new query does
-    /// return is reset by `upsert_items`, so a later transient absence still needs two
-    /// strikes.
+    /// The arming must not outlive the first post-edit fetch: a row the new query returns
+    /// is reset by `upsert_items`, so a later absence still needs two strikes.
     #[tokio::test]
     async fn editing_a_query_does_not_arm_rows_the_new_query_returns() {
         let (pool, _file) = test_pool().await;
@@ -2597,9 +2497,8 @@ mod tests {
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
     }
 
-    /// A completed walk stamps both columns, and the attempt column alone decides when
-    /// the next full walk is due — a recent failure defers the retry even though the
-    /// last *completion* is older than the interval.
+    /// A completed walk stamps both columns, and the attempt column alone decides when the
+    /// next walk is due — a recent failure defers it even with an older *completion*.
     #[tokio::test]
     async fn is_full_fetch_due_reads_the_attempt_stamp() {
         let (pool, _file) = test_pool().await;
@@ -2642,7 +2541,6 @@ mod tests {
     async fn upsert_query_stores_and_returns_name() {
         let (pool, _file) = test_pool().await;
 
-        // With a name
         let id = upsert_query(&pool, "is:pr is:open", "pull_request", Some("My PRs"))
             .await
             .expect("upsert");
@@ -2673,7 +2571,6 @@ mod tests {
             .expect("upsert");
         let rows = list_queries(&pool).await.expect("list");
         let row = rows.iter().find(|r| r.id == id).unwrap();
-        // Empty string name is normalised to None.
         assert!(row.name.is_none());
     }
 
@@ -2686,7 +2583,6 @@ mod tests {
             .expect("upsert");
         mark_fetched(&pool, id, true).await.expect("mark fetched");
 
-        // Confirm not stale right after fetch.
         assert!(!is_cache_stale(&pool, id, 300).await.unwrap());
         assert!(!is_full_fetch_due(&pool, id, 300).await.unwrap());
 
@@ -2746,7 +2642,6 @@ mod tests {
             .await
             .expect("upsert query");
 
-        // Insert items with different updated_at values.
         let mut old = make_item(qid, 1, "Old PR");
         old.updated_at = "2026-01-01T00:00:00Z".into();
         let mut mid = make_item(qid, 2, "Mid PR");
@@ -2760,7 +2655,6 @@ mod tests {
 
         let items = fetch_items(&pool, qid).await.expect("fetch");
         assert_eq!(items.len(), 3);
-        // Should be in descending order by updated_at.
         assert_eq!(items[0].number, 3); // newest
         assert_eq!(items[1].number, 2);
         assert_eq!(items[2].number, 1); // oldest
@@ -2807,7 +2701,6 @@ mod tests {
         assert_eq!(by_num[&1].body.as_deref(), Some("recent body"));
         assert_eq!(by_num[&2].body, None);
         assert_eq!(by_num[&3].body, None);
-        // Unread marker untouched by the body clear.
         assert_eq!(
             by_num[&1].last_read_updated_at.as_deref(),
             Some("2999-01-01T00:00:00Z")
