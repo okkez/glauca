@@ -52,10 +52,9 @@ impl GlaucaApp {
         });
     }
 
-    /// Submit a PR review: pick Comment / Approve / Request changes, type an
-    /// optional body, and Cancel / Submit. Radio order matches `review_action`'s
-    /// index mapping below. Opened by the "Approve PR" menu item (defaults to
-    /// Approve). Uses explicit buttons (not `on_ok`) so the actions are visible.
+    /// Submit a PR review: pick Comment / Approve / Request changes, type an optional body,
+    /// and Cancel / Submit. Radio order matches `review_action`'s index mapping below.
+    /// Explicit buttons rather than `on_ok` so the actions are visible.
     pub(crate) fn open_review_dialog(
         &mut self,
         item: ItemEntry,
@@ -199,9 +198,8 @@ impl GlaucaApp {
         });
     }
 
-    /// Help → About: a small informational dialog with the app version. Uses the
-    /// same `window.open_dialog` pattern as `open_query_form`; the default OK button
-    /// dismisses it.
+    /// Help → About: a small informational dialog with the app version, dismissed by the
+    /// default OK button.
     pub(crate) fn open_about_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.open_dialog(cx, move |dlg, _w, _cx| {
             dlg.title("About Glauca")
@@ -230,7 +228,6 @@ impl GlaucaApp {
                     let mut list = content.gap_1().text_sm();
                     for (key, desc) in SHORTCUTS {
                         if desc.is_empty() {
-                            // Section header.
                             list = list
                                 .child(div().pt_2().font_bold().child(SharedString::from(*key)));
                         } else {

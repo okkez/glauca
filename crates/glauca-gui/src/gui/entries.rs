@@ -38,11 +38,10 @@ impl GlaucaApp {
         }
     }
 
-    /// Mark every unread item of the entry at `index` read. For a query that is the
-    /// whole root query; for a filter stream only its matching items (filter expanded
-    /// with the current user here, since the engine does not know `@me`). The engine
-    /// persists and reloads the query, which refreshes the unread badges via the
-    /// `ItemsLoaded` handler — so this works for non-selected entries too.
+    /// Mark every unread item of the entry at `index` read — the whole root query, or a
+    /// filter stream's matching items with the filter expanded here, since the engine does
+    /// not know `@me`. The engine reloads the query afterwards, which refreshes the badges
+    /// through `ItemsLoaded`, so this works for non-selected entries too.
     pub(crate) fn mark_all_read_at(&mut self, index: usize) {
         let Some(entry) = self.entries.get(index) else {
             return;
@@ -72,9 +71,8 @@ impl GlaucaApp {
         self.reorder(false);
     }
 
-    /// Move the selected entry up/down within its group. Sends a swap command; the
-    /// entries vec is reordered when the *Swapped confirmation arrives (mirrors the
-    /// TUI's J/K handling).
+    /// Move the selected entry up/down within its group. Sends a swap command; the entries
+    /// vec is reordered only when the *Swapped confirmation arrives.
     pub(crate) fn reorder(&mut self, down: bool) {
         if self.focus != Focus::QueryList {
             return;
@@ -152,10 +150,9 @@ impl GlaucaApp {
         self.filtered.len()
     }
 
-    /// Whether the filters shaping the current view lean on `@me` while the login
-    /// is unknown — i.e. the list is wrong (empty, or unfiltered for a negated
-    /// `@me`) for a reason the list itself can't show. The status footer turns
-    /// this into a warning; see [`glauca_core::logic::has_unexpanded_me`].
+    /// Whether the filters shaping the current view lean on `@me` while the login is
+    /// unknown — the list is then wrong for a reason it cannot show, and the status footer
+    /// turns this into a warning. See [`glauca_core::logic::has_unexpanded_me`].
     pub(crate) fn has_unexpanded_me(&self) -> bool {
         glauca_core::logic::has_unexpanded_me(
             self.current_user.as_deref(),
@@ -164,10 +161,9 @@ impl GlaucaApp {
         )
     }
 
-    /// Rebuild the `filtered` index cache from `items` + stream/inline filters.
-    /// Mirrors `glauca_core::logic::filter_items` but yields indices so render can
-    /// reuse them without re-scanning every frame. Call after any change to
-    /// `items`, `filter`, or `stream_filter`.
+    /// Rebuild the `filtered` index cache from `items` + stream/inline filters, yielding
+    /// indices so render can reuse them without re-scanning every frame. Call after any
+    /// change to `items`, `filter`, or `stream_filter`.
     pub(crate) fn recompute_filtered(&mut self) {
         let stream_q = self
             .stream_filter
@@ -187,20 +183,17 @@ impl GlaucaApp {
         if self.item_cursor >= self.filtered.len() {
             self.item_cursor = self.filtered.len().saturating_sub(1);
         }
-        // Keep the virtualized list's item count in step with `filtered`; a
-        // mismatch makes `list` panic or render stale rows. This is the single
-        // chokepoint every `filtered` mutation flows through.
+        // Keep the virtualized list's item count in step with `filtered`, or `list` panics
+        // or renders stale rows. Every `filtered` mutation flows through here.
         self.items_list.reset(self.filtered.len());
     }
 
-    /// Issue the engine commands to (re)load the currently selected entry: load
-    /// cached items, mark it viewed, and—for root queries—sync. Returns the root
-    /// query id when a query (not a filter stream) was selected, so the caller
-    /// can skip it from the background-refresh sweep.
+    /// Issue the engine commands to (re)load the currently selected entry. Returns the
+    /// root query id when a query (not a filter stream) was selected, so the caller can
+    /// skip it in the background-refresh sweep.
     pub(crate) fn select_current_entry(&mut self, always_sync: bool) -> Option<i64> {
         let entry = self.entries.get(self.entry_cursor)?.clone();
-        // Selecting a query does NOT mark it viewed: the unread badge is kept and
-        // cleared per-item as items are read. Unread is now derived per item from
+        // Selecting a query does NOT mark it viewed: unread is derived per item from
         // `updated_at` vs `last_read_updated_at`, so there is no per-entry baseline.
         self.stream_filter = entry.stream_filter().map(|s| s.to_string());
 
@@ -234,10 +227,9 @@ impl GlaucaApp {
         Some(root_id)
     }
 
-    /// Force a full re-fetch of the current entry's root query (ignores
-    /// `last_fetched_at`), which re-pages everything and prunes cached items that
-    /// no longer match. Useful to reconcile after items have fallen out of the
-    /// query (e.g. merged PRs lingering in an `is:open` list).
+    /// Force a full re-fetch of the current entry's root query, ignoring
+    /// `last_fetched_at`: re-pages everything and prunes cached items that no longer
+    /// match, e.g. merged PRs lingering in an `is:open` list.
     pub(crate) fn full_resync_current(&mut self) {
         let Some(entry) = self.entries.get(self.entry_cursor) else {
             return;
@@ -254,10 +246,9 @@ impl GlaucaApp {
         self.syncing = true;
     }
 
-    /// Shared tail of the QueryDeleted / FilterStreamDeleted arms: drop the
-    /// entries rejected by `retain`, clamp the cursor, clear the inline filter,
-    /// and either reselect or empty the view. Returns true when the caller must
-    /// refilter (every entry is gone and the item list was cleared).
+    /// Shared tail of the QueryDeleted / FilterStreamDeleted arms: drop the entries
+    /// rejected by `retain`, clamp the cursor, clear the inline filter, and either
+    /// reselect or empty the view. Returns true when the caller must refilter.
     pub(crate) fn remove_entries_and_reselect(
         &mut self,
         retain: impl Fn(&LeftPaneEntry) -> bool,

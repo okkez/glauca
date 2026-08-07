@@ -1,10 +1,9 @@
 //! Embedded SVG assets served to gpui via [`AssetSource`].
 //!
-//! gpui resolves `svg().path("…")` through the single app-level `AssetSource`
-//! (set with `Application::with_assets`). We bundle the GitHub Octicons used for
-//! the item-list status glyphs (`octicons/*.svg`, MIT — see `assets/octicons/NOTICE`).
-//! gpui paints SVGs as a monochrome mask tinted by the element's `text_color`,
-//! so the icon color is chosen at the call site, not in the file.
+//! gpui resolves `svg().path("…")` through the single app-level `AssetSource` set with
+//! `Application::with_assets`. Bundled here are the Octicons for the item-list status
+//! glyphs (`octicons/*.svg`, MIT — see `assets/octicons/NOTICE`). gpui paints SVGs as a
+//! monochrome mask tinted by `text_color`, so the color is chosen at the call site.
 
 use std::borrow::Cow;
 

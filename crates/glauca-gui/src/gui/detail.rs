@@ -11,9 +11,8 @@ use super::*;
 
 impl GlaucaApp {
     pub(crate) fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        // The pane frame (border + focus highlight) is added by the caller via
-        // `pane_frame`, so the early returns below don't each have to wrap
-        // themselves.
+        // The pane frame is added by the caller via `pane_frame`, so the early returns
+        // below don't each have to wrap themselves.
         let container = v_flex()
             .id("detail-pane")
             .size_full()
@@ -42,9 +41,8 @@ impl GlaucaApp {
 
         let (state_path, state_color) = item_state_icon_info(item, cx);
 
-        // Pinned header: metadata stays visible while the body scrolls. It can't
-        // share a scroll region with the body because the body owns its own
-        // virtualized scroll (see below), so it's a `flex_none` block on top.
+        // Pinned header: metadata stays visible while the body scrolls. It cannot share a
+        // scroll region with the body, which owns its own, so it is a `flex_none` block.
         let header = v_flex()
             .flex_none()
             .p_4()
@@ -56,9 +54,8 @@ impl GlaucaApp {
                     .w_full()
                     .gap_2()
                     .items_start()
-                    // Leading controls kept in a vertically-centered cluster so the
-                    // avatar, state pill, and review icon line up with each other;
-                    // the cluster as a whole sits on the title's first line.
+                    // A vertically-centered cluster so the avatar, state pill and review
+                    // icon line up, with the cluster on the title's first line.
                     .child(
                         h_flex()
                             .gap_2()
@@ -141,8 +138,7 @@ impl GlaucaApp {
                 ))
             })
             .map(|e| {
-                // Unified reviewers row: requested ∪ reviewed, state shown by the
-                // avatar overlay (replaces the old separate reviewers/reviews rows).
+                // Unified reviewers row: requested ∪ reviewed, state shown by the overlay.
                 let reviewers = reviewer_overlays(item);
                 e.when(!reviewers.is_empty(), |e| {
                     e.child(detail_people_field(
@@ -168,14 +164,10 @@ impl GlaucaApp {
                 cx,
             ));
 
-        // Body rendered as Markdown via gpui-component's `TextView`, inside a
-        // tracked `overflow_y_scroll` container (the comments-overlay pattern)
-        // instead of the TextView's own virtualized `scrollable(true)` mode: that
-        // mode's ListState is private to gpui-component, which would leave the
-        // j/k keyboard scroll (Focus::ItemDetail) with nothing to drive. The
-        // Markdown parse is still retained in `detail_text` (`set_text` is a
-        // no-op unless the selected item's body actually changed); only layout
-        // re-runs on pane resize.
+        // Markdown via `TextView` inside a tracked `overflow_y_scroll` container rather
+        // than the TextView's own `scrollable(true)`, whose ListState is private to
+        // gpui-component and would leave j/k with nothing to drive. The parse is retained
+        // in `detail_text`; `set_text` is a no-op unless the body actually changed.
         let body = match item
             .body
             .as_deref()
@@ -221,9 +213,8 @@ impl GlaucaApp {
         container.child(header).child(body)
     }
 
-    /// Self-managed comments overlay (View comments). Rendered over the panes when
-    /// `comments_open`; repaints when `CommentsLoaded` arrives. Keys are scoped to
-    /// `COMMENTS_CONTEXT` via the focused panel.
+    /// Self-managed comments overlay, rendered over the panes when `comments_open` and
+    /// repainted when `CommentsLoaded` arrives. Keys are scoped to `COMMENTS_CONTEXT`.
     pub(crate) fn render_comments_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hidden_count = self.comments.iter().filter(|c| c.is_minimized).count();
         let sort_label = if self.comments_sort_desc {
@@ -295,8 +286,7 @@ impl GlaucaApp {
                         block = block.child(
                             div()
                                 .text_xs()
-                                // `yellow` (attention), not `accent`: accent is now
-                                // a muted grey that's too dark for body text.
+                                // `yellow`, not `accent` — accent is a muted grey.
                                 .text_color(cx.theme().yellow)
                                 .child(SharedString::from(format!("⚠ hidden ({reason})"))),
                         );

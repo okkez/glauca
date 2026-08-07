@@ -1,6 +1,5 @@
-//! Comments overlay: open/close and the single-key controls (scroll, jump,
-//! sort/hidden toggles) that are active while the overlay is focused. `on_quit`
-//! lives here too since it flushes and exits from the same key surface.
+//! Comments overlay: open/close and the single-key controls active while the overlay is
+//! focused. `on_quit` lives here too, since it exits from the same key surface.
 
 use gpui::*;
 
@@ -24,9 +23,8 @@ impl GlaucaApp {
         }
     }
 
-    /// Open the comments overlay for `item` and request its comments. Clearing
-    /// `comments` + setting `comments_loading` first means a quick reopen never
-    /// shows the previous item's comments.
+    /// Open the comments overlay for `item` and request its comments. Clearing `comments`
+    /// first means a quick reopen never shows the previous item's.
     pub(crate) fn open_comments(
         &mut self,
         item: ItemEntry,
@@ -131,9 +129,8 @@ impl GlaucaApp {
     }
 
     pub(crate) fn on_quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
-        // The `on_app_quit` hook (registered in `new`) flushes any pending settings
-        // synchronously during shutdown, so quitting via the `q`/menu action needs
-        // nothing special here beyond triggering the quit.
+        // The `on_app_quit` hook flushes pending settings synchronously during shutdown,
+        // so this needs nothing beyond triggering the quit.
         cx.quit();
     }
 }
