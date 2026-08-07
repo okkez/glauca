@@ -1767,11 +1767,8 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    // Confirm only what the DB took, and report the rest — see `db::exchanged`
-                    // for why a confirmation the DB did not earn is the bug itself. Reported as
-                    // `ActionError` rather than `Status` because the usual cause is a query
-                    // another front-end deleted, which this one is still showing: the user has
-                    // to see that the keypress failed, not just that it did nothing.
+                    // Confirm only what the DB took — see `db::exchanged` for why an unearned
+                    // confirmation is the bug itself.
                     match db::swap_query_positions(&pool2, upper_id, lower_id).await {
                         Ok(()) => {
                             let _ = tx2
@@ -1798,8 +1795,6 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    // Reported rather than swallowed, for the reason given on
-                    // `SwapQueryPositions` above.
                     match db::swap_filter_stream_positions(&pool2, upper_id, lower_id).await {
                         Ok(()) => {
                             let _ = tx2
