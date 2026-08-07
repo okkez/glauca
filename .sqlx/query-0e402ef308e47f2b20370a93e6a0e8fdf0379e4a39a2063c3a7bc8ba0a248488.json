@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO filter_streams (id, parent_id, name, filter, position, created_at)\n                 VALUES (?, ?, ?, 'state:open', 0, '2026-08-07 00:00:00')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0e402ef308e47f2b20370a93e6a0e8fdf0379e4a39a2063c3a7bc8ba0a248488"
+}

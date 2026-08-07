@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO filter_streams (parent_id, name, filter, position)\n        VALUES (\n            ?, ?, ?,\n            (SELECT COALESCE(MAX(position) + 1, 0) FROM filter_streams WHERE parent_id = ?)\n        )\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4f782904587830bc82d590d63de8f5c2865e71932e95ba8f9c608857b95e3a5f"
+}

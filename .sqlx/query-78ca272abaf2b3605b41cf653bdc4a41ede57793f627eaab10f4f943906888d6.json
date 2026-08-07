@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO queries (id, query, kind, position, created_at)\n                 VALUES (?, ?, 'issue', 0, '2026-08-07 00:00:00')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "78ca272abaf2b3605b41cf653bdc4a41ede57793f627eaab10f4f943906888d6"
+}

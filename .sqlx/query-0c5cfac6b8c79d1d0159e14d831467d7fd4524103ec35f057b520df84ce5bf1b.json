@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
+  "query": "SELECT id, query, kind, name FROM queries ORDER BY position ASC, created_at ASC, id ASC",
   "describe": {
     "columns": [
       {
@@ -9,30 +9,30 @@
         "type_info": "Integer"
       },
       {
-        "name": "parent_id",
+        "name": "query",
         "ordinal": 1,
-        "type_info": "Integer"
+        "type_info": "Text"
       },
       {
-        "name": "name",
+        "name": "kind",
         "ordinal": 2,
         "type_info": "Text"
       },
       {
-        "name": "filter",
+        "name": "name",
         "ordinal": 3,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
-      true,
       false,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "5379cec47d585cf5c708e8b77170dc03a795199252896169fc9b49bda71e89de"
+  "hash": "0c5cfac6b8c79d1d0159e14d831467d7fd4524103ec35f057b520df84ce5bf1b"
 }
