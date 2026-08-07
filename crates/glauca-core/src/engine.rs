@@ -3,7 +3,9 @@
 // ここには pool/gh/mpsc チャネルだけで完結するタスクと、それらが受け渡すメッセージ型を集約する。
 
 use crate::filter::StreamFilter;
-use crate::logic::{cached_item_to_item_entry, is_item_unread};
+use crate::logic::{
+    ME_UNEXPANDED_WARNING, cached_item_to_item_entry, has_me_token, is_item_unread,
+};
 use crate::types::{
     CommentEntry, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
@@ -99,6 +101,16 @@ pub enum AppMessage {
         upper_id: i64,
         lower_id: i64,
         active_id: i64,
+    },
+    /// The authenticated user, resolved by a retry after the lookup at startup
+    /// failed (see [`current_user_retry_task`]). Front-ends adopt it so `@me`
+    /// starts expanding: re-filter the visible list and recompute unread counts,
+    /// both of which were answering the wrong question while the login was
+    /// unknown (matching nobody, or everybody for a negated `@me`).
+    CurrentUserResolved {
+        login: String,
+        name: Option<String>,
+        avatar_url: Option<String>,
     },
 }
 
@@ -1139,6 +1151,87 @@ pub async fn refresh_timer_task(
     }
 }
 
+/// First wait before re-attempting the current-user lookup, in seconds. Short
+/// enough that a start during a brief network blip heals almost immediately, long
+/// enough not to be a busy-loop against a network that is simply down.
+const CURRENT_USER_RETRY_BASE_SECS: u64 = 30;
+
+/// Wait before retry number `attempt` (0-based): doubling from
+/// [`CURRENT_USER_RETRY_BASE_SECS`], capped at the sync interval — or at the base,
+/// whichever is larger, since a configured interval can be shorter than the base
+/// (`MIN_SYNC_INTERVAL_SECS` is below it) and must not shorten the wait.
+///
+/// Backing off at all matters because the usual cause is "no network": hammering
+/// every 30s achieves nothing. But the cap is the *sync* interval, not something
+/// longer, because that is the cadence the app already runs at — while offline the
+/// refresh timer keeps re-enqueuing every stale query each interval, so one extra
+/// `/user` call per interval is lost in the noise. A longer ceiling would save
+/// nothing measurable and cost what it saves: the user reconnects and keeps
+/// staring at the wrong list until the next wake-up.
+fn current_user_retry_delay_secs(attempt: u32, sync_interval_secs: u64) -> u64 {
+    // `1 << attempt` overflows past 63; saturate instead, since anything beyond a
+    // handful of doublings is already clamped by the cap.
+    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+    let cap = sync_interval_secs.max(CURRENT_USER_RETRY_BASE_SECS);
+    CURRENT_USER_RETRY_BASE_SECS.saturating_mul(factor).min(cap)
+}
+
+/// Keep asking GitHub who we are until it answers, then tell the front-end.
+///
+/// Spawned only when the lookup at startup failed. Without it a single failure —
+/// most often an app launched before the network was up — left `current_user`
+/// `None` for the entire session, and every `@me` filter silently matched nothing
+/// long after connectivity returned.
+///
+/// Stops on the first success, on a refusal that a retry cannot change (see
+/// [`github::CurrentUserError`]), or once the front-end has hung up.
+pub async fn current_user_retry_task(
+    gh: Octocrab,
+    tx: mpsc::Sender<AppMessage>,
+    sync: SyncConfig,
+    gate: RateLimitGate,
+) {
+    let mut attempt: u32 = 0;
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(
+            current_user_retry_delay_secs(attempt, sync.interval_secs()),
+        ))
+        .await;
+        // Nobody left to tell.
+        if tx.is_closed() {
+            return;
+        }
+        // Honour the same gate the sync worker does: while it is closed the app has
+        // decided not to talk to GitHub at all, and this task is not the exception
+        // that gets to keep knocking. Not counted as an attempt — nothing was tried,
+        // so the backoff shouldn't grow.
+        if !gate.is_open(Utc::now().timestamp()) {
+            debug!("skip current-user retry: rate-limited");
+            continue;
+        }
+        match github::get_current_user(&gh).await {
+            Ok(cu) => {
+                info!(login = %cu.login, attempt, "current user resolved on retry");
+                let _ = tx
+                    .send(AppMessage::CurrentUserResolved {
+                        login: cu.login,
+                        name: cu.name,
+                        avatar_url: cu.avatar_url,
+                    })
+                    .await;
+                return;
+            }
+            Err(github::CurrentUserError::Rejected) => {
+                warn!("current user lookup refused; `@me` stays unexpanded this session");
+                return;
+            }
+            Err(github::CurrentUserError::Transient) => {
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
 /// One local cache-maintenance sweep: clear stale `body` blobs, prune each query's
 /// read overflow, then `VACUUM` to return the freed pages to the OS. All local
 /// (no GitHub API). Errors are logged and skipped so one failing step can't abort
@@ -1385,6 +1478,10 @@ impl Engine {
         let entries = load_left_pane_entries(&pool).await?;
 
         let cu = github::get_current_user(&gh).await;
+        // Whether the login is worth chasing in the background: a start with no
+        // network resolves nothing, and `@me` would stay literal all session.
+        let should_retry_current_user = matches!(cu, Err(github::CurrentUserError::Transient));
+        let cu = cu.ok();
         let current_user = cu.as_ref().map(|u| u.login.clone());
         let current_user_name = cu.as_ref().and_then(|u| u.name.clone());
         let current_user_avatar_url = cu.as_ref().and_then(|u| u.avatar_url.clone());
@@ -1429,6 +1526,16 @@ impl Engine {
         // Spawn the periodic local cache-maintenance sweep (body clears, overflow
         // prune, VACUUM). Purely local, so it ignores the rate-limit gate.
         tokio::spawn(maintenance_task(pool.clone(), maintenance));
+        // Chase the login in the background when the startup lookup couldn't reach
+        // GitHub, so `@me` starts working mid-session instead of after a restart.
+        if should_retry_current_user {
+            tokio::spawn(current_user_retry_task(
+                gh.clone(),
+                msg_tx.clone(),
+                sync,
+                gate.clone(),
+            ));
+        }
         // Spawn the command-handling loop.
         tokio::spawn(command_loop(
             pool,
@@ -1868,26 +1975,53 @@ async fn command_loop(
                 });
             }
             EngineCommand::MarkAllRead { query_id, filter } => {
-                // Update the DB, then reload the query so the front-end's
-                // `ItemsLoaded` handler recomputes unread counts for this query's
-                // entries (works whether or not the entry is currently selected).
-                let pool2 = pool.clone();
-                let tx2 = msg_tx.clone();
-                tokio::spawn(async move {
-                    let res = match &filter {
-                        None => db::mark_all_items_read(&pool2, query_id).await,
-                        Some(f) => mark_filtered_items_read(&pool2, query_id, f).await,
-                    };
-                    match res {
-                        Ok(()) => load_items_task(pool2, query_id, false, tx2).await,
-                        Err(e) => {
-                            let _ = tx2
-                                .send(AppMessage::Status(format!("mark all read error: {e}")))
-                                .await;
-                        }
-                    }
-                });
+                tokio::spawn(mark_all_read_task(
+                    pool.clone(),
+                    msg_tx.clone(),
+                    query_id,
+                    filter,
+                ));
             }
+        }
+    }
+}
+
+/// Mark a query read — all of it, or just the entries matching `filter` — then
+/// reload it so the front-end's `ItemsLoaded` handler recomputes unread counts for
+/// the query's entries (whether or not one is currently selected).
+///
+/// Split out of `command_loop` so the refusal below can be tested without a GitHub
+/// client: this path never makes a request, and building an `Octocrab` in a test
+/// drags in TLS setup that the test process has no reason to need.
+async fn mark_all_read_task(
+    pool: SqlitePool,
+    msg_tx: mpsc::Sender<AppMessage>,
+    query_id: i64,
+    filter: Option<String>,
+) {
+    // Refuse a filter whose `@me` never expanded. Callers expand before sending, so
+    // a surviving token means the login was unknown — and here that doesn't merely
+    // under-match, it can wildly over-match: `-author:@me` excludes only the literal
+    // login "@me", i.e. nobody, so it selects EVERY item and marks the whole query
+    // read. Silent, irreversible, and the opposite of what was asked for.
+    if filter.as_deref().is_some_and(has_me_token) {
+        let _ = msg_tx
+            .send(AppMessage::ActionError(format!(
+                "mark all read skipped — {ME_UNEXPANDED_WARNING}"
+            )))
+            .await;
+        return;
+    }
+    let res = match &filter {
+        None => db::mark_all_items_read(&pool, query_id).await,
+        Some(f) => mark_filtered_items_read(&pool, query_id, f).await,
+    };
+    match res {
+        Ok(()) => load_items_task(pool, query_id, false, msg_tx).await,
+        Err(e) => {
+            let _ = msg_tx
+                .send(AppMessage::Status(format!("mark all read error: {e}")))
+                .await;
         }
     }
 }
@@ -1925,6 +2059,120 @@ mod tests {
     use super::*;
     use crate::test_support::test_pool;
     use rstest::rstest;
+
+    /// Cache one unread PR by `alice` under `query_id`.
+    async fn seed_unread_item(pool: &SqlitePool, query_id: i64) {
+        let item = db::CachedItem {
+            query_id,
+            kind: "pull_request".into(),
+            repo_owner: "o".into(),
+            repo_name: "r".into(),
+            repo_private: false,
+            number: 1,
+            title: "alice's PR".into(),
+            url: "https://example.invalid/1".into(),
+            author: Some("alice".into()),
+            author_avatar_url: None,
+            state: "open".into(),
+            updated_at: "2026-05-24T10:00:00Z".into(),
+            labels: "[]".into(),
+            comment_count: 0,
+            requested_reviewers: "[]".into(),
+            reviews: "[]".into(),
+            body: None,
+            assignees: "[]".into(),
+            is_draft: false,
+            created_at_item: None,
+            base_ref: None,
+            head_ref: None,
+            review_decision: None,
+            milestone: None,
+            last_read_updated_at: None,
+        };
+        db::upsert_item(pool, &item).await.expect("seed item");
+    }
+
+    /// Run one mark-all-read and report whether the seeded item ended up read, plus
+    /// whatever the engine said about it.
+    async fn mark_all_read_outcome(filter: Option<&str>) -> (bool, Option<String>) {
+        let (pool, _file) = test_pool().await;
+        let query_id = db::upsert_query(&pool, "repo:o/r is:pr", "pull_request", None)
+            .await
+            .expect("query");
+        seed_unread_item(&pool, query_id).await;
+
+        let (msg_tx, mut msg_rx) = mpsc::channel::<AppMessage>(16);
+        mark_all_read_task(pool.clone(), msg_tx, query_id, filter.map(str::to_string)).await;
+
+        // It answers either way — reloaded items (it acted) or a complaint (it
+        // refused, or the DB write failed) — so the first message says which
+        // happened. Both complaint shapes are captured so a failing test shows the
+        // engine's own wording instead of just "nothing happened".
+        let complaint = match msg_rx.recv().await {
+            Some(AppMessage::ActionError(e) | AppMessage::Status(e)) => Some(e),
+            _ => None,
+        };
+        let read = db::fetch_items(&pool, query_id).await.expect("fetch")[0]
+            .last_read_updated_at
+            .is_some();
+        (read, complaint)
+    }
+
+    /// The dangerous case: with the login unknown, `-author:@me` excludes only the
+    /// literal login "@me" — nobody — so it selects every item. Acting on it would
+    /// silently wipe the query's unread state, which nothing can undo.
+    #[tokio::test]
+    async fn mark_all_read_refuses_an_unexpanded_negated_me() {
+        let (read, complaint) = mark_all_read_outcome(Some("-author:@me")).await;
+        assert!(!read, "an unexpanded `@me` filter marked the query read");
+        assert!(
+            complaint.is_some_and(|c| c.contains(ME_UNEXPANDED_WARNING)),
+            "the refusal was silent — the user would think it worked"
+        );
+    }
+
+    /// …and the guard must not swallow ordinary mark-all-read.
+    #[rstest]
+    #[case::whole_query(None)]
+    #[case::expanded_filter(Some("author:alice"))]
+    #[tokio::test]
+    async fn mark_all_read_still_works_without_an_unexpanded_me(#[case] filter: Option<&str>) {
+        let (read, complaint) = mark_all_read_outcome(filter).await;
+        assert!(read, "mark all read did nothing for {filter:?}");
+        assert_eq!(complaint, None);
+    }
+
+    /// `(attempt, sync interval) -> wait`, in seconds. Spelled as literals so the
+    /// doubling is visible in the table; the base is 30s and the cap is the sync
+    /// interval. A zero would spin; anything past the interval would leave the user
+    /// waiting after the network is demonstrably back.
+    #[rstest]
+    // Doubles from the base …
+    #[case::first_retry(0, 300, 30)]
+    #[case::second_retry(1, 300, 60)]
+    #[case::third_retry(2, 300, 120)]
+    #[case::fourth_retry(3, 300, 240)]
+    // … then stops at the sync interval and stays there, so a reconnect is noticed
+    // within one ordinary sync cycle.
+    #[case::capped(4, 300, 300)]
+    #[case::still_capped(60, 300, 300)]
+    // Past 63 the doubling would overflow the shift; it must saturate into the cap
+    // rather than panic (a long-lived offline session keeps counting).
+    #[case::shift_overflow(u32::MAX, 300, 300)]
+    // At the default 60s interval the cap is reached on the second retry.
+    #[case::default_interval(1, DEFAULT_SYNC_INTERVAL_SECS, 60)]
+    #[case::default_interval_capped(9, DEFAULT_SYNC_INTERVAL_SECS, 60)]
+    // A sync interval below the base must not invert the range into an empty one —
+    // the base wins, rather than producing a busy-loop of ever-shorter waits.
+    #[case::interval_below_base(0, 10, 30)]
+    #[case::interval_below_base_capped(9, 10, 30)]
+    fn retry_delay_doubles_then_caps_at_the_sync_interval(
+        #[case] attempt: u32,
+        #[case] interval: u64,
+        #[case] expected: u64,
+    ) {
+        assert_eq!(current_user_retry_delay_secs(attempt, interval), expected);
+    }
 
     #[test]
     fn effective_interval_clamps_to_floor() {

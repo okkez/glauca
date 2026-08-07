@@ -261,6 +261,53 @@ impl App {
         self.apply_items_to_view(items);
     }
 
+    /// Whether the filters shaping the current view lean on `@me` while the login
+    /// is unknown — i.e. the list is wrong (empty, or unfiltered for a negated
+    /// `@me`) for a reason the list itself can't show. The status bar turns this
+    /// into a warning; see [`glauca_core::logic::has_unexpanded_me`].
+    pub fn has_unexpanded_me(&self) -> bool {
+        glauca_core::logic::has_unexpanded_me(
+            self.current_user.as_deref(),
+            self.stream_filter.as_deref(),
+            self.filter.value(),
+        )
+    }
+
+    /// Adopt a login the engine resolved after startup (see
+    /// `AppMessage::CurrentUserResolved`) and redo the work that was wrong without
+    /// it: every `@me` filter had been matching nobody.
+    ///
+    /// The visible list needs no nudge — `filtered_items`'s cache keys on the login,
+    /// so the next frame recomputes it. Unread badges do: they are only recomputed
+    /// when a query's items load. Refreshing the selected query's badges here fixes
+    /// what the user is looking at; the rest correct themselves on their next
+    /// background sync, a minute or so later.
+    pub(crate) fn adopt_current_user(&mut self, login: String) {
+        self.status = Some(format!("signed in as {login}"));
+        self.current_user = Some(login);
+        if let Some(query_id) = self.selected_root_query_id() {
+            self.recompute_unread_counts_live(query_id);
+        }
+        // A resolved login can *shrink* the list as well as grow it — `-author:@me`
+        // matched everything while `@me` was literal — so the cursor can be left
+        // past the end, which empties the detail pane and makes `j` do nothing.
+        self.clamp_item_cursor();
+    }
+
+    /// [`Self::recompute_unread_counts_for_query`] against the items already on
+    /// screen. Separate because that one borrows `items` while this borrows `self`
+    /// mutably; callers with nothing fresher to install would otherwise have to
+    /// move `self.items` out and back just to satisfy the borrow checker.
+    pub(crate) fn recompute_unread_counts_live(&mut self, query_id: i64) {
+        let updates = glauca_core::logic::compute_unread_counts(
+            &self.entries,
+            query_id,
+            &self.items,
+            self.current_user.as_deref(),
+        );
+        self.unread_counts.extend(updates);
+    }
+
     pub(crate) fn recompute_unread_counts_for_query(&mut self, query_id: i64, items: &[ItemEntry]) {
         for (key, unread) in glauca_core::logic::compute_unread_counts(
             &self.entries,
@@ -392,6 +439,98 @@ mod tests {
         app.filter = ta("fix");
         // Only "Fix bug" and "Fix crash closed" match "fix", and all pass stream filter
         assert_eq!(app.filtered_items().len(), 2);
+    }
+
+    /// `has_unexpanded_me` only forwards `App`'s two filters to core, which owns and
+    /// tests the predicate itself. What's worth pinning here is that *both* fields
+    /// are wired up — a wrapper that forgot the search box would look fine until
+    /// someone typed `@me` into it. Whether it clears is covered end-to-end by the
+    /// status-bar render test.
+    #[rstest]
+    #[case::from_the_stream_filter(Some("author:@me"), "")]
+    #[case::from_the_search_box(None, "author:@me")]
+    fn has_unexpanded_me_reads_both_filters(
+        #[case] stream_filter: Option<&str>,
+        #[case] inline_filter: &str,
+    ) {
+        let mut app = App::new(vec![]);
+        app.stream_filter = stream_filter.map(Into::into);
+        app.filter = ta(inline_filter);
+        assert!(app.has_unexpanded_me());
+
+        app.current_user = Some("alice".into());
+        assert!(!app.has_unexpanded_me());
+    }
+
+    /// The bug this whole path exists for: the app started before the network was
+    /// up, so the login never resolved and `author:@me` matched nobody all session.
+    /// Adopting a late-resolved login must un-break the list without a restart.
+    #[test]
+    fn adopting_a_late_login_revives_an_at_me_filter() {
+        let mut app = make_app_with_items(&["alice's PR"]);
+        app.stream_filter = Some("author:@me".into());
+        // Unresolved login: `@me` stays literal, so the stream shows nothing.
+        assert!(app.current_user.is_none());
+        assert!(app.filtered_items().is_empty());
+
+        app.adopt_current_user("alice".into());
+
+        // Same items, same filter — only the login changed.
+        assert_eq!(app.filtered_items().len(), 1);
+    }
+
+    /// A negated `@me` filter runs the other way: it matched everything while the
+    /// login was literal, and shrinks once it resolves. The cursor must come back
+    /// inside the list, or the detail pane goes blank and `j` stops responding.
+    #[test]
+    fn adopting_a_late_login_pulls_the_cursor_back_into_a_shrunken_list() {
+        let mut app = make_app_with_items(&["alice's PR", "alice's other PR"]);
+        app.stream_filter = Some("-author:@me".into());
+        assert_eq!(app.filtered_items().len(), 2);
+        app.item_cursor = 1;
+
+        app.adopt_current_user("alice".into());
+
+        assert!(app.filtered_items().is_empty());
+        assert_eq!(app.item_cursor, 0, "cursor left past the end of the list");
+    }
+
+    /// Unread badges are computed against the same filters, so they were wrong for
+    /// the same reason and must be refreshed too — not just the visible list.
+    #[test]
+    fn adopting_a_late_login_refreshes_unread_counts() {
+        let mut app = App::new(vec![]);
+        app.entries = vec![
+            LeftPaneEntry::Query(QueryEntry {
+                id: 1,
+                label: "Open PRs".into(),
+                query_str: "is:pr is:open".into(),
+                kind: "pull_request".into(),
+            }),
+            LeftPaneEntry::FilterStream(FilterStreamEntry {
+                id: 2,
+                parent_id: 1,
+                name: "Mine".into(),
+                filter: "author:@me".into(),
+                kind: "pull_request".into(),
+            }),
+        ];
+        app.items = vec![ItemEntry {
+            updated_at: "2026-05-24T10:00:00Z".into(),
+            ..make_item(1, "alice's unread PR")
+        }];
+        let stream_key = app.entries[1].unread_key();
+
+        app.recompute_unread_counts_for_query(1, &app.items.clone());
+        assert_eq!(app.unread_counts.get(&stream_key), Some(&0));
+
+        app.adopt_current_user("alice".into());
+
+        assert_eq!(
+            app.unread_counts.get(&stream_key),
+            Some(&1),
+            "the stream's badge still counts nothing after the login resolved"
+        );
     }
 
     #[test]

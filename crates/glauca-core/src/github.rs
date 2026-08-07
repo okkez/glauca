@@ -70,10 +70,25 @@ pub struct CurrentUser {
     pub avatar_url: Option<String>,
 }
 
-/// Fetch the authenticated user (login + display name + avatar).
+/// Why [`get_current_user`] failed — specifically, whether asking again with the
+/// same client could ever give a different answer.
 ///
-/// Returns `None` if unauthenticated or the API call fails.
-pub async fn get_current_user(client: &Octocrab) -> Option<CurrentUser> {
+/// The caller retries the lookup in the background (an app started while offline
+/// must not stay `@me`-less for its whole session), so it needs to tell a failure
+/// that will pass from one that never will.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentUserError {
+    /// Nothing durable went wrong: offline, DNS/TLS failure, timeout, a 5xx, or a
+    /// rate limit. Retrying is exactly what fixes it.
+    Transient,
+    /// GitHub answered and refused: 401 (no/expired token) or 403 (a token
+    /// without the scope to read the user). The token is fixed for the life of
+    /// the process, so retrying it cannot help.
+    Rejected,
+}
+
+/// Fetch the authenticated user (login + display name + avatar).
+pub async fn get_current_user(client: &Octocrab) -> Result<CurrentUser, CurrentUserError> {
     #[derive(Deserialize)]
     struct UserResponse {
         login: String,
@@ -86,15 +101,48 @@ pub async fn get_current_user(client: &Octocrab) -> Option<CurrentUser> {
         .get::<UserResponse, _, _>("https://api.github.com/user", None::<&()>)
         .await
     {
-        Ok(u) => Some(CurrentUser {
+        Ok(u) => Ok(CurrentUser {
             login: u.login,
             name: u.name,
             avatar_url: u.avatar_url,
         }),
         Err(e) => {
-            warn!(error = %e, "get_current_user failed (unauthenticated or API error)");
-            None
+            let kind = classify_current_user_error(&e);
+            warn!(error = %e, transient = (kind == CurrentUserError::Transient),
+                  "get_current_user failed (unauthenticated or API error)");
+            Err(kind)
         }
+    }
+}
+
+/// Split a failed `/user` call into "couldn't ask" and "was told no".
+///
+/// Only a refusal GitHub actually sent back is treated as final; everything else
+/// — transport errors, a malformed body, a 5xx — is assumed transient, because
+/// the cost of retrying a hopeless case (one request per retry interval) is far
+/// below the cost of getting a recoverable one wrong (`@me` dead all session).
+fn classify_current_user_error(e: &octocrab::Error) -> CurrentUserError {
+    match e {
+        octocrab::Error::GitHub { source, .. } => {
+            classify_current_user_status(source.status_code.as_u16(), &source.message)
+        }
+        _ => CurrentUserError::Transient,
+    }
+}
+
+/// The response half of [`classify_current_user_error`], split out so the rule is
+/// unit-testable — octocrab's error variants carry a backtrace and are awkward to
+/// build by hand.
+fn classify_current_user_status(status: u16, message: &str) -> CurrentUserError {
+    // A rate limit also arrives as 403, and it is the one refusal that lifts by
+    // itself. Treating it as final would leave `@me` dead for the whole session of
+    // an app that merely started inside a rate-limit window.
+    if is_rate_limit_response(status, message) {
+        return CurrentUserError::Transient;
+    }
+    match status {
+        401 | 403 => CurrentUserError::Rejected,
+        _ => CurrentUserError::Transient,
     }
 }
 
@@ -228,20 +276,31 @@ pub enum SearchError {
     Other(anyhow::Error),
 }
 
+/// Whether a GitHub response is a rate limit rather than a real refusal.
+///
+/// GitHub overloads 403: it is both "you may not do this" and, with a telling
+/// message, "not right now". Every caller that treats a refusal as final has to
+/// make this distinction, so it lives in one place — reading it wrong means either
+/// hammering a wall or giving up on something that would work in an hour.
+fn is_rate_limit_response(status: u16, message: &str) -> bool {
+    if status == 429 {
+        return true;
+    }
+    // Only 403 is ambiguous enough to be worth reading the message for.
+    if status != 403 {
+        return false;
+    }
+    let msg = message.to_lowercase();
+    msg.contains("rate limit") || msg.contains("abuse") || msg.contains("secondary")
+}
+
 /// Classify an octocrab error: HTTP 429, or 403 whose message names a rate/abuse
 /// limit, is a rate limit; everything else is a generic failure.
 fn classify_octocrab_error(e: octocrab::Error) -> SearchError {
-    if let octocrab::Error::GitHub { source, .. } = &e {
-        let status = source.status_code.as_u16();
-        let msg = source.message.to_lowercase();
-        let rate_limited = status == 429
-            || (status == 403
-                && (msg.contains("rate limit")
-                    || msg.contains("abuse")
-                    || msg.contains("secondary")));
-        if rate_limited {
-            return SearchError::RateLimited;
-        }
+    if let octocrab::Error::GitHub { source, .. } = &e
+        && is_rate_limit_response(source.status_code.as_u16(), &source.message)
+    {
+        return SearchError::RateLimited;
     }
     SearchError::Other(anyhow::Error::new(e).context("GraphQL search failed"))
 }
@@ -614,6 +673,49 @@ mod tests {
     use super::*;
     use crate::types::ActorKind;
     use rstest::rstest;
+
+    // Which `/user` failures the caller may retry. Getting this wrong is silent
+    // either way: retry a hopeless 401 forever, or give up on a recoverable outage
+    // and leave `@me` dead for the session.
+    #[rstest]
+    // GitHub answered "no" — the token can't change while the process runs.
+    #[case::unauthorized(401, "Bad credentials", CurrentUserError::Rejected)]
+    #[case::forbidden(
+        403,
+        "Resource not accessible by personal access token",
+        CurrentUserError::Rejected
+    )]
+    // …except when the "no" is a rate limit, which lifts on its own. GitHub sends
+    // these as 403 too, so only the message tells them apart.
+    #[case::primary_rate_limit(
+        403,
+        "API rate limit exceeded for user ID 1.",
+        CurrentUserError::Transient
+    )]
+    #[case::secondary_rate_limit(
+        403,
+        "You have exceeded a secondary rate limit",
+        CurrentUserError::Transient
+    )]
+    #[case::abuse_detection(
+        403,
+        "You have triggered an abuse detection mechanism",
+        CurrentUserError::Transient
+    )]
+    #[case::too_many_requests(429, "Too many requests", CurrentUserError::Transient)]
+    // GitHub answered, but not with a refusal: worth asking again.
+    #[case::server_error(500, "Internal server error", CurrentUserError::Transient)]
+    #[case::bad_gateway(502, "Bad gateway", CurrentUserError::Transient)]
+    // A 404 on /user means the request never reached the account (proxy, enterprise
+    // misroute), not that the account said no.
+    #[case::not_found(404, "Not Found", CurrentUserError::Transient)]
+    fn only_a_real_refusal_is_treated_as_final(
+        #[case] status: u16,
+        #[case] message: &str,
+        #[case] expected: CurrentUserError,
+    ) {
+        assert_eq!(classify_current_user_status(status, message), expected);
+    }
 
     // Env lookup over a fixed map, for resolve_token tests.
     fn env_from<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {

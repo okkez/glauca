@@ -616,6 +616,18 @@ mod tests {
         assert!(sf.matches(&item("PR", "bob", "closed", &[], "o/r"))); // 2nd group
     }
 
+    /// A *negated* `@me` runs the opposite way from a positive one when the login
+    /// never resolved: `author:@me` matches nobody (visibly empty), but
+    /// `-author:@me` matches EVERYBODY. Harmless in a list; catastrophic in
+    /// mark-all-read, which would wipe the query's unread state. This pins the
+    /// hazard that `engine::mark_all_read_task` refuses to act on.
+    #[test]
+    fn negated_unexpanded_me_matches_everything() {
+        let sf = StreamFilter::parse_expanded("-author:@me");
+        assert!(sf.matches(&item("PR", "alice", "open", &[], "o/r")));
+        assert!(sf.matches(&item("PR", "bob", "closed", &[], "o/r")));
+    }
+
     #[test]
     fn stream_filter_parse_expanded_skips_me_expansion() {
         // parse_expanded must leave `@me` literal (the string is already expanded

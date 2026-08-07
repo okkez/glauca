@@ -19,7 +19,7 @@ mod settings;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use clap::Parser;
 use commands::AppState;
@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
     // Bring up DB + GitHub client + engine on the Tauri-managed tokio runtime, so
     // the engine's internal `tokio::spawn` tasks share that runtime with the async
     // command handlers below.
-    let (engine, init_json, current_user, pool, query_names) =
+    let (engine, init_entries, current_user, pool, query_names) =
         tauri::async_runtime::block_on(async {
             let pool = db::open_pool(&db::resolve_db_path(cli.db_path)).await?;
             let gh_client = github::build_client()?;
@@ -78,26 +78,37 @@ fn main() -> anyhow::Result<()> {
             // the engine takes ownership of the original.
             let pool_for_state = pool.clone();
             let (engine, init) = Engine::start(pool, gh_client, sync, maintenance).await?;
-            let current_user = init.current_user.clone();
+            let current_user = commands::CurrentUserState {
+                login: init.current_user,
+                name: init.current_user_name,
+                avatar_url: init.current_user_avatar_url,
+            };
             let query_names = commands::query_name_map(&init.entries);
-            let init_json = serde_json::to_value(&init)?;
-            anyhow::Ok((engine, init_json, current_user, pool_for_state, query_names))
+            anyhow::Ok((
+                engine,
+                init.entries,
+                current_user,
+                pool_for_state,
+                query_names,
+            ))
         })?;
 
     let sender = engine.sender();
     let notifications_enabled = Arc::new(AtomicBool::new(settings.notifications_enabled));
     let query_names = Arc::new(Mutex::new(query_names));
+    let current_user = Arc::new(RwLock::new(current_user));
 
     // Clones for the engine-message loop in setup(). The ItemTracker lives only in
     // the loop (no command needs it).
     let notif_loop = notifications_enabled.clone();
     let tracker_loop = Arc::new(Mutex::new(ItemTracker::new()));
     let names_loop = query_names.clone();
+    let current_user_loop = current_user.clone();
 
     tauri::Builder::default()
         .manage(AppState {
             tx: sender,
-            init: init_json,
+            init_entries,
             current_user,
             pool,
             notifications_enabled,
@@ -144,6 +155,26 @@ fn main() -> anyhow::Result<()> {
                                 notify_updated_items(&name, n)
                             });
                         }
+                    }
+                    // Adopt a login the engine resolved after the startup lookup
+                    // failed, so the commands that expand `@me` (filter_items,
+                    // unread_counts, mark_all_read) stop treating it as a literal.
+                    // Written before the message reaches JS, so the re-filter the
+                    // front-end runs on it already sees the new login.
+                    if let AppMessage::CurrentUserResolved {
+                        login,
+                        name,
+                        avatar_url,
+                    } = &msg
+                    {
+                        *current_user_loop
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            commands::CurrentUserState {
+                                login: Some(login.clone()),
+                                name: name.clone(),
+                                avatar_url: avatar_url.clone(),
+                            };
                     }
                     match serde_json::to_value(&msg) {
                         Ok(value) => {

@@ -63,8 +63,22 @@ function setStatus(msg, isError = false) {
   renderFooter();
 }
 
-// Sidebar footer: sync activity ("syncing…", "N bg") plus the latest status
-// message. Hidden entirely when there is nothing to show, like the GUI.
+// Core's warning about the current view's filter using `@me` with no login to
+// expand it to, or null when there is nothing to warn about — decided and worded
+// by the filter_items command (see refreshVisible). Unlike statusMsg this is a
+// standing condition, not a message, so it lives on until the filter or the login
+// changes.
+let meWarning = null;
+
+function setMeWarning(msg) {
+  if (meWarning === msg) return;
+  meWarning = msg;
+  renderFooter();
+}
+
+// Sidebar footer: sync activity ("syncing…", "N bg"), the `@me` warning, and the
+// latest status message. Hidden entirely when there is nothing to show, like the
+// GUI. Mirrors the same three-part footer in the GUI's render.rs.
 function renderFooter() {
   const footer = $("sidebar-footer");
   const bits = [];
@@ -72,6 +86,7 @@ function renderFooter() {
   if (state.bgSyncPending > 0) bits.push(`${state.bgSyncPending} bg`);
   const rows = [];
   if (bits.length) rows.push(el("div", { text: bits.join("  ") }));
+  if (meWarning) rows.push(el("div", { class: "warn-line", text: meWarning }));
   if (statusMsg) rows.push(el("div", { class: "status-line", text: statusMsg }));
   footer.classList.toggle("error", statusIsError);
   footer.replaceChildren(...rows);
@@ -744,6 +759,7 @@ async function refreshVisible() {
   const all = e ? state.itemsByQuery.get(e.rootQueryId) || [] : [];
   if (!e) {
     state.visibleItems = [];
+    setMeWarning(null); // nothing is filtered, so no filter to warn about
     renderItemList();
     return;
   }
@@ -752,30 +768,45 @@ async function refreshVisible() {
   // wrong list). Bail if a later call has already superseded us.
   const seq = ++state.filterSeq;
   try {
-    const matches = await invoke("filter_items", {
+    const filterResult = await invoke("filter_items", {
       items: all,
       streamFilter: e.streamFilter,
       inlineFilter: state.filterText,
     });
     if (seq !== state.filterSeq) return;
-    state.visibleItems = matches.map((m) => all[m.index]);
-    state.visibleTitleSegments = matches.map((m) => m.title_segments);
+    state.visibleItems = filterResult.items.map((m) => all[m.index]);
+    state.visibleTitleSegments = filterResult.items.map((m) => m.title_segments);
+    // Why the list may be empty: the filter asked for `@me` and the engine has no
+    // login to expand it to. Rust decides and words this (it holds both the filters
+    // and the login); the footer just shows it, and it clears itself on the next
+    // filter once CurrentUserResolved lands.
+    setMeWarning(filterResult.me_warning);
   } catch (err) {
     if (seq !== state.filterSeq) return;
     setStatus(`filter: ${err}`, true);
     state.visibleItems = all;
     state.visibleTitleSegments = [];
+    // The list shown is now unfiltered, so a warning about the filter would be
+    // describing something the user isn't looking at.
+    setMeWarning(null);
   }
   renderItemList();
   // Also refresh the open detail pane from the reloaded items. renderDetail is
   // imperative and otherwise keeps showing the object captured at selectItem
   // time, so without this an updated body (e.g. a transparently re-fetched
   // maintenance-cleared body) or an applied background update would not appear
-  // until reselect. No-op when nothing is selected or the selected item fell
-  // out of the current view.
+  // until reselect.
   if (state.selectedItemKey) {
     const selectedItem = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
-    if (selectedItem) renderDetail(selectedItem);
+    if (selectedItem) {
+      renderDetail(selectedItem);
+    } else {
+      // The selection fell out of the view (a resolved login can shrink the list,
+      // as can typing a filter). Leaving the pane up would show an item that is no
+      // longer in the list beside it — the TUI and GUI both move the cursor here.
+      state.selectedItemKey = null;
+      clearDetail();
+    }
   }
 }
 
@@ -1810,6 +1841,19 @@ function handleMessage(msg) {
       state.bgSyncPending = Math.max(0, state.bgSyncPending - 1);
       renderFooter();
       break;
+    // The login the startup lookup couldn't fetch (offline start) finally
+    // resolved. Until now every `@me` filter matched nothing, so redo the two
+    // things computed from it: the visible list and this query's unread badges.
+    // The Rust side has already adopted it (see main.rs), so both see the login.
+    case "CurrentUserResolved": {
+      state.currentUser = d.login;
+      renderSidebarHeader(d.login, d.name, d.avatar_url);
+      setStatus(`signed in as @${d.login}`);
+      const e = state.entries[state.selectedEntry];
+      refreshVisible();
+      if (e) refreshUnread(e.rootQueryId);
+      break;
+    }
     // Structural changes: the engine confirms with these; rebuild the left pane
     // from the DB (list_entries) rather than reordering in JS.
     case "QueryAdded":
@@ -1825,6 +1869,26 @@ function handleMessage(msg) {
     default:
       break;
   }
+}
+
+// Sidebar header: signed-in user (36px avatar + login + display name), mirroring
+// the GUI's left-pane header. Re-rendered rather than built once, because the
+// login can arrive late (see the CurrentUserResolved message).
+function renderSidebarHeader(login, name, avatarUrl) {
+  const header = $("sidebar-header");
+  if (!login) {
+    // Not "not authenticated": an offline start fails the same way with a perfectly
+    // good token, and the engine may still be retrying. Matches the GUI's header.
+    header.replaceChildren(el("div", { class: "who" }, [el("div", { class: "name", text: "login unknown" })]));
+    return;
+  }
+  header.replaceChildren(
+    avatarEl({ login, avatar_url: avatarUrl }, "avatar lg", 36),
+    el("div", { class: "who" }, [
+      el("div", { class: "login", text: `@${login}` }),
+      name ? el("div", { class: "name", text: name }) : null,
+    ])
+  );
 }
 
 // ── settings & theme ──────────────────────────────────────────────────────--
@@ -1941,20 +2005,7 @@ async function main() {
   state.entries = init.entries.map(normalize);
   renderSidebar();
 
-  // Sidebar header: signed-in user (36px avatar + login + display name),
-  // mirroring the GUI's left-pane header.
-  const header = $("sidebar-header");
-  if (init.current_user) {
-    header.replaceChildren(
-      avatarEl({ login: init.current_user, avatar_url: init.current_user_avatar_url }, "avatar lg", 36),
-      el("div", { class: "who" }, [
-        el("div", { class: "login", text: `@${init.current_user}` }),
-        init.current_user_name ? el("div", { class: "name", text: init.current_user_name }) : null,
-      ])
-    );
-  } else {
-    header.replaceChildren(el("div", { class: "who" }, [el("div", { class: "name", text: "not authenticated" })]));
-  }
+  renderSidebarHeader(init.current_user, init.current_user_name, init.current_user_avatar_url);
 
   // Prime cached items (and thus unread badges) for every root query, mirroring
   // the TUI's startup load. Skip the first entry's root query: previewEntry(0)
@@ -1968,9 +2019,11 @@ async function main() {
     call("load_cached", { queryId: e.rootQueryId });
   }
 
-  // The signed-in user is shown in the sidebar header; only the unauthenticated
-  // case warrants a status message.
-  if (!state.currentUser) setStatus("Not authenticated (set GH_TOKEN)");
+  // The signed-in user is shown in the sidebar header; only the unresolved case
+  // warrants a status message. It names both causes rather than instructing the
+  // user to set a token: the lookup also fails when the app starts before the
+  // network is up, and "set GH_TOKEN" would send them off fixing the wrong thing.
+  if (!state.currentUser) setStatus("GitHub login unknown (no token, or GitHub unreachable)");
   if (state.entries.length) {
     // Startup selection mirrors the GUI: sync only if the cache is stale, then
     // let the engine background-sync the remaining stale queries.

@@ -23,10 +23,13 @@ impl GlaucaApp {
         if let Some(url) = &self.current_user_avatar_url {
             avatar = avatar.src(sized_avatar_url(url, HEADER_AVATAR_PX));
         }
+        // Names both causes rather than asserting the token is missing: the lookup
+        // also fails when the app starts before the network is up, and the engine
+        // may still be retrying. Matches the Tauri header's wording.
         let login_line = self
             .current_user
             .clone()
-            .unwrap_or_else(|| "not authenticated".to_string());
+            .unwrap_or_else(|| "login unknown".to_string());
         let header = h_flex()
             .w_full()
             .flex_shrink_0()
@@ -158,7 +161,10 @@ impl GlaucaApp {
         if self.bg_sync_pending > 0 {
             sync_bits.push(format!("{} bg", self.bg_sync_pending));
         }
-        let has_footer = !sync_bits.is_empty() || self.status.is_some();
+        // Why an `@me` filter is showing the wrong list. Worth a footer of its own
+        // when nothing else is happening — the list explains nothing by itself.
+        let has_unexpanded_me = self.has_unexpanded_me();
+        let has_footer = !sync_bits.is_empty() || self.status.is_some() || has_unexpanded_me;
         let footer = has_footer.then(|| {
             let mut footer = v_flex()
                 .w_full()
@@ -172,6 +178,11 @@ impl GlaucaApp {
                 .text_color(cx.theme().muted_foreground);
             if !sync_bits.is_empty() {
                 footer = footer.child(SharedString::from(sync_bits.join("  ")));
+            }
+            if has_unexpanded_me {
+                footer = footer.child(div().text_color(cx.theme().warning_foreground).child(
+                    SharedString::from(glauca_core::logic::ME_UNEXPANDED_WARNING),
+                ));
             }
             if let Some(s) = &self.status {
                 footer = footer.child(SharedString::from(s.clone()));

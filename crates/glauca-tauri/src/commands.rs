@@ -10,12 +10,15 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use glauca_core::actions::CustomActions;
-use glauca_core::engine::{EngineCommand, ReviewEvent, load_left_pane_entries};
+use glauca_core::engine::{EngineCommand, EngineInit, ReviewEvent, load_left_pane_entries};
 use glauca_core::filter::{FilterQuery, StreamFilter};
-use glauca_core::logic::{ChangeCounts, compute_unread_counts, count_changes, expand_me};
+use glauca_core::logic::{
+    ChangeCounts, ME_UNEXPANDED_WARNING, compute_unread_counts, count_changes, expand_me,
+    has_unexpanded_me,
+};
 use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -24,13 +27,37 @@ use tokio::sync::mpsc::Sender;
 
 use crate::settings::TauriSettings;
 
+/// What is currently known about the authenticated user. All three fields are
+/// `Option` because the lookup can fail — `login: None` is the "not resolved yet"
+/// state — and because `name`/`avatar_url` may simply be unset on the account.
+///
+/// Kept as a unit rather than three separate cells so `init` can hand back a
+/// consistent trio: a header showing a login with someone else's avatar would be
+/// worse than one showing nothing.
+#[derive(Default, Clone)]
+pub struct CurrentUserState {
+    pub login: Option<String>,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
 /// Shared state held by Tauri.
 pub struct AppState {
     pub tx: Sender<EngineCommand>,
-    /// Pre-serialized initial state (left-pane entries + current user) for `init`.
-    pub init: serde_json::Value,
-    /// Authenticated login, to expand `@me` when computing unread counts.
-    pub current_user: Option<String>,
+    /// The left-pane entries as they stood at startup, for `init`.
+    ///
+    /// Kept as entries rather than the finished JSON because the other half of
+    /// `init` — the authenticated user — can change after startup, so the payload
+    /// has to be rebuilt per call anyway (see [`init`]).
+    pub init_entries: Vec<LeftPaneEntry>,
+    /// The authenticated user, for expanding `@me` and for the sidebar header.
+    ///
+    /// Shared and mutable because it can arrive late: when the lookup at startup
+    /// can't reach GitHub, the engine keeps retrying and reports the user over
+    /// `CurrentUserResolved`, which the message loop in `main.rs` writes here. The
+    /// commands below must then expand `@me` for the rest of the session — reading
+    /// a login captured at startup would keep every `@me` filter matching nothing.
+    pub current_user: Arc<RwLock<CurrentUserState>>,
     /// DB pool, to rebuild the left pane after structural changes.
     pub pool: SqlitePool,
     /// Whether desktop notifications fire (toggled at runtime via save_settings;
@@ -43,6 +70,33 @@ pub struct AppState {
     /// timing as the TUI/GUI). JS refers to them by name (see
     /// [`list_custom_actions`]); the definitions never cross the IPC boundary.
     pub custom_actions: CustomActions,
+}
+
+impl AppState {
+    /// The authenticated login as it stands *now*. Read per call, never cached in
+    /// a command, so a login that resolved mid-session takes effect immediately
+    /// (see [`AppState::current_user`]).
+    ///
+    /// Cloned rather than handing out the guard: callers only need a `&str`, and
+    /// holding a read lock across their work would serialize them for no reason.
+    /// Poisoning is recovered from — the value is a plain [`CurrentUserState`],
+    /// which a panicking writer cannot leave half-updated.
+    fn login(&self) -> Option<String> {
+        self.current_user
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .login
+            .clone()
+    }
+
+    /// The authenticated user as it stands *now*, cloned for the same reasons as
+    /// [`AppState::login`].
+    fn user(&self) -> CurrentUserState {
+        self.current_user
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// One left-pane entry's unread count, as returned by [`unread_counts`]. Mirrors
@@ -61,11 +115,27 @@ async fn dispatch(tx: &Sender<EngineCommand>, cmd: EngineCommand) -> Result<(), 
     tx.send(cmd).await.map_err(|e| e.to_string())
 }
 
-/// Return the initial state (left-pane entries + current user) captured at
-/// startup. Synchronous: it is just a cached JSON value.
+/// Return the initial state: the left-pane entries captured at startup, plus the
+/// authenticated user *as it stands now*.
+///
+/// Rebuilt per call rather than served from a snapshot because the login can
+/// arrive after startup, and a WebView reload re-runs the front-end's whole
+/// startup against this payload — a snapshot would resurrect the stale
+/// "login unknown" state permanently, since `CurrentUserResolved` has already been
+/// sent and won't come again.
+///
+/// Assembled as an `EngineInit` so serde owns the field names. Spelling them out
+/// here instead would be a second, unchecked copy of that mapping.
 #[tauri::command]
-pub fn init(state: State<'_, AppState>) -> serde_json::Value {
-    state.init.clone()
+pub fn init(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let user = state.user();
+    serde_json::to_value(EngineInit {
+        entries: state.init_entries.clone(),
+        current_user: user.login,
+        current_user_name: user.name,
+        current_user_avatar_url: user.avatar_url,
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Quit the app (Glauca > Quit). A command rather than a window close from JS,
@@ -149,8 +219,9 @@ pub async fn unread_counts(
     query_id: i64,
     items: Vec<ItemEntry>,
 ) -> Result<Vec<UnreadCount>, String> {
+    let login = state.login();
     Ok(
-        compute_unread_counts(&entries, query_id, &items, state.current_user.as_deref())
+        compute_unread_counts(&entries, query_id, &items, login.as_deref())
             .into_iter()
             .map(|((is_filter_stream, entry_id), count)| UnreadCount {
                 is_filter_stream,
@@ -179,6 +250,21 @@ pub struct TitleSegment {
 pub struct FilteredItem {
     pub index: usize,
     pub title_segments: Vec<TitleSegment>,
+}
+
+/// The result of [`filter_items`]: what matched, and whether the answer should be
+/// trusted at face value.
+///
+/// `me_warning` rides along instead of being derived in JS because this command is
+/// the one place that holds both halves of the question — the filters it just
+/// applied and the login it applied them with. It carries core's wording rather
+/// than a bool so the front-end has no copy of the message to drift from.
+#[derive(Serialize)]
+pub struct FilterResult {
+    pub items: Vec<FilteredItem>,
+    /// Set when a filter here leans on `@me` while the login is unknown, so it
+    /// matched nothing — see [`glauca_core::logic::has_unexpanded_me`].
+    pub me_warning: Option<&'static str>,
 }
 
 /// Split `title` on `ranges` (sorted, non-overlapping, char-boundary-snapped
@@ -222,11 +308,14 @@ pub async fn filter_items(
     items: Vec<ItemEntry>,
     stream_filter: Option<String>,
     inline_filter: String,
-) -> Result<Vec<FilteredItem>, String> {
-    let su = state.current_user.as_deref();
+) -> Result<FilterResult, String> {
+    let login = state.login();
+    let su = login.as_deref();
     let stream_q = stream_filter.as_deref().map(|s| StreamFilter::parse(s, su));
     let inline_q = FilterQuery::parse(&expand_me(su, &inline_filter));
-    Ok(items
+    let me_warning = has_unexpanded_me(su, stream_filter.as_deref(), &inline_filter)
+        .then_some(ME_UNEXPANDED_WARNING);
+    let matched: Vec<FilteredItem> = items
         .iter()
         .enumerate()
         .filter(|(_, it)| {
@@ -243,7 +332,11 @@ pub async fn filter_items(
                 split_title(&it.title, &inline_q.highlight_ranges(&it.title))
             },
         })
-        .collect())
+        .collect();
+    Ok(FilterResult {
+        items: matched,
+        me_warning,
+    })
 }
 
 /// What the banner needs to know about a background sync's results: whether to show
@@ -592,6 +685,7 @@ pub async fn mark_all_read(
 ) -> Result<(), String> {
     // The engine expects an already-`@me`-expanded filter; expand here (reusing
     // core's expand_me) so the front-end can pass the raw filter-stream filter.
-    let filter = filter.map(|f| expand_me(state.current_user.as_deref(), &f).into_owned());
+    let login = state.login();
+    let filter = filter.map(|f| expand_me(login.as_deref(), &f).into_owned());
     dispatch(&state.tx, EngineCommand::MarkAllRead { query_id, filter }).await
 }
