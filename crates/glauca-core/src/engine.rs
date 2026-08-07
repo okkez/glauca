@@ -1767,12 +1767,11 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    // The confirmation is what makes each front-end move the entry in its
-                    // own `entries` vec, so it must not be sent unless the DB took the new
-                    // order. A failure therefore has to say so instead: the usual cause is a
-                    // query another front-end deleted, which leaves this one's left pane
-                    // showing a row that no longer exists — silence would read as the
-                    // keypress being ignored, with nothing to suggest a restart would help.
+                    // Confirm only what the DB took, and report the rest — see `db::exchanged`
+                    // for why a confirmation the DB did not earn is the bug itself. Reported as
+                    // `ActionError` rather than `Status` because the usual cause is a query
+                    // another front-end deleted, which this one is still showing: the user has
+                    // to see that the keypress failed, not just that it did nothing.
                     match db::swap_query_positions(&pool2, upper_id, lower_id).await {
                         Ok(()) => {
                             let _ = tx2
@@ -1785,7 +1784,7 @@ async fn command_loop(
                         }
                         Err(e) => {
                             let _ = tx2
-                                .send(AppMessage::Status(format!("reorder error: {e}")))
+                                .send(AppMessage::ActionError(format!("reorder: {e}")))
                                 .await;
                         }
                     }
@@ -1813,7 +1812,7 @@ async fn command_loop(
                         }
                         Err(e) => {
                             let _ = tx2
-                                .send(AppMessage::Status(format!("reorder error: {e}")))
+                                .send(AppMessage::ActionError(format!("reorder: {e}")))
                                 .await;
                         }
                     }
