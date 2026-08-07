@@ -1767,17 +1767,27 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    if db::swap_query_positions(&pool2, upper_id, lower_id)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = tx2
-                            .send(AppMessage::QueriesSwapped {
-                                upper_id,
-                                lower_id,
-                                active_id,
-                            })
-                            .await;
+                    // The confirmation is what makes each front-end move the entry in its
+                    // own `entries` vec, so it must not be sent unless the DB took the new
+                    // order. A failure therefore has to say so instead: the usual cause is a
+                    // query another front-end deleted, which leaves this one's left pane
+                    // showing a row that no longer exists — silence would read as the
+                    // keypress being ignored, with nothing to suggest a restart would help.
+                    match db::swap_query_positions(&pool2, upper_id, lower_id).await {
+                        Ok(()) => {
+                            let _ = tx2
+                                .send(AppMessage::QueriesSwapped {
+                                    upper_id,
+                                    lower_id,
+                                    active_id,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx2
+                                .send(AppMessage::Status(format!("reorder error: {e}")))
+                                .await;
+                        }
                     }
                 });
             }
@@ -1789,17 +1799,23 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    if db::swap_filter_stream_positions(&pool2, upper_id, lower_id)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = tx2
-                            .send(AppMessage::FilterStreamsSwapped {
-                                upper_id,
-                                lower_id,
-                                active_id,
-                            })
-                            .await;
+                    // Reported rather than swallowed, for the reason given on
+                    // `SwapQueryPositions` above.
+                    match db::swap_filter_stream_positions(&pool2, upper_id, lower_id).await {
+                        Ok(()) => {
+                            let _ = tx2
+                                .send(AppMessage::FilterStreamsSwapped {
+                                    upper_id,
+                                    lower_id,
+                                    active_id,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx2
+                                .send(AppMessage::Status(format!("reorder error: {e}")))
+                                .await;
+                        }
                     }
                 });
             }

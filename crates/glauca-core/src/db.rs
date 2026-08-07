@@ -286,16 +286,18 @@ pub async fn swap_filter_stream_positions(
     .fetch_one(&mut *tx)
     .await
     .with_context(|| format!("reading the parent of filter stream {upper_id}"))?;
+    // `id!: i64` rather than the `.expect("id is NOT NULL")` the record-returning queries
+    // above use: sqlx reads `filter_streams.id` as nullable where it reads `queries.id` as
+    // not, and this function would otherwise carry a panic that only the type asymmetry
+    // asks for. A panic here reaches nobody — the engine's `tokio::spawn` turns it into a
+    // dropped JoinError — so it would surface as the keypress doing nothing, the very
+    // symptom this file is fixing.
     let ids = sqlx::query_scalar!(
-        "SELECT id FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC, id ASC",
+        r#"SELECT id AS "id!: i64" FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC, id ASC"#,
         parent_id
     )
     .fetch_all(&mut *tx)
     .await?;
-    let ids: Vec<i64> = ids
-        .into_iter()
-        .map(|id| id.expect("id is NOT NULL"))
-        .collect();
     let ids = exchanged(ids, upper_id, lower_id)
         .with_context(|| format!("reordering filter streams {upper_id} and {lower_id}"))?;
     for (position, id) in ids.iter().enumerate() {
@@ -396,14 +398,13 @@ pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
 ///
 /// Written as a renumbering of the whole list rather than as an exchange of the two rows'
 /// `position` values, in one transaction. Exchanging the two values is only correct while
-/// every position is distinct, and there are two ways they are not: a cache holding
-/// queries saved before positions were assigned on insert (all of them sit at the column
-/// default), and two front-ends on one cache picking the same `MAX(position) + 1` at the
-/// same moment. In either case an exchange writes a value back over itself, and the
-/// reorder is silently lost — the front-ends move the entry in their own `entries` vec on
-/// the engine's confirmation, so the user sees it applied and then sees it undone on the
-/// next launch. Renumbering makes the write succeed from any starting state, and doing it
-/// in a transaction means a crash mid-way cannot leave positions half-assigned.
+/// every position is distinct, and a cache holding queries saved before positions were
+/// assigned on insert has them all at the column default: the exchange writes a value back
+/// over itself and the reorder is silently lost — the front-ends move the entry in their own
+/// `entries` vec on the engine's confirmation, so the user sees it applied and then sees it
+/// undone on the next launch. Renumbering makes the write succeed from any starting state,
+/// including one this code cannot produce but an older binary sharing the cache still can,
+/// and doing it in a transaction means a crash mid-way cannot leave positions half-assigned.
 ///
 /// `BEGIN IMMEDIATE` for the reason spelled out at `prune_missing_items`: this transaction
 /// reads before it writes, and SQLite refuses a SHARED→RESERVED promotion with an instant
@@ -435,11 +436,18 @@ pub async fn swap_query_positions(pool: &SqlitePool, upper_id: i64, lower_id: i6
 /// list.
 ///
 /// `None` has to reach the caller as an error rather than as a silent success. The engine
-/// only tells the front-ends a reorder happened when the DB write returns `Ok`
-/// (`EngineCommand::SwapQueryPositions`), and the TUI and GUI answer that confirmation by
-/// moving the entry in their own `entries` vec without re-reading the DB. Reporting a move
-/// that nothing recorded would put back exactly the bug this renumbering exists to remove:
-/// an order that looks applied and is gone on the next launch.
+/// only sends `AppMessage::QueriesSwapped` when the DB write returns `Ok`, and the TUI and
+/// GUI answer that message by moving the entry in their own `entries` vec without re-reading
+/// the DB. Reporting a move that nothing recorded would put back exactly the bug this
+/// renumbering exists to remove: an order that looks applied and is gone on the next launch.
+///
+/// Adjacency is neither required nor checked: this exchanges the two ids wherever they sit in
+/// the list as the DB has it *now*, which is only the caller's "move one place" while nothing
+/// has moved between the front-end's last read and this call. Another front-end reordering in
+/// that gap leaves the two non-adjacent, and then this jumps whatever ended up between them
+/// while the caller's own `entries` vec moves the entry by one — a divergence glauca has no
+/// cross-process invalidation to prevent, and which the old two-value exchange had too.
+/// `a == b` is a no-op that reports success; `reorder_command` never asks for one.
 fn exchanged(mut ids: Vec<i64>, a: i64, b: i64) -> Option<Vec<i64>> {
     let a_idx = ids.iter().position(|id| *id == a)?;
     let b_idx = ids.iter().position(|id| *id == b)?;
@@ -1505,6 +1513,94 @@ mod tests {
         assert_eq!(filter_stream_order(&pool, parent).await, vec![5, 6, 7]);
     }
 
+    /// `include_str!` rather than a copy, so a rewrite of the migration is what this runs.
+    const BACKFILL_POSITIONS_MIGRATION: &str =
+        include_str!("../migrations/20260807000001_backfill_positions.sql");
+
+    /// Every other test applies this migration to empty tables, where it ranks nothing — so
+    /// running it proves only that it parses. The one way it can silently be wrong is the
+    /// reason it is written as a window function feeding `UPDATE ... FROM` instead of the
+    /// correlated `COUNT(*)` the earlier position migrations used: it ranks rows by the very
+    /// column it is rewriting, and reading that column mid-update would make the result
+    /// depend on the order rows happen to be visited. So give it rows whose positions
+    /// disagree with their ids and pin both halves of what it promises — dense numbering,
+    /// and an order the user cannot see change.
+    #[tokio::test]
+    async fn backfill_positions_migration_densifies_without_moving_anything() {
+        let (pool, _file) = test_pool().await;
+
+        for (id, query, position) in [
+            (1_i64, "query:a", 50_i64),
+            (2, "query:b", 30),
+            (3, "query:c", 10),
+            (4, "query:d", 40),
+            (5, "query:e", 20),
+        ] {
+            sqlx::query!(
+                "INSERT INTO queries (id, query, kind, position) VALUES (?, ?, 'issue', ?)",
+                id,
+                query,
+                position,
+            )
+            .execute(&pool)
+            .await
+            .expect("seed query");
+        }
+        // Two parents, so the per-parent numbering is exercised, and a tie within one of them
+        // (ids 3 and 4 at position 9) so the id tie-break is carried into the new numbering.
+        for (id, parent_id, name, position) in [
+            (1_i64, 1_i64, "a", 7_i64),
+            (2, 1, "b", 3),
+            (3, 2, "c", 9),
+            (4, 2, "d", 9),
+            (5, 2, "e", 1),
+        ] {
+            sqlx::query!(
+                "INSERT INTO filter_streams (id, parent_id, name, filter, position)
+                 VALUES (?, ?, ?, 'state:open', ?)",
+                id,
+                parent_id,
+                name,
+                position,
+            )
+            .execute(&pool)
+            .await
+            .expect("seed filter stream");
+        }
+
+        let queries_before = query_order(&pool).await;
+        let first_parent_before = filter_stream_order(&pool, 1).await;
+        let second_parent_before = filter_stream_order(&pool, 2).await;
+        assert_eq!(queries_before, vec![3, 5, 2, 4, 1], "seeded display order");
+        assert_eq!(second_parent_before, vec![5, 3, 4], "seeded display order");
+
+        sqlx::raw_sql(BACKFILL_POSITIONS_MIGRATION)
+            .execute(&pool)
+            .await
+            .expect("run the backfill migration");
+
+        assert_eq!(query_order(&pool).await, queries_before);
+        assert_eq!(filter_stream_order(&pool, 1).await, first_parent_before);
+        assert_eq!(filter_stream_order(&pool, 2).await, second_parent_before);
+
+        let mut query_positions = Vec::new();
+        for id in &queries_before {
+            query_positions.push(query_position(&pool, *id).await);
+        }
+        assert_eq!(query_positions, vec![0, 1, 2, 3, 4]);
+
+        let mut second_parent_positions = Vec::new();
+        for id in &second_parent_before {
+            second_parent_positions.push(filter_stream_position(&pool, *id).await);
+        }
+        assert_eq!(second_parent_positions, vec![0, 1, 2]);
+        // Numbering restarts per parent rather than continuing across the table.
+        assert_eq!(
+            filter_stream_position(&pool, first_parent_before[0]).await,
+            0
+        );
+    }
+
     /// A new query has to be given a `position` of its own, one past the last, so that it
     /// appends. At the schema's `DEFAULT 0` it would instead join whatever block of rows is
     /// already sitting at 0 and take its place among them from the `created_at` tie-break,
@@ -1601,11 +1697,26 @@ mod tests {
         let second = upsert_query(&pool, "query:second", "issue", None)
             .await
             .expect("upsert");
+        let third = upsert_query(&pool, "query:third", "issue", None)
+            .await
+            .expect("upsert");
+        // Spread the survivors' positions out, so that "nothing was written" is
+        // distinguishable from "the survivors were renumbered": with dense positions a
+        // rolled-back transaction and a completed renumbering leave the same two values.
+        sqlx::query!("UPDATE queries SET position = 5 WHERE id = ?", first)
+            .execute(&pool)
+            .await
+            .expect("spread positions");
+        sqlx::query!("UPDATE queries SET position = 9 WHERE id = ?", third)
+            .execute(&pool)
+            .await
+            .expect("spread positions");
         delete_query(&pool, second).await.expect("delete");
 
         assert!(swap_query_positions(&pool, first, second).await.is_err());
         assert!(swap_query_positions(&pool, second, first).await.is_err());
-        assert_eq!(query_position(&pool, first).await, 0);
+        assert_eq!(query_position(&pool, first).await, 5);
+        assert_eq!(query_position(&pool, third).await, 9);
     }
 
     #[tokio::test]
@@ -1878,6 +1989,18 @@ mod tests {
         let second = upsert_filter_stream(&pool, parent, "second", "state:closed")
             .await
             .expect("upsert filter stream");
+        let third = upsert_filter_stream(&pool, parent, "third", "is:draft")
+            .await
+            .expect("upsert filter stream");
+        // Sparse for the reason given in the query counterpart above.
+        sqlx::query!("UPDATE filter_streams SET position = 5 WHERE id = ?", first)
+            .execute(&pool)
+            .await
+            .expect("spread positions");
+        sqlx::query!("UPDATE filter_streams SET position = 9 WHERE id = ?", third)
+            .execute(&pool)
+            .await
+            .expect("spread positions");
         delete_filter_stream(&pool, second).await.expect("delete");
 
         assert!(
@@ -1890,7 +2013,8 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(filter_stream_position(&pool, first).await, 0);
+        assert_eq!(filter_stream_position(&pool, first).await, 5);
+        assert_eq!(filter_stream_position(&pool, third).await, 9);
     }
 
     #[tokio::test]

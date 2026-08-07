@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\" FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC, id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6ff5fcb02e066ea44f76206c2ebe979e8c2449bbc04666392eeb6973068623ca"
+}

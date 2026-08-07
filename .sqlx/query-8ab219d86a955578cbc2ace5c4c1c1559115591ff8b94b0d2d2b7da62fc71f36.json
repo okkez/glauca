@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE queries SET position = 9 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "8ab219d86a955578cbc2ace5c4c1c1559115591ff8b94b0d2d2b7da62fc71f36"
+}
