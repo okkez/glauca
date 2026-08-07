@@ -169,12 +169,22 @@ pub struct QueryRecord {
     pub name: Option<String>,
 }
 
-/// List all saved queries ordered by position.
-pub async fn list_queries(pool: &SqlitePool) -> Result<Vec<QueryRecord>> {
+/// List all saved queries in left-pane order.
+///
+/// `id` closes the ordering: `created_at` has second granularity, so rows added in the same
+/// second tie on both other keys and SQLite may then return them in any order.
+///
+/// Generic over the executor so [`swap_query_positions`] can read this ordering from inside its
+/// transaction — it numbers rows in the order it reads, so a second hand-copied `ORDER BY`
+/// could drift from this one.
+pub async fn list_queries<'e, E>(exec: E) -> Result<Vec<QueryRecord>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let rows = sqlx::query!(
-        "SELECT id, query, kind, name FROM queries ORDER BY position ASC, created_at ASC"
+        "SELECT id, query, kind, name FROM queries ORDER BY position ASC, created_at ASC, id ASC"
     )
-    .fetch_all(pool)
+    .fetch_all(exec)
     .await?;
     Ok(rows
         .into_iter()
@@ -197,20 +207,26 @@ pub struct FilterStreamRecord {
 }
 
 /// List filter streams for a given parent query, ordered by position.
-pub async fn list_filter_streams(
-    pool: &SqlitePool,
-    parent_id: i64,
-) -> Result<Vec<FilterStreamRecord>> {
+///
+/// `id` closes the ordering, and the executor is generic, for the same two reasons they are
+/// in [`list_queries`].
+pub async fn list_filter_streams<'e, E>(exec: E, parent_id: i64) -> Result<Vec<FilterStreamRecord>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    // `id!: i64` because sqlx reads `filter_streams.id` as nullable where it reads
+    // `queries.id` as not. Unwrapping instead would panic inside a spawned task, where the
+    // panic is swallowed and the UI just stops updating.
     let rows = sqlx::query!(
-        "SELECT id, parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC",
+        r#"SELECT id AS "id!: i64", parent_id, name, filter FROM filter_streams WHERE parent_id = ? ORDER BY position ASC, created_at ASC, id ASC"#,
         parent_id,
     )
-    .fetch_all(pool)
+    .fetch_all(exec)
     .await?;
     Ok(rows
         .into_iter()
         .map(|r| FilterStreamRecord {
-            id: r.id.expect("id is NOT NULL"),
+            id: r.id,
             parent_id: r.parent_id,
             name: r.name,
             filter: r.filter,
@@ -219,6 +235,9 @@ pub async fn list_filter_streams(
 }
 
 /// Insert a new filter stream under a parent query and return its id.
+///
+/// Positions are numbered per parent, matching how [`list_filter_streams`] orders them. See
+/// [`upsert_query`] for why one is assigned here at all.
 pub async fn upsert_filter_stream(
     pool: &SqlitePool,
     parent_id: i64,
@@ -227,17 +246,21 @@ pub async fn upsert_filter_stream(
 ) -> Result<i64> {
     let row = sqlx::query!(
         r#"
-        INSERT INTO filter_streams (parent_id, name, filter)
-        VALUES (?, ?, ?)
-        RETURNING id
+        INSERT INTO filter_streams (parent_id, name, filter, position)
+        VALUES (
+            ?, ?, ?,
+            (SELECT COALESCE(MAX(position) + 1, 0) FROM filter_streams WHERE parent_id = ?)
+        )
+        RETURNING id AS "id!: i64"
         "#,
         parent_id,
         name,
         filter,
+        parent_id,
     )
     .fetch_one(pool)
     .await?;
-    Ok(row.id.expect("id is NOT NULL"))
+    Ok(row.id)
 }
 
 /// Delete a filter stream by id.
@@ -248,34 +271,43 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Swap the `position` values of two filter streams (must share the same parent).
+/// Exchange the places of two sibling filter streams (they must share the same parent).
+///
+/// Renumbers only `upper_id`'s parent, for the reasons on [`swap_query_positions`] — including
+/// why the transaction is `IMMEDIATE`. Either stream having been deleted meanwhile fails the
+/// call rather than reporting success; see [`exchanged`].
 pub async fn swap_filter_stream_positions(
     pool: &SqlitePool,
     upper_id: i64,
     lower_id: i64,
 ) -> Result<()> {
-    let upper_pos =
-        sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", upper_id)
-            .fetch_one(pool)
-            .await?;
-    let lower_pos =
-        sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", lower_id)
-            .fetch_one(pool)
-            .await?;
-    sqlx::query!(
-        "UPDATE filter_streams SET position = ? WHERE id = ?",
-        lower_pos,
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let parent_id = sqlx::query_scalar!(
+        "SELECT parent_id FROM filter_streams WHERE id = ?",
         upper_id
     )
-    .execute(pool)
-    .await?;
-    sqlx::query!(
-        "UPDATE filter_streams SET position = ? WHERE id = ?",
-        upper_pos,
-        lower_id
-    )
-    .execute(pool)
-    .await?;
+    .fetch_optional(&mut *tx)
+    .await?
+    .with_context(|| format!("filter stream {upper_id} is no longer in the cache"))?;
+    let ids: Vec<i64> = list_filter_streams(&mut *tx, parent_id)
+        .await?
+        .iter()
+        .map(|fs| fs.id)
+        .collect();
+    let ids = exchanged(ids, upper_id, lower_id).with_context(|| {
+        format!("filter streams {upper_id} and {lower_id} are no longer both under one query")
+    })?;
+    for (position, id) in ids.iter().enumerate() {
+        let position = position as i64;
+        sqlx::query!(
+            "UPDATE filter_streams SET position = ? WHERE id = ?",
+            position,
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -358,35 +390,58 @@ pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Swap the `position` values of two queries so that one moves past the other.
+/// Exchange the places of two queries in the left-pane order.
+///
+/// Renumbers the whole list instead of exchanging the two `position` values: a cache written by
+/// a binary that did not assign positions on insert has them all at 0, where an exchange is a
+/// no-op.
+///
+/// `BEGIN IMMEDIATE` because this reads before it writes — see `prune_missing_items`.
+/// `position` cannot carry `UNIQUE`: renumbering writes transient duplicates and SQLite cannot
+/// defer the check to commit.
 pub async fn swap_query_positions(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
-    let upper_pos = sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", upper_id)
-        .fetch_one(pool)
-        .await?;
-    let lower_pos = sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", lower_id)
-        .fetch_one(pool)
-        .await?;
-    sqlx::query!(
-        "UPDATE queries SET position = ? WHERE id = ?",
-        lower_pos,
-        upper_id
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query!(
-        "UPDATE queries SET position = ? WHERE id = ?",
-        upper_pos,
-        lower_id
-    )
-    .execute(pool)
-    .await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let ids: Vec<i64> = list_queries(&mut *tx).await?.iter().map(|q| q.id).collect();
+    let ids = exchanged(ids, upper_id, lower_id).with_context(|| {
+        format!("queries {upper_id} and {lower_id} are no longer both in the cache")
+    })?;
+    for (position, id) in ids.iter().enumerate() {
+        let position = position as i64;
+        sqlx::query!("UPDATE queries SET position = ? WHERE id = ?", position, id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
     Ok(())
+}
+
+/// `ids` with the entries `a` and `b` in each other's place, or `None` if either is absent —
+/// another front-end deleted the row after the caller last read the list.
+///
+/// `None` must reach the caller as an error, never as a silent success: the TUI and the gpui GUI
+/// move the entry in their own `entries` vec on the engine's confirmation without re-reading the
+/// DB, so an unearned `Ok` shows an order that is gone on the next launch.
+///
+/// FIXME(no cross-process invalidation): adjacency is not checked, so another front-end
+/// reordering in that same gap leaves the two ids non-adjacent and this jumps whatever ended up
+/// between them. Closing it means telling the front-ends to re-read, as the Tauri one does.
+fn exchanged(mut ids: Vec<i64>, a: i64, b: i64) -> Option<Vec<i64>> {
+    let a_idx = ids.iter().position(|id| *id == a)?;
+    let b_idx = ids.iter().position(|id| *id == b)?;
+    ids.swap(a_idx, b_idx);
+    Some(ids)
 }
 
 /// Upsert a query record and return its id.
 ///
 /// `name` is the optional display name shown in the left pane.
 /// If `None` (or empty string), the query string itself is used as the label.
+///
+/// `position` is assigned here so the query appends; at the column's `DEFAULT 0` it would sort
+/// among the oldest rows, at a spot the `created_at` tie-break picks.
+///
+/// The conflicting branch must keep leaving `position` alone: re-submitting an existing query
+/// string is how a rename reaches the DB, and a rename must not move the query.
 pub async fn upsert_query(
     pool: &SqlitePool,
     query: &str,
@@ -397,8 +452,8 @@ pub async fn upsert_query(
     let name = name.filter(|s| !s.trim().is_empty());
     let row = sqlx::query!(
         r#"
-        INSERT INTO queries (query, kind, name)
-        VALUES (?, ?, ?)
+        INSERT INTO queries (query, kind, name, position)
+        VALUES (?, ?, ?, (SELECT COALESCE(MAX(position) + 1, 0) FROM queries))
         ON CONFLICT (query) DO UPDATE SET query = excluded.query, name = excluded.name
         RETURNING id
         "#,
@@ -1327,25 +1382,329 @@ mod tests {
         assert_eq!(items.len(), 0);
     }
 
+    /// The `position` key decides this; the other two keys have their own tests below.
     #[tokio::test]
-    async fn list_queries_returns_in_creation_order() {
+    async fn list_queries_returns_in_insertion_order() {
         let (pool, _file) = test_pool().await;
 
-        upsert_query(&pool, "query:first", "issue", None)
+        let [first, second, third] = seed_three_queries(&pool).await;
+
+        assert_eq!(query_ids_in_order(&pool).await, vec![first, second, third]);
+    }
+
+    /// Three queries in a known order, so each reorder test opens with the state it is about.
+    async fn seed_three_queries(pool: &SqlitePool) -> [i64; 3] {
+        [
+            seed_query(pool, "query:first").await,
+            seed_query(pool, "query:second").await,
+            seed_query(pool, "query:third").await,
+        ]
+    }
+
+    async fn seed_query(pool: &SqlitePool, query: &str) -> i64 {
+        upsert_query(pool, query, "issue", None)
             .await
-            .expect("upsert");
-        upsert_query(&pool, "query:second", "pull_request", None)
+            .expect("seed query")
+    }
+
+    /// Three streams under one parent, returning the parent alongside them.
+    async fn seed_parent_with_three_streams(pool: &SqlitePool) -> (i64, [i64; 3]) {
+        let parent = seed_query(pool, "query:parent").await;
+        let streams = [
+            seed_filter_stream(pool, parent, "first", "state:open").await,
+            seed_filter_stream(pool, parent, "second", "state:closed").await,
+            seed_filter_stream(pool, parent, "third", "is:draft").await,
+        ];
+        (parent, streams)
+    }
+
+    async fn seed_filter_stream(pool: &SqlitePool, parent: i64, name: &str, filter: &str) -> i64 {
+        upsert_filter_stream(pool, parent, name, filter)
             .await
-            .expect("upsert");
-        upsert_query(&pool, "query:third", "issue", None)
+            .expect("seed filter stream")
+    }
+
+    /// Read the column directly: no public fn exposes `position`.
+    async fn query_position(pool: &SqlitePool, id: i64) -> i64 {
+        sqlx::query_scalar!("SELECT position FROM queries WHERE id = ?", id)
+            .fetch_one(pool)
+            .await
+            .expect("read query position")
+    }
+
+    async fn filter_stream_position(pool: &SqlitePool, id: i64) -> i64 {
+        sqlx::query_scalar!("SELECT position FROM filter_streams WHERE id = ?", id)
+            .fetch_one(pool)
+            .await
+            .expect("read filter stream position")
+    }
+
+    /// The positions of `ids`, in the order given.
+    async fn query_positions(pool: &SqlitePool, ids: &[i64]) -> Vec<i64> {
+        let mut positions = Vec::with_capacity(ids.len());
+        for id in ids {
+            positions.push(query_position(pool, *id).await);
+        }
+        positions
+    }
+
+    async fn filter_stream_positions(pool: &SqlitePool, ids: &[i64]) -> Vec<i64> {
+        let mut positions = Vec::with_capacity(ids.len());
+        for id in ids {
+            positions.push(filter_stream_position(pool, *id).await);
+        }
+        positions
+    }
+
+    /// The ids in left-pane order. Not to be confused with `query_positions`, which returns
+    /// `position` values and the same `Vec<i64>`.
+    async fn query_ids_in_order(pool: &SqlitePool) -> Vec<i64> {
+        list_queries(pool)
+            .await
+            .expect("list queries")
+            .iter()
+            .map(|q| q.id)
+            .collect()
+    }
+
+    async fn filter_stream_ids_in_order(pool: &SqlitePool, parent_id: i64) -> Vec<i64> {
+        list_filter_streams(pool, parent_id)
+            .await
+            .expect("list filter streams")
+            .iter()
+            .map(|fs| fs.id)
+            .collect()
+    }
+
+    /// A query tied with every other row this helper inserts, leaving only `id` to order them.
+    async fn insert_tied_query(pool: &SqlitePool, id: i64, query: &str) {
+        sqlx::query!(
+            "INSERT INTO queries (id, query, kind, position, created_at)
+             VALUES (?, ?, 'issue', 0, '2026-08-07 00:00:00')",
+            id,
+            query,
+        )
+        .execute(pool)
+        .await
+        .expect("insert tied query");
+    }
+
+    async fn insert_tied_filter_stream(pool: &SqlitePool, id: i64, parent: i64, name: &str) {
+        sqlx::query!(
+            "INSERT INTO filter_streams (id, parent_id, name, filter, position, created_at)
+             VALUES (?, ?, ?, 'state:open', 0, '2026-08-07 00:00:00')",
+            id,
+            parent,
+            name,
+        )
+        .execute(pool)
+        .await
+        .expect("insert tied filter stream");
+    }
+
+    /// Ties on both other keys happen in ordinary use, and SQLite may then answer differently
+    /// on each launch, so which row wins is pinned rather than left to it.
+    #[tokio::test]
+    async fn list_queries_breaks_ties_by_id() {
+        let (pool, _file) = test_pool().await;
+
+        // Inserted out of id order, so the answer cannot come from the insertion order.
+        insert_tied_query(&pool, 7, "query:c").await;
+        insert_tied_query(&pool, 5, "query:a").await;
+        insert_tied_query(&pool, 6, "query:b").await;
+
+        assert_eq!(query_ids_in_order(&pool).await, vec![5, 6, 7]);
+    }
+
+    #[tokio::test]
+    async fn list_filter_streams_breaks_ties_by_id() {
+        let (pool, _file) = test_pool().await;
+        let parent = seed_query(&pool, "query:parent").await;
+
+        insert_tied_filter_stream(&pool, 7, parent, "c").await;
+        insert_tied_filter_stream(&pool, 5, parent, "a").await;
+        insert_tied_filter_stream(&pool, 6, parent, "b").await;
+
+        assert_eq!(
+            filter_stream_ids_in_order(&pool, parent).await,
+            vec![5, 6, 7]
+        );
+    }
+
+    /// The middle sort key: on a cache the backfill has not reached, every row is at position 0
+    /// and `created_at` is what orders the left pane.
+    #[tokio::test]
+    async fn list_queries_falls_back_to_created_at() {
+        let (pool, _file) = test_pool().await;
+
+        // Ids ascend as the timestamps descend, so id order and created_at order disagree.
+        for (id, query, created_at) in [
+            (5_i64, "query:a", "2026-08-07 00:00:03"),
+            (6, "query:b", "2026-08-07 00:00:02"),
+            (7, "query:c", "2026-08-07 00:00:01"),
+        ] {
+            sqlx::query!(
+                "INSERT INTO queries (id, query, kind, position, created_at)
+                 VALUES (?, ?, 'issue', 0, ?)",
+                id,
+                query,
+                created_at,
+            )
+            .execute(&pool)
+            .await
+            .expect("insert");
+        }
+
+        assert_eq!(query_ids_in_order(&pool).await, vec![7, 6, 5]);
+    }
+
+    /// `include_str!` rather than a copy, so a rewrite of the migration is what this runs.
+    const BACKFILL_POSITIONS_MIGRATION: &str =
+        include_str!("../migrations/20260807000001_backfill_positions.sql");
+
+    /// Every other test hands this migration empty tables, where it ranks nothing. Give it rows
+    /// whose positions disagree with their ids, so that ranking by the column it rewrites would
+    /// show up, and pin both halves of the promise: dense numbering, unchanged display order.
+    #[tokio::test]
+    async fn backfill_positions_migration_densifies_without_moving_anything() {
+        let (pool, _file) = test_pool().await;
+
+        // Positions that disagree with the ids, so a mid-update read of `position` would show.
+        for (id, query, position) in [
+            (1_i64, "query:a", 30_i64),
+            (2, "query:b", 10),
+            (3, "query:c", 20),
+        ] {
+            sqlx::query!(
+                "INSERT INTO queries (id, query, kind, position) VALUES (?, ?, 'issue', ?)",
+                id,
+                query,
+                position,
+            )
+            .execute(&pool)
+            .await
+            .expect("seed query");
+        }
+        // Two parents (1 and 2), the second one's pair tied on `position`. Stream ids start at
+        // 11 so an expected list of them cannot be misread as a parent id.
+        for (id, parent_id, name, position) in [
+            (11_i64, 1_i64, "a", 7_i64),
+            (12, 1, "b", 3),
+            (13, 2, "c", 9),
+            (14, 2, "d", 9),
+        ] {
+            sqlx::query!(
+                "INSERT INTO filter_streams (id, parent_id, name, filter, position)
+                 VALUES (?, ?, ?, 'state:open', ?)",
+                id,
+                parent_id,
+                name,
+                position,
+            )
+            .execute(&pool)
+            .await
+            .expect("seed filter stream");
+        }
+
+        // The order the left pane displays before the migration.
+        assert_eq!(query_ids_in_order(&pool).await, vec![2, 3, 1]);
+        assert_eq!(filter_stream_ids_in_order(&pool, 1).await, vec![12, 11]);
+        assert_eq!(filter_stream_ids_in_order(&pool, 2).await, vec![13, 14]);
+
+        sqlx::raw_sql(BACKFILL_POSITIONS_MIGRATION)
+            .execute(&pool)
+            .await
+            .expect("run the backfill migration");
+
+        // The same order, now recorded as 0..n-1 — per parent for the streams.
+        assert_eq!(query_ids_in_order(&pool).await, vec![2, 3, 1]);
+        assert_eq!(query_positions(&pool, &[2, 3, 1]).await, vec![0, 1, 2]);
+        assert_eq!(filter_stream_ids_in_order(&pool, 1).await, vec![12, 11]);
+        assert_eq!(filter_stream_positions(&pool, &[12, 11]).await, vec![0, 1]);
+        assert_eq!(filter_stream_ids_in_order(&pool, 2).await, vec![13, 14]);
+        assert_eq!(filter_stream_positions(&pool, &[13, 14]).await, vec![0, 1]);
+    }
+
+    /// Pins the first half of `upsert_query`'s position handling; see its doc for why.
+    #[tokio::test]
+    async fn upsert_query_appends_after_the_existing_queries() {
+        let (pool, _file) = test_pool().await;
+
+        let first = seed_query(&pool, "query:first").await;
+        let second = seed_query(&pool, "query:second").await;
+
+        assert_eq!(query_position(&pool, first).await, 0);
+        assert_eq!(query_position(&pool, second).await, 1);
+    }
+
+    /// The other half: a rename must not move the row.
+    #[tokio::test]
+    async fn upsert_query_keeps_the_position_when_only_the_name_changes() {
+        let (pool, _file) = test_pool().await;
+        let first = seed_query(&pool, "query:first").await;
+        seed_query(&pool, "query:second").await;
+
+        let again = upsert_query(&pool, "query:first", "issue", Some("First"))
             .await
             .expect("upsert");
 
-        let queries = list_queries(&pool).await.expect("list");
-        assert_eq!(queries.len(), 3);
-        assert_eq!(queries[0].query, "query:first");
-        assert_eq!(queries[1].query, "query:second");
-        assert_eq!(queries[2].query, "query:third");
+        assert_eq!(again, first);
+        assert_eq!(query_position(&pool, first).await, 0);
+    }
+
+    /// An in-session reorder looks right whether or not the DB changed, so what is asserted is
+    /// the part the user only sees on the next launch.
+    #[tokio::test]
+    async fn swap_query_positions_persists_the_new_order() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, third] = seed_three_queries(&pool).await;
+
+        swap_query_positions(&pool, first, second)
+            .await
+            .expect("swap");
+
+        assert_eq!(query_ids_in_order(&pool).await, vec![second, first, third]);
+    }
+
+    /// A cache an older binary wrote has every position at the default, and reordering has to
+    /// work from that too — not only from one the migration has tidied.
+    #[tokio::test]
+    async fn swap_query_positions_persists_the_new_order_when_positions_are_all_equal() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, third] = seed_three_queries(&pool).await;
+        sqlx::query!("UPDATE queries SET position = 0")
+            .execute(&pool)
+            .await
+            .expect("flatten positions");
+
+        swap_query_positions(&pool, second, third)
+            .await
+            .expect("swap");
+
+        assert_eq!(query_ids_in_order(&pool).await, vec![first, third, second]);
+    }
+
+    /// A front-end can be showing a query another has deleted; see `exchanged` for why naming a
+    /// row that is gone has to fail rather than report a move the DB never made.
+    #[tokio::test]
+    async fn swap_query_positions_fails_when_a_query_is_gone() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, third] = seed_three_queries(&pool).await;
+        // Sparse, so that "nothing was written" is distinguishable from "renumbered".
+        sqlx::query!("UPDATE queries SET position = 5 WHERE id = ?", first)
+            .execute(&pool)
+            .await
+            .expect("spread positions");
+        sqlx::query!("UPDATE queries SET position = 9 WHERE id = ?", third)
+            .execute(&pool)
+            .await
+            .expect("spread positions");
+        delete_query(&pool, second).await.expect("delete");
+
+        assert!(swap_query_positions(&pool, first, second).await.is_err());
+        assert!(swap_query_positions(&pool, second, first).await.is_err());
+        assert_eq!(query_position(&pool, first).await, 5);
+        assert_eq!(query_position(&pool, third).await, 9);
     }
 
     #[tokio::test]
@@ -1506,6 +1865,116 @@ mod tests {
             0,
             "filter streams should cascade with parent query"
         );
+    }
+
+    /// Filter streams are ordered within their parent query, so their positions are
+    /// numbered per parent: a second query's first stream starts over at 0 instead of
+    /// continuing the first query's numbering.
+    #[tokio::test]
+    async fn upsert_filter_stream_appends_within_its_own_parent() {
+        let (pool, _file) = test_pool().await;
+
+        let parent_a = upsert_query(&pool, "query:a", "issue", None)
+            .await
+            .expect("upsert query");
+        let parent_b = upsert_query(&pool, "query:b", "issue", None)
+            .await
+            .expect("upsert query");
+
+        let a_first = upsert_filter_stream(&pool, parent_a, "A first", "state:open")
+            .await
+            .expect("upsert filter stream");
+        let a_second = upsert_filter_stream(&pool, parent_a, "A second", "state:closed")
+            .await
+            .expect("upsert filter stream");
+        let b_first = upsert_filter_stream(&pool, parent_b, "B first", "state:open")
+            .await
+            .expect("upsert filter stream");
+
+        assert_eq!(filter_stream_position(&pool, a_first).await, 0);
+        assert_eq!(filter_stream_position(&pool, a_second).await, 1);
+        assert_eq!(filter_stream_position(&pool, b_first).await, 0);
+    }
+
+    #[tokio::test]
+    async fn swap_filter_stream_positions_persists_the_new_order() {
+        let (pool, _file) = test_pool().await;
+        let (parent, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
+
+        swap_filter_stream_positions(&pool, first, second)
+            .await
+            .expect("swap");
+
+        assert_eq!(
+            filter_stream_ids_in_order(&pool, parent).await,
+            vec![second, first, third]
+        );
+    }
+
+    /// The sibling counterpart for streams.
+    #[tokio::test]
+    async fn swap_filter_stream_positions_persists_the_new_order_when_positions_are_all_equal() {
+        let (pool, _file) = test_pool().await;
+        let (parent, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
+        sqlx::query!("UPDATE filter_streams SET position = 0")
+            .execute(&pool)
+            .await
+            .expect("flatten positions");
+
+        swap_filter_stream_positions(&pool, second, third)
+            .await
+            .expect("swap");
+
+        assert_eq!(
+            filter_stream_ids_in_order(&pool, parent).await,
+            vec![first, third, second]
+        );
+    }
+
+    /// A reorder renumbers one parent's group and must leave every other group's numbering alone.
+    #[tokio::test]
+    async fn swap_filter_stream_positions_leaves_other_parents_alone() {
+        let (pool, _file) = test_pool().await;
+        let (_, [first, second, _]) = seed_parent_with_three_streams(&pool).await;
+        let other_parent = seed_query(&pool, "query:other").await;
+        let untouched = seed_filter_stream(&pool, other_parent, "elsewhere", "state:open").await;
+
+        swap_filter_stream_positions(&pool, first, second)
+            .await
+            .expect("swap");
+
+        assert_eq!(filter_stream_position(&pool, untouched).await, 0);
+    }
+
+    /// Both arguments are covered because the ids reach the DB by different routes here: the
+    /// upper one through the parent lookup, the lower one through `exchanged`.
+    #[tokio::test]
+    async fn swap_filter_stream_positions_fails_when_a_stream_is_gone() {
+        let (pool, _file) = test_pool().await;
+        let (_, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
+        // Sparse for the reason given in the query counterpart above.
+        sqlx::query!("UPDATE filter_streams SET position = 5 WHERE id = ?", first)
+            .execute(&pool)
+            .await
+            .expect("spread positions");
+        sqlx::query!("UPDATE filter_streams SET position = 9 WHERE id = ?", third)
+            .execute(&pool)
+            .await
+            .expect("spread positions");
+        delete_filter_stream(&pool, second).await.expect("delete");
+
+        assert!(
+            swap_filter_stream_positions(&pool, first, second)
+                .await
+                .is_err()
+        );
+        assert!(
+            swap_filter_stream_positions(&pool, second, first)
+                .await
+                .is_err()
+        );
+        assert_eq!(filter_stream_position(&pool, first).await, 5);
+        assert_eq!(filter_stream_position(&pool, third).await, 9);
     }
 
     #[tokio::test]

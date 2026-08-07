@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO queries (query, kind, name, position)\n        VALUES (?, ?, ?, (SELECT COALESCE(MAX(position) + 1, 0) FROM queries))\n        ON CONFLICT (query) DO UPDATE SET query = excluded.query, name = excluded.name\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bcd6ddc4bdf6204b36ce7102fe3ee8736a024de0b77669d1eccf501fead660fd"
+}

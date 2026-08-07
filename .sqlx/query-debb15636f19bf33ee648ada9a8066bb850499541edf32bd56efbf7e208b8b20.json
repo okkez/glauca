@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO filter_streams (id, parent_id, name, filter, position)\n                 VALUES (?, ?, ?, 'state:open', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "debb15636f19bf33ee648ada9a8066bb850499541edf32bd56efbf7e208b8b20"
+}

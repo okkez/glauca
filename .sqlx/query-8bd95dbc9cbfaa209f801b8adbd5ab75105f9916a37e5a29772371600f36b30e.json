@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE filter_streams SET position = 9 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "8bd95dbc9cbfaa209f801b8adbd5ab75105f9916a37e5a29772371600f36b30e"
+}

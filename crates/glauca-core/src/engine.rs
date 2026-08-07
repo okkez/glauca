@@ -1874,17 +1874,23 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    if db::swap_query_positions(&pool2, upper_id, lower_id)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = tx2
-                            .send(AppMessage::QueriesSwapped {
-                                upper_id,
-                                lower_id,
-                                active_id,
-                            })
-                            .await;
+                    // Confirm only what the DB took — see `db::exchanged` for why an unearned
+                    // confirmation is the bug itself.
+                    match db::swap_query_positions(&pool2, upper_id, lower_id).await {
+                        Ok(()) => {
+                            let _ = tx2
+                                .send(AppMessage::QueriesSwapped {
+                                    upper_id,
+                                    lower_id,
+                                    active_id,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx2
+                                .send(AppMessage::ActionError(format!("reorder: {e}")))
+                                .await;
+                        }
                     }
                 });
             }
@@ -1896,17 +1902,21 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    if db::swap_filter_stream_positions(&pool2, upper_id, lower_id)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = tx2
-                            .send(AppMessage::FilterStreamsSwapped {
-                                upper_id,
-                                lower_id,
-                                active_id,
-                            })
-                            .await;
+                    match db::swap_filter_stream_positions(&pool2, upper_id, lower_id).await {
+                        Ok(()) => {
+                            let _ = tx2
+                                .send(AppMessage::FilterStreamsSwapped {
+                                    upper_id,
+                                    lower_id,
+                                    active_id,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx2
+                                .send(AppMessage::ActionError(format!("reorder: {e}")))
+                                .await;
+                        }
                     }
                 });
             }
