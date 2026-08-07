@@ -1,7 +1,6 @@
 /* Plain, framework-free styling. Kept deliberately simple (flexbox, no exotic
    CSS) so it also renders cleanly under Servo/Verso, not just the system WebView. */
-/* Dark palette: GitHub Primer "dark default", matching the GUI's
-   apply_github_dark_overlay (crates/glauca-gui/src/gui/widgets.rs). */
+/* Dark palette: GitHub Primer "dark default". */
 :root {
   --bg: #0d1117;
   --sidebar: #161b22;
@@ -61,7 +60,7 @@ body {
   flex-direction: column;
 }
 
-/* Menu bar (Glauca / View / Help), mirroring the GUI's render_menu_bar. */
+/* Menu bar (Glauca / View / Help). */
 #menubar {
   display: flex;
   gap: 4px;
@@ -85,9 +84,8 @@ body {
   min-height: 0;
 }
 
-/* Pane widths mirror the GUI: fixed sidebar / flexible items / fixed detail.
-   Each pane gets a 1px top border that turns blue when the pane has keyboard
-   focus (the GUI's pane_frame focus indicator). */
+/* Fixed sidebar / flexible items / fixed detail. Each pane gets a 1px top border that
+   turns blue when the pane has keyboard focus. */
 #sidebar {
   width: 280px;
   min-width: 250px;
@@ -239,7 +237,7 @@ ul { list-style: none; margin: 0; padding: 0; }
 .it-title-row { display: flex; align-items: flex-start; gap: 8px; }
 .it-state { margin-top: 2px; }
 .it-title { font-weight: 700; min-width: 0; }
-/* Inline-filter match highlight inside a title (the GUI's highlight_title). */
+/* Inline-filter match highlight inside a title. */
 .hl { background: var(--link); color: #ffffff; }
 
 /* Row 2: author → assignees on the left, reviewers + comment count right. */
@@ -277,14 +275,13 @@ ul { list-style: none; margin: 0; padding: 0; }
 }
 .avatar-fallback { color: var(--muted); font-weight: 600; font-size: 11px; }
 
-/* Teams and orgs are non-human actors; GitHub renders them as a rounded square
-   (Primer --borderRadius-medium = 6px) instead of a circle. At 24px the shape is
-   the only cue — both a team and an avatar-less user fall back to a glyph. */
+/* Teams render as a rounded square (Primer --borderRadius-medium = 6px) instead of a
+   circle. At 24px the shape is the only cue — a team and an avatar-less user both fall
+   back to a glyph. */
 .avatar.avatar-team { border-radius: 6px; }
 
-/* Reviewer avatar with a review-state octicon badge overlaid bottom-right
-   (the GUI's reviewer_avatar): the badge background shows through the filled
-   check/x knockout — white, GitHub-style — or acts as a plain ring otherwise. */
+/* Reviewer avatar with a review-state octicon badge overlaid bottom-right: the badge
+   background shows through the filled check/x knockout, or acts as a plain ring. */
 .rv-wrap { position: relative; display: inline-flex; flex: none; }
 .rv-badge {
   position: absolute;
@@ -298,8 +295,7 @@ ul { list-style: none; margin: 0; padding: 0; }
 .rv-badge.rv-commented,
 .rv-badge.rv-dismissed { color: var(--muted); background: var(--bg); }
 
-/* Detail pane: pinned header (title line, field rows, actions) above a
-   scrollable plain-text body, mirroring the GUI's render_detail. */
+/* Detail pane: pinned header above a scrollable plain-text body. */
 #detail-header {
   flex: none;
   padding: 16px;
@@ -315,8 +311,7 @@ ul { list-style: none; margin: 0; padding: 0; }
 .detail-title { font-size: 16px; font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
 .decision-icon { display: inline-flex; }
 
-/* GitHub-style state pill: colored, rounded, light text; the octicon inside
-   inherits the white via currentColor. */
+/* State pill: the octicon inside inherits the white via currentColor. */
 .state-pill {
   display: inline-flex;
   align-items: center;
@@ -330,14 +325,14 @@ ul { list-style: none; margin: 0; padding: 0; }
 .state-pill.state-closed { background: var(--red); color: #ffffff; }
 .state-pill.state-draft  { background: var(--muted); color: #ffffff; }
 
-/* `label: value` field rows (the GUI's detail_field / detail_people_field). */
+/* `label: value` field rows. */
 .field { display: flex; gap: 8px; font-size: 12px; }
 .field-label { flex: 0 0 96px; color: var(--muted); }
 .field-value { flex: 1; min-width: 0; }
 .field-chips { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
 
-/* Action buttons (mouse convenience; the GUI drives these from the item menu). */
+/* Action buttons, for mouse convenience. */
 .actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .actions button {
   background: transparent;

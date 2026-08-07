@@ -7,8 +7,6 @@
 //   * listen('app-message', ...)  ← engine; payload is the adjacently-tagged
 //     AppMessage: { type: "ItemsLoaded", data: {...} }.
 //
-// Feature-wise this mirrors the TUI/GUI: browse / filter / sync / read / act,
-// entry CRUD + reorder, custom actions, and keyboard navigation.
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -39,7 +37,6 @@ const state = {
                           // asked to re-fetch this session (dedup for selectItem)
 };
 
-// ── helpers ──────────────────────────────────────────────────────────────────
 
 const $ = (id) => document.getElementById(id);
 
@@ -52,8 +49,7 @@ function el(tag, opts = {}, children = []) {
   return node;
 }
 
-// Latest status message, rendered into the sidebar footer (the GUI keeps its
-// status in the left pane's footer rather than a global status bar).
+// Latest status message, rendered into the sidebar footer.
 let statusMsg = "";
 let statusIsError = false;
 
@@ -63,11 +59,10 @@ function setStatus(msg, isError = false) {
   renderFooter();
 }
 
-// Core's warning about the current view's filter using `@me` with no login to
-// expand it to, or null when there is nothing to warn about — decided and worded
-// by the filter_items command (see refreshVisible). Unlike statusMsg this is a
-// standing condition, not a message, so it lives on until the filter or the login
-// changes.
+// Core's warning about the current filter using `@me` with no login to expand it to, or
+// null when there is nothing to warn about — decided and worded by the filter_items
+// command. Unlike statusMsg this is a standing condition, so it lives on until the filter
+// or the login changes.
 let meWarning = null;
 
 function setMeWarning(msg) {
@@ -76,9 +71,8 @@ function setMeWarning(msg) {
   renderFooter();
 }
 
-// Sidebar footer: sync activity ("syncing…", "N bg"), the `@me` warning, and the
-// latest status message. Hidden entirely when there is nothing to show, like the
-// GUI. Mirrors the same three-part footer in the GUI's render.rs.
+// Sidebar footer: sync activity ("syncing…", "N bg"), the `@me` warning, and the latest
+// status message. Hidden entirely when there is nothing to show.
 function renderFooter() {
   const footer = $("sidebar-footer");
   const bits = [];
@@ -93,9 +87,8 @@ function renderFooter() {
   footer.hidden = rows.length === 0;
 }
 
-// invoke() for fire-and-forget commands: report failures on the sidebar
-// footer instead of losing them as unhandled rejections. Use plain invoke()
-// (with await / .catch) when the result matters.
+// invoke() for fire-and-forget commands: report failures on the sidebar footer instead of
+// losing them as unhandled rejections. Use plain invoke() when the result matters.
 function call(cmd, args) {
   return invoke(cmd, args).catch((e) => setStatus(`${cmd}: ${e}`, true));
 }
@@ -104,12 +97,9 @@ function itemKey(it) {
   return `${it.repo_owner}/${it.repo_name}#${it.number}`;
 }
 
-// ── octicons ─────────────────────────────────────────────────────────────────
-//
-// GitHub Octicons (MIT licensed, https://github.com/primer/octicons), the same
-// set the GUI vendors under crates/glauca-gui/assets/octicons. Inlined as path
-// data because the CSP has no connect-src 'self' (fetch() of an .svg would be
-// blocked), and `fill: currentColor` lets CSS color them per state/theme.
+// GitHub Octicons (MIT, https://github.com/primer/octicons). Inlined as path data because
+// the CSP has no connect-src 'self', so fetch() of an .svg would be blocked, and
+// `fill: currentColor` lets CSS color them per state/theme.
 
 const OCTICONS = {
   "check-circle-fill": [
@@ -152,9 +142,8 @@ const OCTICONS = {
   ],
 };
 
-// An inline <svg> for the named octicon, colored via `currentColor` (so a color
-// class like .state-open on the element tints it, matching how gpui paints the
-// same SVGs as masks).
+// An inline <svg> for the named octicon, colored via `currentColor`, so a class like
+// .state-open on the element tints it.
 function octicon(name, cls = "", size = 16) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");
@@ -173,18 +162,16 @@ function octicon(name, cls = "", size = 16) {
   return svg;
 }
 
-// Jasper-style unread: the item changed since it was last read. Mirrors
-// glauca_core::logic::is_item_unread; both timestamps are RFC3339 UTC, so plain
-// string comparison orders correctly (same assumption core makes).
+// Unread = the item changed since it was last read, as in
+// glauca_core::logic::is_item_unread. Both timestamps are RFC3339 UTC, so plain string
+// comparison orders correctly.
 function isUnread(it) {
   return it.last_read_updated_at == null || it.updated_at > it.last_read_updated_at;
 }
 
-// Show/hide the change banner based on held-back background items for the
-// currently-selected query. Clicking it applies the pending items. Both the diff
-// and its wording come from core (via count_item_changes), so this matches the
-// TUI/GUI exactly — including counting removals, so a sync that only pruned items
-// no longer matching the query isn't mistaken for "nothing changed".
+// Show/hide the change banner for held-back background items on the selected query;
+// clicking it applies them. Both the diff and its wording come from core via
+// count_item_changes, which counts removals too, so a sync that only pruned still shows.
 async function updateBanner() {
   const banner = $("banner");
   const e = state.entries[state.selectedEntry];
@@ -198,19 +185,17 @@ async function updateBanner() {
   try {
     changes = await invoke("count_item_changes", { current, fresh });
   } catch {
-    // The banner is display-only, so a vague label beats no banner at all: losing
-    // the count must not lose the affordance, or a sync that pruned everything
-    // would silently keep the stale rows on screen.
+    // The banner is display-only, so a vague label beats no banner: losing the count must
+    // not lose the affordance, or a sync that pruned everything keeps stale rows on screen.
     changes = { total: 1, label: "updated in background" };
   }
-  // The selection may have moved while the count was in flight; a stale
-  // resolution must not repaint the banner for a query no longer shown
-  // (previewEntry already re-ran updateBanner for the new one).
+  // The selection may have moved while the count was in flight, and a stale resolution
+  // must not repaint the banner for a query no longer shown.
   const cur = state.entries[state.selectedEntry];
   if (!cur || cur.rootQueryId !== e.rootQueryId) return;
   if (changes.total === 0) {
-    // Nothing user-visible changed; drop the held-back items instead of
-    // showing an empty banner (the GUI clears pending the same way).
+    // Nothing user-visible changed: drop the held-back items rather than show an empty
+    // banner.
     state.pending.delete(e.rootQueryId);
     banner.hidden = true;
     return;
@@ -286,12 +271,9 @@ function unreadKey(isFilterStream, entryId) {
   return `${isFilterStream ? 1 : 0}:${entryId}`;
 }
 
-// Recompute unread badges for every entry under `rootQueryId` by delegating to
-// the engine's unread_counts command, which reuses glauca-core's
-// compute_unread_counts — correct filter-stream scoping and the same
-// Jasper-style unread definition (updated_at > last_read_updated_at) the TUI/GUI
-// use. Driven by the front-end's in-memory items so it reflects reads
-// immediately (no DB round-trip race after mark_item_read).
+// Recompute unread badges for every entry under `rootQueryId` via the engine's
+// unread_counts command. Driven by the front-end's in-memory items so it reflects reads
+// immediately, with no DB round-trip race after mark_item_read.
 async function refreshUnread(rootQueryId) {
   const items = state.itemsByQuery.get(rootQueryId) || [];
   try {
@@ -377,10 +359,8 @@ function splitFilterGroups(s) {
   return (s || "").split(FILTER_GROUP_SEP);
 }
 
-// Filter-stream create/edit modal: a name field plus one or more OR-group boxes
-// (each box is one AND-group; the boxes are ORed, mirroring the TUI). Add/remove
-// boxes with the buttons. Resolves { name, filter } with `filter` as the
-// newline-joined non-blank groups, or null on cancel.
+// Filter-stream create/edit modal: a name field plus one or more OR-group boxes. Resolves
+// { name, filter } with `filter` as the newline-joined non-blank groups, or null on cancel.
 function filterStreamModal(title, initName, initFilters) {
   return new Promise((resolve) => {
     const overlay = el("div", { class: "modal-overlay" });
@@ -522,16 +502,15 @@ function infoModal(title, bodyEls, { closeKeys = ["Escape", "q"], boxClass = "" 
   document.body.appendChild(overlay);
 }
 
-// Lightweight context menu at (x, y). `items` is [{label, onClick}] (a null entry
-// renders a separator). Closes on selection or any outside click/Escape.
-// The document-level close listener for the open context menu, tracked so it can
-// be unregistered when the menu goes away (via dismiss, item click, or a new menu
-// opening). Without this the listeners outlived their detached menu node.
+// Lightweight context menu at (x, y). `items` is [{label, onClick}], a null entry renders
+// a separator. Closes on selection or any outside click/Escape.
+//
+// The document-level close listener is tracked so it can be unregistered when the menu goes
+// away; otherwise the listeners outlive their detached menu node.
 let ctxMenuClose = null;
 
-// Menu-bar button id whose dropdown is currently open (null for ordinary
-// context menus). First-class ownership lets wireMenuButton decide toggle-close
-// vs. open from the *current* state, with no dismissal-history heuristics.
+// Menu-bar button id whose dropdown is currently open (null for ordinary context menus),
+// so wireMenuButton can decide toggle-close vs. open from the *current* state.
 let menuBarOwner = null;
 
 // Remove any open context menu AND its document-level close listeners.
@@ -572,10 +551,8 @@ function showContextMenu(x, y, items, ownerEl = null) {
   const close = (ev) => {
     if (ev.type === "keydown" && ev.key !== "Escape") return;
     if (ev.type === "mousedown") {
-      // Clicks inside the menu are the items' own onclick business; closing
-      // (and detaching the node) on the capture-phase mousedown would race the
-      // click. Same for the owner element — its click handler decides open
-      // vs. toggle.
+      // Clicks inside the menu belong to the items' own onclick; closing (and detaching the
+      // node) on the capture-phase mousedown would race the click. Same for the owner.
       const insideMenu = ev.target.closest(".ctx-menu");
       const insideOwner = ownerEl && ownerEl.contains(ev.target);
       if (insideMenu || insideOwner) return;
@@ -588,10 +565,7 @@ function showContextMenu(x, y, items, ownerEl = null) {
   document.body.appendChild(menu);
 }
 
-// ── menu bar ──────────────────────────────────────────────────────────────---
-//
-// HTML buttons + the shared context menu, mirroring the GUI's menu bar
-// (Glauca / View / Help dropdowns).
+// Menu bar: HTML buttons plus the shared context menu.
 
 // "✓ " prefix on the active option; NBSPs keep inactive labels aligned.
 function checkmark(active) {
@@ -667,11 +641,8 @@ function wireMenuButton(id, buildItems) {
   });
 }
 
-// ── pane resize ─────────────────────────────────────────────────────────────-
-//
-// Drag the dividers to resize the fixed side panes, mirroring the GUI's
-// resizable panes (same clamps: sidebar 250–560, detail ≥ 300; the flexible
-// center keeps ≥ 250 by capping the dragged pane against the window width).
+// Drag the dividers to resize the fixed side panes. Clamps: sidebar 250–560, detail ≥ 300;
+// the flexible center keeps ≥ 250 by capping the dragged pane against the window width.
 // Widths persist to settings.pane_sizes on drag end.
 
 const SIDEBAR_MIN = 250;
@@ -763,9 +734,8 @@ async function refreshVisible() {
     renderItemList();
     return;
   }
-  // Fast j/k launches overlapping filter_items calls; tag this one so a slow
-  // earlier resolution can't overwrite a newer entry's items (which would show the
-  // wrong list). Bail if a later call has already superseded us.
+  // Fast j/k launches overlapping filter_items calls, so tag this one: a slow earlier
+  // resolution must not overwrite a newer entry's items and show the wrong list.
   const seq = ++state.filterSeq;
   try {
     const filterResult = await invoke("filter_items", {
@@ -776,10 +746,9 @@ async function refreshVisible() {
     if (seq !== state.filterSeq) return;
     state.visibleItems = filterResult.items.map((m) => all[m.index]);
     state.visibleTitleSegments = filterResult.items.map((m) => m.title_segments);
-    // Why the list may be empty: the filter asked for `@me` and the engine has no
-    // login to expand it to. Rust decides and words this (it holds both the filters
-    // and the login); the footer just shows it, and it clears itself on the next
-    // filter once CurrentUserResolved lands.
+    // Why the list may be empty: the filter asked for `@me` and the engine has no login
+    // to expand it to. Rust decides and words this, since it holds both the filters and
+    // the login; the footer only shows it.
     setMeWarning(filterResult.me_warning);
   } catch (err) {
     if (seq !== state.filterSeq) return;
@@ -791,11 +760,9 @@ async function refreshVisible() {
     setMeWarning(null);
   }
   renderItemList();
-  // Also refresh the open detail pane from the reloaded items. renderDetail is
-  // imperative and otherwise keeps showing the object captured at selectItem
-  // time, so without this an updated body (e.g. a transparently re-fetched
-  // maintenance-cleared body) or an applied background update would not appear
-  // until reselect.
+  // Also refresh the open detail pane from the reloaded items: renderDetail is imperative
+  // and otherwise keeps showing the object captured at selectItem time, so a re-fetched
+  // body or an applied background update would not appear until reselect.
   if (state.selectedItemKey) {
     const selectedItem = state.visibleItems.find((x) => itemKey(x) === state.selectedItemKey);
     if (selectedItem) {
@@ -810,9 +777,8 @@ async function refreshVisible() {
   }
 }
 
-// Octicon name + color class encoding an item's state: the shape says
-// issue-vs-PR, the color says open/merged/closed/draft. Mirrors the GUI's
-// item_state_icon_info.
+// Octicon name + color class for an item's state: the shape says issue-vs-PR, the color
+// says open/merged/closed/draft.
 function itemStateIcon(it) {
   if (it.kind === "pull_request") {
     if (it.is_draft) return { name: "git-pull-request-draft", cls: "state-draft" };
@@ -825,7 +791,7 @@ function itemStateIcon(it) {
     : { name: "issue-opened", cls: "state-open" };
 }
 
-// GitHub-style label for the detail-header state pill (mirrors state_label).
+// Label for the detail-header state pill.
 function stateLabel(it) {
   if (it.kind === "pull_request" && it.is_draft) return "Draft";
   if (it.state === "merged") return "Merged";
@@ -833,7 +799,7 @@ function stateLabel(it) {
   return "Open";
 }
 
-// CSS modifier for a GitHub review state (mirrors logic::ReviewState::from_state).
+// CSS modifier for a GitHub review state.
 function reviewStateClass(reviewState) {
   switch (reviewState) {
     case "APPROVED":
@@ -849,9 +815,8 @@ function reviewStateClass(reviewState) {
   }
 }
 
-// Reviewers to show: everyone who submitted a review (with their state) plus
-// requested reviewers who haven't reviewed yet (as PENDING). Mirrors
-// glauca_core::logic::reviewer_overlays over data already present on the item.
+// Reviewers to show: everyone who submitted a review, plus requested reviewers who haven't
+// reviewed yet (as PENDING).
 function reviewerOverlays(it) {
   const out = (it.reviews || []).map(([user, state]) => ({ user, state }));
   for (const u of it.requested_reviewers || []) {
@@ -860,13 +825,11 @@ function reviewerOverlays(it) {
   return out;
 }
 
-// Max avatars per group (assignees / reviewers) before a "+N" overflow,
-// matching the GUI's AVATAR_LIMIT.
+// Max avatars per group (assignees / reviewers) before a "+N" overflow.
 const AVATAR_LIMIT = 5;
 
-// GitHub serves a 460px avatar by default; downscaling that to a 24px <img>
-// aliases badly. Ask GitHub to resize server-side to 2× the displayed size
-// (HiDPI), mirroring the GUI's sized_avatar_url.
+// GitHub serves a 460px avatar by default, and downscaling that to a 24px <img> aliases
+// badly, so ask for a server-side resize to 2× the displayed size (HiDPI).
 function sizedAvatarUrl(url, displayPx) {
   const sep = url.includes("?") ? "&" : "?";
   return `${url}${sep}s=${displayPx * 2}`;
@@ -887,10 +850,9 @@ function avatarEl(user, cls = "avatar", displayPx = 24) {
   return span;
 }
 
-// A team's avatar (the GUI's team_avatar): GitHub renders non-human actors as a
-// rounded square instead of a circle, which is the only cue at this size — a team
-// with no image and a user with no image both fall back to a glyph. Falls back to
-// the people octicon when the team (and its org) has no avatar.
+// A team's avatar: a rounded square instead of a circle, which is the only cue at this
+// size — a team and a user with no image both fall back to a glyph. Falls back to the
+// people octicon when the team (and its org) has no avatar.
 function teamAvatarEl(user) {
   // The image case is `avatarEl`'s, only squared off — pass the extra class
   // rather than rebuilding the <img>. Only the no-image fallback differs.
@@ -902,19 +864,16 @@ function teamAvatarEl(user) {
   return span;
 }
 
-// Octicon per review state for the badge overlay (the GUI's
-// review_state_icon); COMMENTED / DISMISSED and anything unknown fall back to
-// the comment icon.
+// Octicon per review state for the badge overlay; COMMENTED / DISMISSED and anything
+// unknown fall back to the comment icon.
 const REVIEW_BADGE_ICON = {
   APPROVED: "check-circle-fill",
   CHANGES_REQUESTED: "x-circle-fill",
   PENDING: "clock",
 };
 
-// A reviewer avatar with a review-state octicon badge overlaid bottom-right
-// (the GUI's reviewer_avatar): approved=green check, changes=red x,
-// pending=yellow clock, commented/dismissed=grey comment. Teams get a rounded
-// square instead of a circle; the state badge stays, since a team request is
+// A reviewer avatar with a review-state octicon badge overlaid bottom-right. Teams get a
+// rounded square instead of a circle; the state badge stays, since a team request is
 // genuinely pending until someone on it reviews.
 function reviewerAvatar(user, reviewState) {
   const icon = REVIEW_BADGE_ICON[reviewState] || "comment";
@@ -925,9 +884,9 @@ function reviewerAvatar(user, reviewState) {
   ]);
 }
 
-// The item title with the inline-filter matches highlighted. `segments` come
-// pre-split from filter_items ({text, highlighted} pieces — the Rust side owns
-// the byte-offset arithmetic); empty/missing means no highlight.
+// The item title with the inline-filter matches highlighted. `segments` come pre-split
+// from filter_items, because the Rust side owns the byte-offset arithmetic; empty means no
+// highlight.
 function renderHighlightedTitle(title, segments) {
   const span = el("span", { class: "it-title" });
   if (!segments || !segments.length) {
@@ -976,11 +935,10 @@ function relativeTime(rfc3339, nowMs = Date.now()) {
   return `${Math.floor(secs / YEAR)}y`;
 }
 
-// Build one item row, mirroring the GUI's render_item_row: (1) state octicon
-// beside a wrapping bold title, (2) participants — author → assignees left,
-// reviewers + comment count right, (3) meta — lock, owner/name#num · labels,
-// relative update time. Unread rows get a faint background tint (is_new);
-// selection takes precedence.
+// Build one item row: (1) state octicon beside a wrapping bold title, (2) participants —
+// author → assignees left, reviewers + comment count right, (3) meta — lock,
+// owner/name#num · labels, relative update time. Unread rows get a faint tint, and
+// selection takes precedence over it.
 function renderItemList() {
   const list = $("item-list");
   list.replaceChildren();
@@ -1037,8 +995,7 @@ function renderItemList() {
       "li",
       {
         class: [selected ? "selected" : "", !selected && it.is_new ? "unread" : ""].filter(Boolean).join(" "),
-        // Shift+click also opens the row in the browser (mouse-only equivalent
-        // of the `o` key), like the GUI.
+        // Shift+click also opens the row in the browser, the mouse equivalent of `o`.
         onclick: (ev) => {
           selectItem(it);
           if (ev.shiftKey) call("open_browser", { item: it });
@@ -1064,8 +1021,7 @@ function clearDetail() {
   scroll.replaceChildren(el("div", { class: "detail-empty", text: "Select an item" }));
 }
 
-// Octicon name, color class, and tooltip label for a PR's reviewDecision
-// (mirrors the GUI's review_decision_icon).
+// Octicon name, color class, and tooltip label for a PR's reviewDecision.
 function reviewDecisionInfo(decision) {
   if (decision === "APPROVED") return ["check-circle-fill", "state-open", "Approved"];
   if (decision === "CHANGES_REQUESTED") return ["x-circle-fill", "state-closed", "Changes requested"];
@@ -1082,9 +1038,8 @@ function reviewDecisionIcon(decision) {
   return span;
 }
 
-// Detail pane, mirroring the GUI's render_detail: a pinned header (title line
-// with state pill, then `label: value` field rows, then the action buttons)
-// above a scrollable plain-text body. Markdown rendering is a separate task.
+// Detail pane: a pinned header (title line with state pill, `label: value` field rows,
+// action buttons) above a scrollable plain-text body. Markdown rendering is a separate task.
 function renderDetail(it) {
   const header = $("detail-header");
   const scroll = $("detail-scroll");
@@ -1109,7 +1064,7 @@ function renderDetail(it) {
     ])
   );
 
-  // `label: value` field rows (the GUI's detail_field / detail_people_field).
+  // `label: value` field rows.
   const field = (label, value) =>
     el("div", { class: "field" }, [el("span", { class: "field-label", text: label }), value]);
   const textField = (label, text) => field(label, el("span", { class: "field-value", text }));
@@ -1128,19 +1083,16 @@ function renderDetail(it) {
   if (it.created_at_item) header.appendChild(textField("created", localDatetime(it.created_at_item)));
   header.appendChild(textField("updated", localDatetime(it.updated_at)));
 
-  // Actions. The engine performs the external work (gh CLI / browser); the
-  // front-end only sends the command. The GUI drives these solely from the
-  // item menu; the buttons stay here as a mouse convenience.
+  // Actions. The engine performs the external work (gh CLI / browser); the front-end only
+  // sends the command.
   const actions = el("div", { class: "actions" });
   for (const a of itemActions(it)) {
     actions.appendChild(el("button", { text: a.label, onclick: a.run }));
   }
   header.appendChild(actions);
 
-  // Custom actions (actions.toml): appended asynchronously and only when at
-  // least one action applies to this kind, mirroring the GUI's conditional
-  // "Custom actions" submenu. Definitions stay Rust-side; JS only sees
-  // {name, label} and runs by name.
+  // Custom actions (actions.toml): appended asynchronously, and only when one applies to
+  // this kind. Definitions stay Rust-side; JS sees {name, label} and runs by name.
   invoke("list_custom_actions", { kind: it.kind })
     .then((acts) => {
       if (!acts.length) return;
@@ -1318,12 +1270,10 @@ function openCommentsModal() {
   };
 }
 
-// ── actions ──────────────────────────────────────────────────────────────────
 
-// Preview an entry (j/k cursor move): cached items only — no sync, so scrolling
-// through the list never hits the network (mirrors the GUI's preview_entry).
-// Selecting also does NOT mark anything read: unread is per-item and clears as
-// items are read (selectItem).
+// Preview an entry (j/k cursor move): cached items only, so scrolling the list never hits
+// the network. It marks nothing read either — unread is per item and clears as items are
+// read.
 function previewEntry(idx) {
   state.selectedEntry = idx;
   state.selectedItemKey = null;
@@ -1335,8 +1285,7 @@ function previewEntry(idx) {
   clearDetail();
 }
 
-// Commit to an entry (click / Enter): preview plus a sync of the backing root
-// query (mirrors the GUI's select_index with always_sync).
+// Commit to an entry (click / Enter): preview plus a sync of the backing root query.
 function selectEntry(idx) {
   previewEntry(idx);
   setFocus("entries");
@@ -1349,9 +1298,8 @@ function selectEntry(idx) {
 function selectItem(it) {
   state.selectedItemKey = itemKey(it);
   setFocus("items");
-  // Mirrors the GUI's mark_current_item_read: persist via the engine, then
-  // advance the local copy so unread badges/row styling react immediately
-  // without waiting for a reload (the DB write does the same server-side).
+  // Persist via the engine, then advance the local copy so unread badges and row styling
+  // react immediately instead of waiting for a reload.
   if (isUnread(it)) {
     const e = state.entries[state.selectedEntry];
     call("mark_item_read", { queryId: e.rootQueryId, repoOwner: it.repo_owner, repoName: it.repo_name, number: it.number });
@@ -1373,7 +1321,6 @@ function selectItem(it) {
   renderDetail(it);
 }
 
-// ── entry management (CRUD / reorder / mark all read) ─────────────────────────--
 
 // Rebuild the left pane from the DB after a structural change, preserving the
 // selection by id (the engine confirms add/edit/delete/swap with a message; we
@@ -1495,11 +1442,8 @@ function entryMenu(ev, idx) {
   showContextMenu(ev.clientX, ev.clientY, items);
 }
 
-// ── keyboard navigation ──────────────────────────────────────────────────────
-//
-// One document-level keydown handler, dispatched by context (mirrors the GUI's
-// keybinding contexts: GLAUCA_CONTEXT excludes Input / comments / menus). All
-// bindings follow the TUI/GUI keymap; `?` shows the reference.
+// One document-level keydown handler, dispatched by context: modals, menus and text
+// inputs own their keys before navigation sees them. `?` shows the reference.
 
 function setFocus(f) {
   state.focus = f;
@@ -1634,8 +1578,7 @@ function handleNavKey(ev) {
       else if (state.focus === "detail") scrollDetail(-DETAIL_SCROLL_STEP);
       else moveItemCursor(-1);
       return handled();
-    // h/l cycle the three panes (entries → items → detail → entries), matching the
-    // TUI/GUI. In the detail pane j/k scroll the body (see above).
+    // h/l cycle the three panes. In the detail pane j/k scroll the body instead.
     case "h":
     case "ArrowLeft":
       setFocus(state.focus === "entries" ? "detail" : state.focus === "items" ? "entries" : "items");
@@ -1657,10 +1600,9 @@ function handleNavKey(ev) {
     case "/":
       $("filter").focus();
       return handled();
-    // Entry CRUD keys act on the selected left-pane entry, so — like the TUI/GUI,
-    // which gate these to Focus::QueryList — they only fire when the entries pane
-    // is focused. Otherwise pressing e/d/a while reading an item would edit,
-    // delete, or mark-all-read the selected query out from under the reader.
+    // Entry CRUD keys act on the selected left-pane entry, so they only fire when that
+    // pane is focused: otherwise e/d/a pressed while reading an item would edit, delete,
+    // or mark-all-read the query out from under the reader.
     case "n":
       if (state.focus === "entries") newQuery();
       return handled();
@@ -1707,8 +1649,7 @@ function handleNavKey(ev) {
       }
       return handled();
     case "r":
-      // Context-dependent like the TUI: entries → re-sync the selected entry's
-      // root query, items → re-fetch the selected item.
+      // Context-dependent: entries → re-sync the root query, items → re-fetch the item.
       if (state.focus === "entries") {
         syncEntry(e);
       } else if (it && e) {
@@ -1776,7 +1717,6 @@ function openHelpModal() {
   infoModal("Keyboard shortcuts", rows, { closeKeys: ["Escape", "q", "?"], boxClass: "help-box" });
 }
 
-// ── engine messages ────────────────────────────────────────────────────────--
 
 function handleMessage(msg) {
   const d = msg.data;
@@ -1785,9 +1725,8 @@ function handleMessage(msg) {
       const e = state.entries[state.selectedEntry];
       const isCurrent = e && e.rootQueryId === d.query_id;
       if (d.background && isCurrent) {
-        // Engine contract: defer background-sync results for the query the user
-        // is viewing so the list doesn't reshuffle under them. Hold them back and
-        // surface a banner; the user applies them on click (see updateBanner).
+        // Engine contract: defer background-sync results for the query the user is
+        // viewing, so the list doesn't reshuffle under them. A banner offers them.
         state.pending.set(d.query_id, d.items);
         updateBanner();
         break;
@@ -1831,8 +1770,7 @@ function handleMessage(msg) {
       state.syncingCount = Math.max(0, state.syncingCount - 1);
       setStatus(`sync error: ${d.error}`, true);
       break;
-    // Background-sync queue depth, shown as "N bg" in the sidebar footer (the
-    // GUI's bg_sync_pending counter).
+    // Background-sync queue depth, shown as "N bg" in the sidebar footer.
     case "BgSyncQueued":
       state.bgSyncPending += d;
       renderFooter();
@@ -1841,10 +1779,9 @@ function handleMessage(msg) {
       state.bgSyncPending = Math.max(0, state.bgSyncPending - 1);
       renderFooter();
       break;
-    // The login the startup lookup couldn't fetch (offline start) finally
-    // resolved. Until now every `@me` filter matched nothing, so redo the two
-    // things computed from it: the visible list and this query's unread badges.
-    // The Rust side has already adopted it (see main.rs), so both see the login.
+    // The login the startup lookup couldn't fetch finally resolved. Until now every `@me`
+    // filter matched nothing, so redo what was computed from it: the visible list and this
+    // query's unread badges. The Rust side has already adopted it, so both see the login.
     case "CurrentUserResolved": {
       state.currentUser = d.login;
       renderSidebarHeader(d.login, d.name, d.avatar_url);
@@ -1871,14 +1808,13 @@ function handleMessage(msg) {
   }
 }
 
-// Sidebar header: signed-in user (36px avatar + login + display name), mirroring
-// the GUI's left-pane header. Re-rendered rather than built once, because the
-// login can arrive late (see the CurrentUserResolved message).
+// Sidebar header: signed-in user (36px avatar + login + display name). Re-rendered rather
+// than built once, because the login can arrive late.
 function renderSidebarHeader(login, name, avatarUrl) {
   const header = $("sidebar-header");
   if (!login) {
-    // Not "not authenticated": an offline start fails the same way with a perfectly
-    // good token, and the engine may still be retrying. Matches the GUI's header.
+    // Not "not authenticated": an offline start fails the same way with a perfectly good
+    // token, and the engine may still be retrying.
     header.replaceChildren(el("div", { class: "who" }, [el("div", { class: "name", text: "login unknown" })]));
     return;
   }
@@ -1891,7 +1827,6 @@ function renderSidebarHeader(login, name, avatarUrl) {
   );
 }
 
-// ── settings & theme ──────────────────────────────────────────────────────--
 
 // Apply the theme to <html>: theme-light / theme-dark / theme-system. Under
 // "system", a `sys-light` class tracks the OS color scheme (see CSS).
@@ -1904,10 +1839,9 @@ function applyTheme(theme) {
   }
 }
 
-// Persist the full settings object (the TOML holds all fields, so partial
-// updates spread over the current state) and adopt it locally on success. The
-// object passes through to Rust's TauriSettings as-is — no per-field mapping
-// to keep in sync when settings grow.
+// Persist the full settings object — the TOML holds every field, so a partial update has
+// to spread over the current state — and adopt it locally on success. It passes through to
+// Rust's TauriSettings as-is, so there is no per-field mapping to keep in sync.
 function persistSettings(next) {
   return invoke("save_settings", { settings: next })
     .then(() => {
@@ -1921,9 +1855,8 @@ function setTheme(theme) {
   persistSettings({ ...state.settings, theme });
 }
 
-// Settings modal (Glauca > Settings…). Theme and notifications moved to the
-// View menu, matching the GUI; only the sync interval — which the GUI has no
-// menu equivalent for — remains here, so the generic form modal covers it.
+// Settings modal (Glauca > Settings…). Theme and notifications live in the View menu, so
+// only the sync interval remains here and the generic form modal covers it.
 async function openSettingsModal() {
   const s = state.settings;
   const out = await formModal("Settings", [
@@ -1934,11 +1867,9 @@ async function openSettingsModal() {
   setStatus("settings saved (sync interval applies on restart)");
 }
 
-// ── bootstrap ──────────────────────────────────────────────────────────────--
 
 async function main() {
-  // Debounce filtering so typing fast in a large list doesn't round-trip to the
-  // engine on every keystroke (mirrors the GUI's FILTER_DEBOUNCE).
+  // Debounce so typing fast in a large list doesn't round-trip to the engine per keystroke.
   let filterTimer = null;
   $("filter").addEventListener("input", (ev) => {
     state.filterText = ev.target.value;
@@ -1968,8 +1899,7 @@ async function main() {
   wireMenuButton("menu-view", viewMenuItems);
   wireMenuButton("menu-help", helpMenuItems);
 
-  // Right-click on the entry list's empty space → New query (the GUI's
-  // NewQueryOnly menu). Rows handle their own context menu (entryMenu).
+  // Right-click on the entry list's empty space → New query. Rows have their own menu.
   $("entries").addEventListener("contextmenu", (ev) => {
     if (ev.target.closest("li")) return;
     ev.preventDefault();
@@ -2007,9 +1937,8 @@ async function main() {
 
   renderSidebarHeader(init.current_user, init.current_user_name, init.current_user_avatar_url);
 
-  // Prime cached items (and thus unread badges) for every root query, mirroring
-  // the TUI's startup load. Skip the first entry's root query: previewEntry(0)
-  // below loads it, so priming it here would be a redundant double load.
+  // Prime cached items (and thus unread badges) for every root query. Skip the first
+  // entry's: previewEntry(0) below loads it, so priming it here would double the load.
   const firstRoot = state.entries.length ? state.entries[0].rootQueryId : null;
   const seen = new Set();
   for (const e of state.entries) {
@@ -2019,14 +1948,12 @@ async function main() {
     call("load_cached", { queryId: e.rootQueryId });
   }
 
-  // The signed-in user is shown in the sidebar header; only the unresolved case
-  // warrants a status message. It names both causes rather than instructing the
-  // user to set a token: the lookup also fails when the app starts before the
-  // network is up, and "set GH_TOKEN" would send them off fixing the wrong thing.
+  // Only the unresolved case warrants a status message, and it names both causes rather
+  // than telling the user to set a token: the lookup also fails when the app starts before
+  // the network is up, where "set GH_TOKEN" would send them off fixing the wrong thing.
   if (!state.currentUser) setStatus("GitHub login unknown (no token, or GitHub unreachable)");
   if (state.entries.length) {
-    // Startup selection mirrors the GUI: sync only if the cache is stale, then
-    // let the engine background-sync the remaining stale queries.
+    // Sync only if the cache is stale, then let the engine sweep the remaining ones.
     previewEntry(0);
     const e0 = state.entries[0];
     if (!e0.isFilterStream) {
