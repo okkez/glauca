@@ -52,13 +52,10 @@ use glauca_core::logic::{ChangeCounts, group_range, is_item_unread, move_group_d
 use glauca_core::notify::ItemTracker;
 use settings::TuiSettings;
 
-// ── Display/domain types ─────────────────────────────────────────────────────
-// Moved to glauca-core::types (framework 非依存)。TUI からは従来名で使えるよう re-export。
+// glauca-core::types を従来名で使えるよう re-export。
 pub use glauca_core::types::{
     CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
-
-// ── Application state ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
@@ -91,11 +88,9 @@ pub enum InputMode {
     Help,
 }
 
-/// Memoized result of `filter_items` for the current list. `filtered_items()`
-/// is called several times per render (list, detail, status bar) and each call
-/// otherwise re-parses the query and fuzzy-matches every item; caching the
-/// matching indices collapses those to one pass while the inputs are unchanged.
-/// Stores indices (not `&ItemEntry`) so it doesn't borrow `App::items`.
+/// Memoized result of `filter_items` for the current list. `filtered_items()` is called
+/// several times per render, and each call otherwise re-parses the query and fuzzy-matches
+/// every item. Stores indices, not `&ItemEntry`, so it doesn't borrow `App::items`.
 #[derive(Default)]
 struct FilteredCache {
     /// `(items_version, stream_filter, inline_filter, current_user)` the cached
@@ -111,11 +106,9 @@ pub struct App {
     pub entries: Vec<LeftPaneEntry>,
     pub entry_cursor: usize,
 
-    /// The visible item list. Change it structurally only through
-    /// `apply_items_to_view` / `clear_items`, which bump `items_version` to
-    /// invalidate `filtered_cache`; a direct replace/reorder here would leave the
-    /// memoized filter indices stale (in-place field edits like marking-read are
-    /// fine, since they don't affect which items match).
+    /// The visible item list. Change it structurally only through `apply_items_to_view` /
+    /// `clear_items`, which bump `items_version` to invalidate `filtered_cache`. In-place
+    /// field edits like marking-read are fine — they don't affect which items match.
     pub items: Vec<ItemEntry>,
     /// Bumped whenever `items` is replaced, to invalidate `filtered_cache`.
     items_version: u64,
@@ -137,9 +130,8 @@ pub struct App {
     pub new_query_name: SingleLineInput,
     /// Name field of the filter-stream create/edit modal (shared by new & edit).
     pub filter_stream_name: SingleLineInput,
-    /// Filter-stream OR-group boxes: each box is one AND-group, the boxes are
-    /// ORed (see `glauca_core::filter::StreamFilter`). Always at least one box.
-    /// Shared by the new & edit filter-stream modals.
+    /// Filter-stream OR-group boxes, always at least one. Shared by the new and edit
+    /// filter-stream modals.
     pub filter_stream_filters: Vec<SingleLineInput>,
     /// Display-name buffer for the Edit Query modal (field 0).
     pub edit_input: SingleLineInput,
@@ -177,23 +169,19 @@ pub struct App {
     /// Whether background-sync arrivals fire OS desktop notifications. Loaded
     /// from `TuiSettings`; toggled with `N`.
     pub notifications_enabled: bool,
-    /// Per-query session baseline for the notification "N updated" count, so the
-    /// first load of each query establishes a baseline without notifying (no
-    /// startup storm). See `glauca_core::notify::ItemTracker`.
+    /// Per-query session baseline for the notification "N updated" count.
     pub notif_tracker: ItemTracker,
     /// Active semantic-icon set (emoji/Unicode vs icon-font glyphs). Loaded from
     /// `TuiSettings::use_icon_font`; toggled with `F`.
     pub icons: Icons,
-    /// User-defined custom actions loaded from `actions.toml` (see
-    /// `glauca_core::actions`). Offered via the picker (`x`), filtered by kind.
+    /// Custom actions from `actions.toml`, offered via the `x` picker, filtered by kind.
     pub custom_actions: CustomActions,
     /// Selection cursor within the custom-action picker (indexes the list
     /// returned by `custom_actions_for_selected`).
     pub custom_action_cursor: usize,
-    /// Item keys `(repo_owner, repo_name, number)` for which a body re-fetch has
-    /// already been requested this session. Cache maintenance clears the
-    /// re-fetchable `body` of old items; when such an item is viewed we fetch it
-    /// once on demand, and this set prevents re-dispatching on every keypress.
+    /// Item keys whose body re-fetch was already requested this session. Maintenance
+    /// clears the re-fetchable `body` of old items; this set stops the on-demand fetch
+    /// from re-dispatching on every keypress.
     pub body_refresh_requested: HashSet<(String, String, i64)>,
     /// Last-rendered pane geometry, captured each frame by the `ui` draw
     /// functions so mouse events can hit-test coordinates back to a pane/row.
@@ -203,9 +191,7 @@ pub struct App {
     pub(crate) last_mouse_click: Option<(Instant, MouseTarget)>,
 }
 
-// `AppMessage` / `SyncJob` は glauca_core::engine へ移設（A6）。
-
-// ── Actions returned from key handling ───────────────────────────────────────
+// `AppMessage` / `SyncJob` は glauca_core::engine にある。
 
 enum Action {
     None,

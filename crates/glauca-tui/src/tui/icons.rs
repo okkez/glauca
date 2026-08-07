@@ -1,27 +1,21 @@
 //! Centralized semantic-icon set for the TUI.
 //!
-//! Every glyph that *represents a thing* (issue, PR, merged, approved, comment,
-//! lock, bell, search, …) is defined here once, in two variants: the default
-//! emoji/Unicode set that renders in virtually any terminal font, and an
-//! icon-font set (Font Awesome glyphs) for terminals whose font provides them
-//! (`fonts-font-awesome`, or a Nerd Font). The active set is chosen from
-//! `TuiSettings::use_icon_font` and held on `App::icons`, so draw code reads
-//! `app.icons.*` without re-deciding per frame.
+//! Every glyph that *represents a thing* is defined here once, in two variants: the default
+//! emoji/Unicode set that renders in virtually any terminal font, and an icon-font set
+//! (Font Awesome) for terminals whose font provides them. The active set is chosen from
+//! `TuiSettings::use_icon_font` and held on `App::icons`.
 //!
-//! Structural/ornamental glyphs (selection cursor ▶, separators ━ ─, bars ▌,
-//! expanders ▸) are layout chrome, not semantic icons, and stay hardcoded in
-//! `ui.rs`.
+//! Structural glyphs (selection cursor ▶, separators, bars, expanders) are layout chrome,
+//! not semantic icons, and stay hardcoded in `ui.rs`.
 
 use glauca_core::types::ActorKind;
 use ratatui::style::{Color, Style};
 
 /// The glyph for each semantic icon the TUI renders.
 ///
-/// Public fields are glyphs a call site reads directly. The fields below
-/// `mode_badge` are private and reached only through the `item_icon` /
-/// `review_*` / `pending_reviewer_icon` methods, which map a domain string
-/// (item kind+state, review state/decision) or an [`ActorKind`] to a glyph —
-/// keeping that mapping in one place instead of at every call site.
+/// Public fields are glyphs a call site reads directly. The fields below `mode_badge` are
+/// private and reached only through the `item_icon` / `review_*` / `pending_reviewer_icon`
+/// methods, which keep the domain-value→glyph mapping in one place.
 #[derive(Debug, Clone)]
 pub struct Icons {
     /// Marker shown before a saved query in the left pane: the GitHub logo in
@@ -40,11 +34,9 @@ pub struct Icons {
     /// never renders as tofu on a terminal without the icon font), `Some` in
     /// the icon-font set.
     pub mode_badge: Option<&'static str>,
-    /// Requested-but-not-yet-submitted reviewer, by actor kind. Private: reached
-    /// through `pending_reviewer_icon` so the kind→glyph mapping lives in one place.
-    /// `review_decision_badge` also reads this field directly for the
-    /// `REVIEW_REQUIRED` PR-level decision: a whole-PR review decision has no
-    /// actor kind, so there is no `pending_reviewer_icon` call to route through.
+    /// Requested-but-not-yet-submitted reviewer, by actor kind. Reached through
+    /// `pending_reviewer_icon`, except in `review_decision_badge`'s `REVIEW_REQUIRED` arm:
+    /// a whole-PR decision has no actor kind to route on.
     pending_reviewer: &'static str,
     pending_reviewer_team: &'static str,
     merged: &'static str,
@@ -94,13 +86,10 @@ impl Icons {
         }
     }
 
-    /// Font Awesome glyphs (Private Use Area), verified against
-    /// `fonts-font-awesome` 7.2.0 Solid (`fa-solid-900.ttf`, family name
-    /// "Font Awesome 6 Free"); a Nerd Font renders them too. These require an
-    /// icon font in the terminal — they render as tofu/blank otherwise.
-    /// Comments give the FA glyph name. The lone exception is `query`, a
-    /// *brands* glyph that lives in `fa-brands-400.ttf`, not the Solid font —
-    /// it needs a Nerd Font (or the brands font) to render.
+    /// Font Awesome glyphs (Private Use Area), verified against `fonts-font-awesome` 7.2.0
+    /// Solid (`fa-solid-900.ttf`, family "Font Awesome 6 Free"); a Nerd Font renders them
+    /// too. Without an icon font they render as tofu. The lone exception is `query`, a
+    /// *brands* glyph from `fa-brands-400.ttf`, which needs a Nerd Font or the brands font.
     pub fn icon_font() -> Self {
         Self {
             query: "\u{f09b}",                 // fa github (brands)
@@ -149,11 +138,9 @@ impl Icons {
         }
     }
 
-    /// Glyph for a reviewer who was requested but has not submitted a review, by
-    /// actor kind. Teams get their own glyph: the GUI distinguishes them by avatar
-    /// shape (GitHub renders non-human actors as a rounded square), which a
-    /// terminal cannot do, so without this a team is indistinguishable from a user
-    /// who has no avatar.
+    /// Glyph for a reviewer who was requested but has not submitted a review, by actor
+    /// kind. Teams get their own glyph because the GUI's cue — a squared-off avatar — has
+    /// no terminal equivalent, and without it a team reads as an avatarless user.
     pub fn pending_reviewer_icon(&self, kind: ActorKind) -> &'static str {
         match kind {
             ActorKind::Team => self.pending_reviewer_team,
@@ -161,10 +148,9 @@ impl Icons {
         }
     }
 
-    /// Combined kind+state glyph for the item list: the glyph shows the kind
-    /// (issue vs PR, with a merged PR shown as a merge), and the caller colours
-    /// it by state (see `ui::state_style`). Mirrors GitHub's single stateful
-    /// item icon, replacing a separate state dot + kind icon shown side by side.
+    /// Combined kind+state glyph for the item list: the glyph shows the kind (issue vs PR,
+    /// with a merged PR shown as a merge), and the caller colours it by state (see
+    /// `ui::state_style`), like GitHub's single stateful item icon.
     pub fn item_icon(&self, kind: &str, state: &str) -> &'static str {
         match (kind, state) {
             ("pull_request", "merged") => self.merged,
@@ -210,8 +196,8 @@ mod tests {
 
     #[test]
     fn both_sets_distinguish_teams_from_users() {
-        // The GUI tells a team from a user by avatar shape; a terminal can only do it
-        // by glyph, so neither set may reuse one glyph for both.
+        // A terminal can only tell a team from a user by glyph, so neither set may reuse
+        // one glyph for both.
         for icons in [Icons::unicode(), Icons::icon_font()] {
             assert_ne!(
                 icons.pending_reviewer_icon(ActorKind::Team),

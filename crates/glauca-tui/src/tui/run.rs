@@ -27,22 +27,18 @@ pub async fn run(pool: SqlitePool, gh: Octocrab) -> Result<()> {
 /// Hand the terminal back (see [`leave_tui`]) before the default hook prints the
 /// panic message.
 ///
-/// Without this a panic anywhere in the draw path (tui-markdown has been one
-/// such source) leaves the terminal in raw mode on the alternate screen with the
-/// cursor hidden: the message is painted over the TUI and then wiped, and the
-/// shell that comes back echoes nothing and shows no cursor. The teardown in
-/// `run` cannot cover it, because release builds use `panic = "abort"` and never
-/// unwind.
+/// Without this a panic anywhere in the draw path (tui-markdown has been one such source)
+/// leaves the terminal in raw mode on the alternate screen with the cursor hidden, so the
+/// shell that comes back echoes nothing. The teardown in `run` cannot cover it, because
+/// release builds use `panic = "abort"` and never unwind.
 ///
-/// The hook fires for a panic on any thread, including the engine's background
-/// tasks, because under abort one of those takes the process down too and leaving
-/// the terminal wrecked is the outcome this exists to prevent.
+/// The hook fires for a panic on any thread, including the engine's background tasks, since
+/// under abort one of those takes the process down too.
 ///
-/// TODO(known limitation, debug builds only): there tokio catches a background
-/// task's panic, so the TUI keeps drawing into a terminal this has just reset.
-/// Accepted rather than gated on the UI thread: the engine treats task failure as
-/// unrecoverable anyway, so a visibly broken session beats one that looks fine and
-/// has silently stopped syncing.
+/// TODO(known limitation, debug builds only): there tokio catches a background task's
+/// panic, so the TUI keeps drawing into a terminal this has just reset. Accepted rather than
+/// gated on the UI thread: the engine treats task failure as unrecoverable anyway, so a
+/// visibly broken session beats one that looks fine and has silently stopped syncing.
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -59,8 +55,7 @@ async fn run_app<B: ratatui::backend::Backend + io::Write>(
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    // Start the async engine: builds the left-pane entries, resolves the current
-    // user, and spawns the background worker / refresh timer / command loop.
+    // Start the async engine: left-pane entries, current user, background tasks.
     let tui_settings = TuiSettings::load();
     let (mut engine, init) = Engine::start(
         pool,
@@ -121,11 +116,9 @@ where
 
     let mut events = EventStream::new();
 
-    // Repaint only when something changed. Default to repainting after every
-    // handled event; the one exception is a mouse event we don't act on (motion/
-    // drag, which crossterm's any-motion tracking emits in bursts), which opts
-    // out below. Defaulting on means a future event arm can't silently freeze the
-    // UI by forgetting to request a redraw.
+    // Default to repainting after every handled event; the one exception is a mouse event
+    // we don't act on (motion/drag, which crossterm emits in bursts), which opts out below.
+    // Defaulting on means a new event arm can't silently freeze the UI.
     let mut needs_redraw = true;
 
     loop {
@@ -141,16 +134,15 @@ where
                     // click that happens to follow (e.g. after closing a modal
                     // opened with Enter) isn't mistaken for a double-click.
                     app.last_mouse_click = None;
-                    // Ignore key-release events. Terminals with the keyboard-
-                    // enhancement protocol (or Windows) emit them, and acting on
-                    // both press and release would double-fire actions like
-                    // 'd'/'J'/'K'. Repeat events are kept so held-key repeat still
-                    // works if enhancement flags are ever enabled.
+                    // Ignore key-release events: terminals with the keyboard-enhancement
+                    // protocol (or Windows) emit them, and acting on both press and
+                    // release would double-fire 'd'/'J'/'K'. Repeat events are kept so
+                    // held-key repeat still works if enhancement flags are enabled.
                     if key.kind == KeyEventKind::Release {
                         continue;
                     }
-                    // 'd' in query list → delete selected entry (UI updates on the
-                    // QueryDeleted / FilterStreamDeleted message once the DB op succeeds).
+                    // 'd' in query list → delete the selected entry; the UI updates on the
+                    // engine's *Deleted message once the DB write succeeds.
                     if key.code == KeyCode::Char('d')
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
@@ -170,11 +162,9 @@ where
                         continue;
                     }
 
-                    // 'a' in query list → mark all items of the selected entry read.
-                    // A query marks its whole root query; a filter stream marks only
-                    // its matching items (filter expanded with the current user here,
-                    // since the engine does not know `@me`). The engine persists and
-                    // reloads the query, which refreshes unread counts via ItemsLoaded.
+                    // 'a' in query list → mark the selected entry read: a query marks its
+                    // whole root query, a filter stream only its matching items, with the
+                    // filter expanded here since the engine does not know `@me`.
                     if key.code == KeyCode::Char('a')
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
@@ -194,9 +184,8 @@ where
                         continue;
                     }
 
-                    // J/K: move selected entry up/down within its group. The DB swap
-                    // runs through the engine; the entries vec is reordered on the
-                    // QueriesSwapped / FilterStreamsSwapped confirmation message.
+                    // J/K: move the selected entry within its group. The entries vec is
+                    // reordered only on the engine's *Swapped confirmation.
                     if (key.code == KeyCode::Char('J') || key.code == KeyCode::Char('K'))
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
@@ -496,9 +485,8 @@ where
                         refresh_focused_item(&mut app, &engine).await;
                     }
                 } else if let Event::Mouse(mouse) = event {
-                    // Mouse is only handled in Normal mode; while a modal/menu is
-                    // open, clicks and wheel events are ignored. `handle_mouse`
-                    // returns None for events we don't act on (motion/drag/etc.).
+                    // Mouse is only handled in Normal mode. `handle_mouse` returns None
+                    // for events we don't act on (motion/drag/etc.).
                     if app.input_mode == InputMode::Normal
                         && let Some(action) = handle_mouse(&mut app, mouse)
                     {
@@ -533,10 +521,9 @@ where
     Ok(())
 }
 
-/// Load the currently selected left-pane entry into the item list, resetting the
-/// filter and cursors. `always_sync` forces a GitHub fetch (deliberate select);
-/// when false, only stale caches are synced (wheel scrolling). Shared by the
-/// `LoadEntry`/`LoadEntryCached` key actions and mouse interaction.
+/// Load the currently selected left-pane entry into the item list, resetting the filter and
+/// cursors. `always_sync` forces a GitHub fetch (a deliberate select); when false, only
+/// stale caches are synced (wheel scrolling).
 async fn load_selected_entry(app: &mut App, engine: &Engine, always_sync: bool) {
     app.filter = SingleLineInput::new();
     app.item_cursor = 0;
@@ -545,9 +532,8 @@ async fn load_selected_entry(app: &mut App, engine: &Engine, always_sync: bool) 
     select_current_entry(app, engine, always_sync).await;
 }
 
-/// After a selection change, mark the focused item read and lazily fetch its
-/// body if missing — a no-op unless an item pane is focused. Single-sources the
-/// post-selection tail shared by the key and mouse paths.
+/// After a selection change, mark the focused item read and lazily fetch its body if
+/// missing — a no-op unless an item pane is focused. Shared by the key and mouse paths.
 async fn refresh_focused_item(app: &mut App, engine: &Engine) {
     if matches!(app.focus, Focus::ItemList | Focus::ItemDetail) {
         mark_selected_item_read(app, engine).await;

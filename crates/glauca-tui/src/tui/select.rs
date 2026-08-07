@@ -1,14 +1,10 @@
-//! Left-pane selection plumbing: reordering entries within their group, and
-//! (re)loading / refreshing the items backing the currently selected entry via
-//! engine commands. These drive the async engine; the entries vec and item list
-//! are updated later when the engine confirms with the matching `AppMessage`.
+//! Left-pane selection plumbing: reordering entries within their group, and (re)loading the
+//! items backing the selected entry. These only send engine commands; the entries vec and
+//! item list are updated later, when the engine confirms with the matching `AppMessage`.
 
 use super::*;
 
-// 非同期タスク（run_background_command/execute_*/load_items_task/sync_task/
-// sync_worker_task/refresh_timer_task）は glauca_core::engine へ移設（A6）。
-
-// ── Query group reordering helpers ───────────────────────────────────────────
+// 非同期タスク（load_items_task/sync_task/sync_worker_task 等）は glauca_core::engine にある。
 
 /// Position-swap command for moving the entry at `cursor` up (`down=false`) or
 /// down within its group: a query swaps with the adjacent query group, a filter
@@ -91,9 +87,8 @@ struct SelectedEntryLoad {
 
 fn prepare_selected_entry_load(app: &mut App) -> Option<SelectedEntryLoad> {
     let entry = app.entries.get(app.entry_cursor)?.clone();
-    // Selecting an entry does NOT mark it viewed: the unread badge is kept and
-    // cleared per-item as items are read (see `mark_selected_item_read`). Only the
-    // stream filter is updated here.
+    // Selecting an entry does NOT mark it viewed: badges clear per item as items are read
+    // (see `mark_selected_item_read`). Only the stream filter is updated here.
     app.stream_filter = entry.stream_filter().map(|s| s.to_string());
     // Switching entries invalidates any held-back update for the previous one.
     app.clear_pending();
@@ -105,11 +100,9 @@ fn prepare_selected_entry_load(app: &mut App) -> Option<SelectedEntryLoad> {
     })
 }
 
-/// Issue the engine commands to (re)load the currently selected entry: load cached
-/// items and—for root queries—sync. With `always_sync`, sync unconditionally (and
-/// show the indicator immediately); otherwise sync only if the cache is stale.
-/// Returns the root query id when a query (not a filter stream) was selected, so the
-/// caller can skip it from the background-refresh sweep.
+/// Issue the engine commands to (re)load the currently selected entry. With `always_sync`,
+/// sync unconditionally and show the indicator immediately; otherwise only if the cache is
+/// stale. Returns the root query id for a query, so the caller can skip it in the sweep.
 pub(crate) async fn select_current_entry(
     app: &mut App,
     engine: &Engine,
@@ -144,9 +137,8 @@ pub(crate) async fn select_current_entry(
     Some(load.root_id)
 }
 
-/// The query string of the root query with `root_id`, found in the left-pane
-/// entries. Used to re-sync the list backing a filter stream (which has no
-/// query string of its own).
+/// The query string of the root query with `root_id` — needed to re-sync the list backing
+/// a filter stream, which has no query string of its own.
 fn root_query_str(app: &App, root_id: i64) -> Option<String> {
     app.entries.iter().find_map(|e| match e {
         LeftPaneEntry::Query(q) if q.id == root_id => Some(q.query_str.clone()),
@@ -214,12 +206,10 @@ pub(crate) async fn refresh_selected_item(app: &mut App, engine: &Engine) {
 
 /// Transparently re-fetch the body of the viewed item when it is missing.
 ///
-/// Cache maintenance clears the re-fetchable `body` of old items to save space
-/// (see `glauca_core::db::clear_stale_bodies`); a `None` body therefore means
-/// "cleared", not "no description" (an empty description is stored as `Some("")`).
-/// When such an item is viewed we fetch it once via `RefreshItem`; the reload
-/// repopulates the detail pane. `body_refresh_requested` dedups repeat calls
-/// because the caller runs on every keypress.
+/// Cache maintenance clears the re-fetchable `body` of old items, so a `None` body means
+/// "cleared", not "no description" — an empty description is stored as `Some("")`. Fetched
+/// once via `RefreshItem`; `body_refresh_requested` dedups, since the caller runs on every
+/// keypress.
 pub(crate) async fn refetch_selected_body_if_missing(app: &mut App, engine: &Engine) {
     let Some(item) = app.selected_item() else {
         return;
@@ -245,10 +235,9 @@ pub(crate) async fn refetch_selected_body_if_missing(app: &mut App, engine: &Eng
         .await;
 }
 
-/// Mark the item under the cursor read (it is shown in the detail pane): record the
-/// `updated_at` it was read at, clear its in-memory `is_new`, recompute the current
-/// query's unread badges, and persist via the engine (fire-and-forget). No-op if
-/// there is no selection or the item is already read (not currently unread).
+/// Mark the item under the cursor read: record the `updated_at` it was read at, clear its
+/// in-memory `is_new`, recompute the query's unread badges, and persist via the engine
+/// (fire-and-forget). No-op without a selection or on an already-read item.
 pub(crate) async fn mark_selected_item_read(app: &mut App, engine: &Engine) {
     let Some(item) = app.selected_item().cloned() else {
         return;

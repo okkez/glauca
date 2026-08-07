@@ -1,8 +1,7 @@
-//! Mouse event handling: hit-testing click/scroll coordinates against the
-//! last-rendered pane regions and translating them into the same `Action`s and
-//! cursor moves that `handle_key_normal` produces. The `MouseRegions` here are
-//! populated by the `ui` draw functions each frame (layout is otherwise never
-//! stored), so this module is the read side of that render-time bookkeeping.
+//! Mouse event handling: hit-testing click/scroll coordinates against the last-rendered
+//! pane regions and translating them into the same `Action`s `handle_key_normal` produces.
+//! The `MouseRegions` are populated by the `ui` draw functions each frame — layout is
+//! otherwise never stored — so this module is the read side of that bookkeeping.
 
 use super::*;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -12,10 +11,9 @@ use std::time::{Duration, Instant};
 /// Two left-clicks on the same target within this window count as a double-click.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
-/// Rendered pane geometry captured during `ui::draw`, used to map a mouse
-/// coordinate back to a pane/row. The item list has variable-height rows, so it
-/// needs the per-row heights plus the list's scroll offset (both recorded after
-/// the stateful render) to reconstruct which row a `y` falls in.
+/// Rendered pane geometry captured during `ui::draw`, used to map a mouse coordinate back
+/// to a pane/row. The item list has variable-height rows, so it needs the per-row heights
+/// plus the scroll offset — both recorded after the stateful render — to resolve a `y`.
 #[derive(Default)]
 pub(crate) struct MouseRegions {
     /// Left pane whole column. A click here that misses a row still focuses the
@@ -112,11 +110,10 @@ pub(crate) fn hit_test(regions: &MouseRegions, col: u16, row: u16) -> MouseTarge
     MouseTarget::None
 }
 
-/// Translate a mouse event into focus/cursor changes plus an [`Action`] for the
-/// run loop to carry out (mirrors `handle_key_normal`). Returns `None` for events
-/// we don't act on (motion, drag, button-up, non-left buttons) so the run loop
-/// can skip an otherwise-wasted redraw — mouse capture reports motion events,
-/// which would otherwise repaint the whole UI on every pointer move.
+/// Translate a mouse event into focus/cursor changes plus an [`Action`] for the run loop.
+/// Returns `None` for events we don't act on (motion, drag, button-up, non-left buttons) so
+/// the run loop can skip the redraw — mouse capture reports motion, which would otherwise
+/// repaint the whole UI on every pointer move.
 pub(crate) fn handle_mouse(app: &mut App, me: MouseEvent) -> Option<Action> {
     match me.kind {
         MouseEventKind::Down(MouseButton::Left) => Some(on_left_down(app, me.column, me.row)),
@@ -129,9 +126,8 @@ pub(crate) fn handle_mouse(app: &mut App, me: MouseEvent) -> Option<Action> {
 fn on_left_down(app: &mut App, col: u16, row: u16) -> Action {
     let target = hit_test(&app.mouse_regions.borrow(), col, row);
 
-    // Double-click = a second press on the same target within the window. Reset
-    // the window once it fires so a third rapid click starts a fresh pair (rather
-    // than counting as yet another double-click).
+    // Double-click = a second press on the same target within the window. Reset once it
+    // fires so a third rapid click starts a fresh pair.
     let is_double_click = matches!(
         app.last_mouse_click,
         Some((at, prev)) if prev == target && at.elapsed() < DOUBLE_CLICK_WINDOW
@@ -182,9 +178,9 @@ fn on_left_down(app: &mut App, col: u16, row: u16) -> Action {
     }
 }
 
-/// Scroll the pane under the cursor by one notch, mirroring `j`/`k`. Focus moves
-/// to the scrolled pane so the run loop's item-focus post-processing (mark-read /
-/// lazy body fetch) runs, matching keyboard navigation.
+/// Scroll the pane under the cursor by one notch, mirroring `j`/`k`. Focus moves to the
+/// scrolled pane so the run loop's item-focus post-processing (mark-read / lazy body fetch)
+/// runs, as it does for keyboard navigation.
 fn on_scroll(app: &mut App, col: u16, row: u16, down: bool) -> Action {
     let target = hit_test(&app.mouse_regions.borrow(), col, row);
     match target {
@@ -347,8 +343,8 @@ mod tests {
 
     #[test]
     fn hit_test_blank_area_below_last_item_is_pane() {
-        // Rows occupy y 1..9 (heights 3+3+2); a click on the blank y=9 inside the
-        // list interior falls through to ItemPane, not an item.
+        // Rows occupy y 1..9 (heights 3+3+2), so a click on the blank y=9 inside the list
+        // interior falls through to ItemPane, not an item.
         let r = regions();
         assert_eq!(hit_test(&r, 25, 9), MouseTarget::ItemPane);
     }
@@ -419,8 +415,7 @@ mod tests {
             ..Default::default()
         };
         app.focus = Focus::QueryList;
-        // Wheel over the item list focuses it, so the run loop's item-focus
-        // post-processing (mark-read) runs.
+        // Wheel over the item list focuses it, so the run loop's mark-read step runs.
         handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 25, 1));
         assert_eq!(app.focus, Focus::ItemList);
         // Wheel over the detail pane focuses it.
