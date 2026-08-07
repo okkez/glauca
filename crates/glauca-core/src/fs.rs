@@ -6,25 +6,18 @@ use std::path::Path;
 /// Write `contents` to `path` atomically, creating the parent directory if
 /// needed.
 ///
-/// The write goes to a temp file next to `path` and is then `rename`d into
-/// place, rather than a direct `fs::write`, which truncates then writes: a
-/// crash or a concurrent writer mid-write could otherwise leave a half-written
-/// file, and callers that treat any parse failure as "reset to defaults" would
-/// silently lose every setting. `rename` within the same directory is atomic,
-/// so a reader sees either the old file or the fully-written new one, never a
-/// torn one. The temp name is process-scoped so two glauca instances don't
-/// clobber each other's temp file.
+/// Writes to a temp file next to `path` and `rename`s it into place, rather than a direct
+/// `fs::write`, which truncates first: a crash mid-write would leave a half-written file,
+/// and callers that treat a parse failure as "reset to defaults" would silently lose every
+/// setting. `rename` within one directory is atomic, so a reader sees the old file or the
+/// new one, never a torn one. The temp name is process-scoped so two glauca instances
+/// don't clobber each other's.
 ///
-/// On a failed `rename` the temp file is removed so it doesn't linger, and the
-/// original error is returned.
-///
-/// Note: this is crash-atomic, not power-loss-durable — neither the temp file
-/// nor the parent directory is `fsync`ed. That is fine for best-effort
-/// presentation settings; add `fsync` here if durability ever matters.
+/// Crash-atomic, not power-loss-durable: neither the temp file nor the parent directory is
+/// `fsync`ed. Fine for presentation settings; add `fsync` if durability ever matters.
 pub fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
-    // Validate the path up front, before creating any directory: without a file
-    // name we can't derive a temp name, so fail fast rather than leaving a new
-    // empty directory behind on invalid input.
+    // Validated before creating any directory: without a file name there is no temp name
+    // to derive, so fail fast rather than leaving an empty directory behind.
     let file_name = path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -83,8 +76,7 @@ mod tests {
 
     #[test]
     fn errors_on_path_with_no_file_name() {
-        // A path ending in `..` (or empty) has no file name, so no temp name can
-        // be derived — the helper must return an error rather than panic.
+        // A path ending in `..` has no file name, so no temp name can be derived.
         let err = atomic_write(Path::new(".."), "x = 0").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }

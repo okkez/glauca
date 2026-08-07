@@ -22,9 +22,8 @@ pub struct FilterStreamEntry {
 
 /// A single row in the left pane — either a root query or a filter stream.
 ///
-/// Serialized adjacently tagged (`{"type": "Query", "data": {…}}`) so web
-/// front-ends (glauca-tauri) can branch on `entry.type` without colliding with
-/// the inner `kind` field.
+/// Serialized adjacently tagged (`{"type": "Query", "data": {…}}`) so glauca-tauri can
+/// branch on `entry.type` without colliding with the inner `kind` field.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum LeftPaneEntry {
@@ -40,9 +39,8 @@ impl LeftPaneEntry {
         }
     }
 
-    /// Key for the per-entry unread-count map. Query and filter-stream ids come
-    /// from separate tables and can collide as raw i64 (e.g. query #1 and filter
-    /// stream #1), so the kind discriminant is included to keep them distinct.
+    /// Key for the per-entry unread-count map. Query and filter-stream ids come from
+    /// separate tables and collide as raw i64, so the discriminant keeps them distinct.
     pub fn unread_key(&self) -> (bool, i64) {
         (self.is_filter_stream(), self.id())
     }
@@ -83,14 +81,12 @@ impl LeftPaneEntry {
     }
 }
 
-/// Whether a referenced actor is a person or a team. GitHub's review-request
-/// union is `User | Team`, and the two are rendered differently (a circle vs a
-/// rounded square), so the distinction has to survive into the cache.
+/// Whether a referenced actor is a person or a team. GitHub's review-request union is
+/// `User | Team`, and the two are rendered differently (a circle vs a rounded square), so
+/// the distinction has to survive into the cache.
 ///
-/// Absent from cache rows written before this field existed; `Default` makes
-/// those decode as users, which is the safe direction — a real user rendered as
-/// a team would be wrong, while a team rendered as a user is what already
-/// happened before this field existed.
+/// Absent from rows written before this field existed; `Default` decodes those as users,
+/// the safe direction — a real user rendered as a team would be wrong.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorKind {
@@ -147,16 +143,14 @@ pub struct ItemEntry {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
-    /// The `updated_at` the user had seen when they last read this item, persisted
-    /// per cached row. `None` means never read. The item is unread (and highlighted
-    /// as new) iff `updated_at` is newer than this — see `logic::is_item_unread`.
+    /// The `updated_at` the user had seen when they last read this item. `None` means
+    /// never read; the item is unread iff `updated_at` is newer — `logic::is_item_unread`.
     pub last_read_updated_at: Option<String>,
     pub is_new: bool,
 }
 
 impl ItemEntry {
-    /// The canonical `"owner/name"` repository string used across the UI and
-    /// filters. Centralized so the format lives in one place.
+    /// The canonical `"owner/name"` repository string used across the UI and filters.
     pub fn repo_display(&self) -> String {
         format!("{}/{}", self.repo_owner, self.repo_name)
     }
@@ -182,9 +176,8 @@ pub enum ItemAction {
     CopyUrl,
     /// Re-fetch just this item from GitHub. Offered by both front-ends.
     RefreshItem,
-    /// Launch the external `octorus` (`or`) PR-review TUI for this item. Offered
-    /// only by the TUI front-end (see `glauca-tui`'s `item_actions`), never added
-    /// to `available_for` so it stays out of the GUI menu.
+    /// Launch the external `octorus` (`or`) PR-review TUI. Offered only by the TUI
+    /// front-end, so it is deliberately absent from `available_for`.
     ReviewOctorus,
 }
 

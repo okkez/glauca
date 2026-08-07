@@ -1,14 +1,12 @@
 //! User-defined custom actions.
 //!
-//! A custom action runs an arbitrary command against the selected PR/Issue,
-//! substituting item fields (repo, number, kind, url, …) into the command's
-//! argv. Definitions live in a shared TOML file under the user config dir so
-//! both front-ends (TUI/GUI) read the same list. This is a generic hook: the
-//! command is run as-is (no shell), so `gh` and user scripts can be invoked
-//! directly.
+//! A custom action runs an arbitrary command against the selected PR/Issue, substituting
+//! item fields into the command's argv. Definitions live in a shared TOML file under the
+//! user config dir so every front-end reads the same list. The command is run as-is, with
+//! no shell.
 //!
-//! Reads are best-effort — a missing file yields an empty list; a corrupt one
-//! logs a warning and yields empty.
+//! Reads are best-effort — a missing file yields an empty list; a corrupt one logs a
+//! warning and yields empty.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -99,9 +97,8 @@ impl CustomActions {
     }
 }
 
-/// Build the template substitution context for an item. All values are scalar
-/// strings; list-valued fields (labels, reviewers) are intentionally omitted as
-/// they do not map cleanly onto argv.
+/// Build the template substitution context for an item. All values are scalar strings;
+/// list-valued fields (labels, reviewers) are omitted — they do not map onto argv.
 pub fn build_action_context(item: &ItemEntry) -> BTreeMap<&'static str, String> {
     let mut ctx = BTreeMap::new();
     ctx.insert("owner", item.repo_owner.clone());
@@ -134,9 +131,8 @@ pub fn build_action_context(item: &ItemEntry) -> BTreeMap<&'static str, String> 
 /// trimmed. An unknown key or an unclosed `{{` is an error (surfacing config
 /// typos rather than silently producing a wrong command).
 pub fn render_template(tmpl: &str, ctx: &BTreeMap<&'static str, String>) -> anyhow::Result<String> {
-    // Note: `{{{{` / `}}}}` in the error format strings below are `format!`
-    // escapes — each doubled brace renders as a single literal `{` / `}`, so the
-    // messages show the real `{{ key }}` syntax back to the user.
+    // `{{{{` / `}}}}` in the error strings below are `format!` escapes: each doubled brace
+    // renders as one literal brace, so the messages show real `{{ key }}` syntax.
     let mut out = String::with_capacity(tmpl.len());
     let mut rest = tmpl;
     while let Some(start) = rest.find("{{") {
@@ -189,8 +185,7 @@ mod tests {
         assert!(render_template("{{ repo_full", &sample_ctx()).is_err());
     }
 
-    /// A minimal action with a fixed command and no label, for exercising
-    /// `display_label` / `matches_kind`.
+    /// A minimal action with a fixed command and no label.
     fn action(name: &str, kinds: &[&str]) -> CustomAction {
         CustomAction {
             name: name.into(),

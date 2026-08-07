@@ -1,15 +1,11 @@
 //! Desktop-notification support shared by the TUI and GUI front-ends.
 //!
-//! Two pieces live here, both framework-independent (no ratatui/gpui/db deps):
-//! - [`ItemTracker`], a per-query session baseline that decides *how many* new
-//!   or updated items a background sync surfaced (matching the `updated` half of
-//!   the click-to-refresh banner's `logic::ChangeCounts`, and only that half —
-//!   see [`ItemTracker::observe`]), and
-//! - [`notify_updated_items`], the best-effort OS notification primitive.
+//! [`ItemTracker`] is a per-query session baseline counting how many items a background
+//! sync surfaced — the `updated` half of `logic::ChangeCounts` and only that half, see
+//! [`ItemTracker::observe`]. [`notify_updated_items`] is the OS notification primitive.
 //!
-//! The *decision* to fire (the on/off toggle, the `background` flag) stays in
-//! each front-end's message handler — this module only provides the mechanism,
-//! analogous to `logic.rs`. `engine.rs` never calls it.
+//! The *decision* to fire (the on/off toggle, the `background` flag) stays in each
+//! front-end's message handler; `engine.rs` never calls this module.
 
 use std::collections::HashMap;
 
@@ -22,10 +18,9 @@ type ItemKey = (String, String, i64);
 /// Per-query, in-memory baseline of the items last seen *this session*, used to
 /// count how many items a background sync newly surfaced or changed.
 ///
-/// Kept per session (not persisted): the goal is to notify about changes that
-/// arrive *while the app runs*, not to replay everything unread since last
-/// launch. The first observation of a query only establishes the baseline and
-/// never notifies, which suppresses the startup "everything is new" storm.
+/// Kept per session, not persisted: the goal is to notify about changes that arrive
+/// *while the app runs*, not to replay everything unread since last launch. The first
+/// observation only establishes the baseline, suppressing a startup notification storm.
 #[derive(Default)]
 pub struct ItemTracker {
     /// query_id -> (item key -> its last-seen `updated_at`).
@@ -37,19 +32,17 @@ impl ItemTracker {
         Self::default()
     }
 
-    /// Record the latest `items` for `query_id` and return how many are new or
-    /// updated versus the previous snapshot — counting items whose key is
-    /// absent, or whose `updated_at` changed (the same rule as
-    /// [`crate::logic::ChangeCounts::updated`]).
+    /// Record the latest `items` for `query_id` and return how many are new or updated
+    /// versus the previous snapshot — the same rule as
+    /// [`crate::logic::ChangeCounts::updated`].
     ///
-    /// Only the fresh side is walked, so *removals are never counted* and a sync
-    /// that merely pruned items the query stopped matching cannot fire a
-    /// notification. That divergence from [`crate::logic::count_changes`] — which
-    /// does count removals, to drive the banner — is deliberate: a disappearing
-    /// item is not something to interrupt the user about.
+    /// Only the fresh side is walked, so *removals are never counted* and a sync that
+    /// merely pruned cannot fire a notification. The divergence from
+    /// [`crate::logic::count_changes`], which does count removals for the banner, is
+    /// deliberate: a disappearing item is not worth interrupting the user about.
     ///
-    /// Returns `None` on the first observation of a query this session: that
-    /// call only establishes the baseline, so callers must not notify on it.
+    /// Returns `None` on the first observation of a query this session — that call only
+    /// establishes the baseline, so callers must not notify on it.
     pub fn observe(&mut self, query_id: i64, items: &[ItemEntry]) -> Option<usize> {
         let snapshot: HashMap<ItemKey, String> = items
             .iter()
@@ -78,11 +71,10 @@ impl ItemTracker {
     /// Observe `items` (always updating the baseline) and return the count to
     /// put in a desktop notification, or `None` if none should fire.
     ///
-    /// A notification fires only when this load came from a `background` sync,
-    /// `enabled` is set, and at least one item is new or updated since the
-    /// previous snapshot. The baseline is maintained even when `enabled` is
-    /// false, so toggling notifications on mid-session diffs against what was
-    /// already seen rather than re-announcing everything.
+    /// Fires only when this load came from a `background` sync, `enabled` is set, and at
+    /// least one item is new or updated. The baseline is maintained even when `enabled` is
+    /// false, so toggling notifications on mid-session diffs against what was already seen
+    /// rather than re-announcing everything.
     pub fn changed_count_to_notify(
         &mut self,
         query_id: i64,
@@ -97,12 +89,9 @@ impl ItemTracker {
 
 /// Show a best-effort OS desktop notification for new/updated items in a query.
 ///
-/// `count` follows the new+updated semantics of `ChangeCounts::updated` (removals
-/// excluded), so the wording ("N updated") matches. Synchronous — on Linux it's a
-/// blocking D-Bus round-trip — so callers should run it off their UI/event
-/// loop. Any error (no notification daemon, etc.) is intentionally non-fatal —
-/// a missing notification must never crash or stall the front-end — but it is
-/// logged so a silent notification outage is diagnosable.
+/// Synchronous — on Linux a blocking D-Bus round-trip — so callers must run it off their
+/// UI/event loop. Any error (no notification daemon, etc.) is non-fatal but logged, so a
+/// silent notification outage stays diagnosable.
 pub fn notify_updated_items(query_name: &str, count: usize) {
     if let Err(e) = notify_rust::Notification::new()
         .summary("Glauca")
@@ -132,14 +121,11 @@ mod tests {
     fn first_observation_only_establishes_baseline() {
         let mut tracker = ItemTracker::new();
         let items = vec![item("o", "r", 1, "t1"), item("o", "r", 2, "t1")];
-        // First load for the query never notifies, even with items present.
         assert_eq!(tracker.observe(7, &items), None);
     }
 
-    /// A sync that only pruned items must not notify: `observe` walks the fresh
-    /// side only, so a shrinking list counts as zero changes. This is the property
-    /// that keeps `logic::count_changes` (which does count removals, for the
-    /// banner) from leaking into desktop notifications.
+    /// A sync that only pruned must not notify: `observe` walks the fresh side only, so a
+    /// shrinking list counts as zero changes.
     #[test]
     fn removals_never_notify() {
         let mut tracker = ItemTracker::new();
