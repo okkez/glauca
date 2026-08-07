@@ -1,18 +1,14 @@
 //! glauca-tauri — a web-tech (HTML/CSS/JS) front-end for glauca built on Tauri.
 //!
-//! Like `glauca-tui` and `glauca-gui`, this is a thin shell over the shared
-//! `glauca-core` engine. The wiring has two halves:
+//! The wiring has two halves:
 //!
-//!   * front-end → engine: JavaScript calls `invoke('<command>', …)`, handled by
-//!     the `#[tauri::command]` functions in [`commands`], which forward an
-//!     [`EngineCommand`] on the engine's channel.
+//!   * front-end → engine: JavaScript calls `invoke('<command>', …)`, handled by the
+//!     `#[tauri::command]` functions in [`commands`].
 //!   * engine → front-end: a background task drains `engine.recv()` and emits each
-//!     `AppMessage` as the `app-message` Tauri event, which the front-end listens
-//!     for and folds into its UI state.
+//!     `AppMessage` as the `app-message` Tauri event.
 //!
-//! The engine is started before the Tauri event loop (via the Tauri-managed async
-//! runtime). `glauca-core` owns all DB / network / process work, so this crate has
-//! no business logic of its own.
+//! The engine is started before the Tauri event loop, on the Tauri-managed async runtime,
+//! so its spawned tasks share that runtime with the async command handlers.
 
 mod commands;
 mod settings;
@@ -32,31 +28,28 @@ use tauri::Emitter;
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// Path to the cache database. Takes precedence over the GLAUCA_DB_PATH
-    /// environment variable; both default to <data dir>/glauca/cache.db.
+    /// Path to the cache database. Takes precedence over the GLAUCA_DB_PATH environment
+    /// variable; both default to <data dir>/glauca/cache.db.
     ///
-    /// Via `cargo tauri dev` the flag needs two separators to get past both cargo
-    /// and the Tauri CLI: `cargo tauri dev -- -- --db-path PATH`.
+    /// Via `cargo tauri dev` the flag needs two separators to get past both cargo and the
+    /// Tauri CLI: `cargo tauri dev -- -- --db-path PATH`.
     #[arg(long, value_name = "PATH")]
     db_path: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
-    // Parse args first so `--version`/`--help` print and exit before we touch the log
-    // dir, DB, or TLS provider (mirrors glauca-tui / glauca-gui).
+    // Parse args first so `--version`/`--help` print and exit before we touch the log dir,
+    // DB, or TLS provider.
     let cli = Cli::parse();
 
     let _log_guard =
         glauca_core::logging::init("glauca-tauri", "glauca_core=info,glauca_tauri=info");
     tracing::info!("glauca-tauri starting");
 
-    // rustls needs a process-level CryptoProvider; with both aws-lc-rs and ring in
-    // the graph it can't auto-select. Install ring before any TLS use (mirrors the
-    // TUI/GUI front-ends). Ignore the error if already set.
+    // rustls needs a process-level CryptoProvider, and with both aws-lc-rs and ring in the
+    // graph it can't auto-select. Install ring before any TLS use.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Honor the user's persisted settings (same per-front-end TOML pattern as
-    // glauca-tui / glauca-gui), falling back to the shared core defaults.
     let settings = settings::TauriSettings::load();
     let sync = glauca_core::engine::SyncConfig::effective(
         settings.sync_interval_secs,
@@ -67,15 +60,11 @@ fn main() -> anyhow::Result<()> {
         settings.max_items_per_query,
     );
 
-    // Bring up DB + GitHub client + engine on the Tauri-managed tokio runtime, so
-    // the engine's internal `tokio::spawn` tasks share that runtime with the async
-    // command handlers below.
     let (engine, init_entries, current_user, pool, query_names) =
         tauri::async_runtime::block_on(async {
             let pool = db::open_pool(&db::resolve_db_path(cli.db_path)).await?;
             let gh_client = github::build_client()?;
-            // Keep a clone for AppState (rebuilding the left pane via list_entries);
-            // the engine takes ownership of the original.
+            // A clone for AppState; the engine takes ownership of the original.
             let pool_for_state = pool.clone();
             let (engine, init) = Engine::start(pool, gh_client, sync, maintenance).await?;
             let current_user = commands::CurrentUserState {
@@ -98,8 +87,7 @@ fn main() -> anyhow::Result<()> {
     let query_names = Arc::new(Mutex::new(query_names));
     let current_user = Arc::new(RwLock::new(current_user));
 
-    // Clones for the engine-message loop in setup(). The ItemTracker lives only in
-    // the loop (no command needs it).
+    // Clones for the engine-message loop in setup().
     let notif_loop = notifications_enabled.clone();
     let tracker_loop = Arc::new(Mutex::new(ItemTracker::new()));
     let names_loop = query_names.clone();
@@ -113,21 +101,18 @@ fn main() -> anyhow::Result<()> {
             pool,
             notifications_enabled,
             query_names,
-            // Loaded once at startup, like the TUI/GUI (edits to actions.toml
-            // take effect on the next launch).
+            // Loaded once: edits to actions.toml take effect on the next launch.
             custom_actions: glauca_core::actions::CustomActions::load(),
         })
         .setup(move |app| {
-            // Stream engine messages to the front-end. `emit` requires the payload
-            // to be `Clone`, which `AppMessage` is not, so serialize to a JSON
-            // value (Clone + Serialize) first.
+            // `emit` requires a `Clone` payload, which `AppMessage` is not, so each
+            // message is serialized to a JSON value first.
             let handle = app.handle().clone();
             let mut engine = engine;
             tauri::async_runtime::spawn(async move {
                 while let Some(msg) = engine.recv().await {
-                    // Fire desktop notifications for background-sync arrivals,
-                    // reusing core's ItemTracker (baseline maintained even when
-                    // disabled, so toggling on mid-session doesn't re-announce).
+                    // The tracker's baseline is maintained even when notifications are
+                    // disabled, so toggling on mid-session doesn't re-announce everything.
                     if let AppMessage::ItemsLoaded {
                         query_id,
                         items,
@@ -135,9 +120,8 @@ fn main() -> anyhow::Result<()> {
                     } = &msg
                     {
                         let enabled = notif_loop.load(Ordering::Relaxed);
-                        // Recover from poisoning: these locks only guard plain
-                        // map/tracker state, which stays consistent even if a
-                        // panicking thread abandoned it mid-update.
+                        // Recover from poisoning: these locks guard plain map/tracker
+                        // state, consistent even if a panicking thread abandoned it.
                         let to_notify = tracker_loop
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -149,16 +133,13 @@ fn main() -> anyhow::Result<()> {
                                 .get(query_id)
                                 .cloned()
                                 .unwrap_or_else(|| format!("Query #{query_id}"));
-                            // notify_updated_items is a blocking D-Bus call on
-                            // Linux (it logs its own failures).
+                            // notify_updated_items is a blocking D-Bus call on Linux.
                             tauri::async_runtime::spawn_blocking(move || {
                                 notify_updated_items(&name, n)
                             });
                         }
                     }
-                    // Adopt a login the engine resolved after the startup lookup
-                    // failed, so the commands that expand `@me` (filter_items,
-                    // unread_counts, mark_all_read) stop treating it as a literal.
+                    // Adopt a login the engine resolved after the startup lookup failed.
                     // Written before the message reaches JS, so the re-filter the
                     // front-end runs on it already sees the new login.
                     if let AppMessage::CurrentUserResolved {

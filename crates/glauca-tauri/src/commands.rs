@@ -1,12 +1,9 @@
 //! Tauri command handlers: the front-end → engine half of the IPC bridge.
 //!
 //! Each command takes primitive arguments from JavaScript, builds the matching
-//! [`EngineCommand`], and forwards it on the engine's command channel. The engine
-//! replies asynchronously via `AppMessage`, which `main.rs` streams back to the
-//! front-end over the `app-message` event (the engine → front-end half).
-//!
-//! The whole `EngineCommand` enum is never exposed to JS; the variant is chosen
-//! here so the front-end only deals with plain values.
+//! [`EngineCommand`], and forwards it on the engine's command channel. The engine replies
+//! asynchronously via `AppMessage`, which `main.rs` streams back over the `app-message`
+//! event. The `EngineCommand` enum itself never crosses into JS.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,13 +24,11 @@ use tokio::sync::mpsc::Sender;
 
 use crate::settings::TauriSettings;
 
-/// What is currently known about the authenticated user. All three fields are
-/// `Option` because the lookup can fail — `login: None` is the "not resolved yet"
-/// state — and because `name`/`avatar_url` may simply be unset on the account.
+/// What is currently known about the authenticated user. All three fields are `Option`
+/// because the lookup can fail — `login: None` is "not resolved yet" — and because
+/// `name`/`avatar_url` may simply be unset on the account.
 ///
-/// Kept as a unit rather than three separate cells so `init` can hand back a
-/// consistent trio: a header showing a login with someone else's avatar would be
-/// worse than one showing nothing.
+/// Kept as a unit rather than three cells so `init` hands back a consistent trio.
 #[derive(Default, Clone)]
 pub struct CurrentUserState {
     pub login: Option<String>,
@@ -44,43 +39,36 @@ pub struct CurrentUserState {
 /// Shared state held by Tauri.
 pub struct AppState {
     pub tx: Sender<EngineCommand>,
-    /// The left-pane entries as they stood at startup, for `init`.
-    ///
-    /// Kept as entries rather than the finished JSON because the other half of
-    /// `init` — the authenticated user — can change after startup, so the payload
-    /// has to be rebuilt per call anyway (see [`init`]).
+    /// The left-pane entries as they stood at startup, for `init`. Kept as entries rather
+    /// than finished JSON because the other half of `init` — the authenticated user — can
+    /// change after startup, so the payload is rebuilt per call anyway.
     pub init_entries: Vec<LeftPaneEntry>,
     /// The authenticated user, for expanding `@me` and for the sidebar header.
     ///
-    /// Shared and mutable because it can arrive late: when the lookup at startup
-    /// can't reach GitHub, the engine keeps retrying and reports the user over
-    /// `CurrentUserResolved`, which the message loop in `main.rs` writes here. The
-    /// commands below must then expand `@me` for the rest of the session — reading
-    /// a login captured at startup would keep every `@me` filter matching nothing.
+    /// Shared and mutable because it can arrive late: when the startup lookup can't reach
+    /// GitHub the engine keeps retrying and reports over `CurrentUserResolved`, which
+    /// `main.rs` writes here. Reading a login captured at startup would keep every `@me`
+    /// filter matching nothing for the rest of the session.
     pub current_user: Arc<RwLock<CurrentUserState>>,
     /// DB pool, to rebuild the left pane after structural changes.
     pub pool: SqlitePool,
-    /// Whether desktop notifications fire (toggled at runtime via save_settings;
-    /// read by the engine-message loop in main.rs through a shared clone).
+    /// Whether desktop notifications fire; toggled at runtime via save_settings and read
+    /// by the engine-message loop in main.rs through a shared clone.
     pub notifications_enabled: Arc<AtomicBool>,
-    /// Root-query id -> display label, for notification text. Refreshed on
-    /// startup and by list_entries.
+    /// Root-query id -> display label, for notification text.
     pub query_names: Arc<Mutex<HashMap<i64, String>>>,
-    /// User-defined actions from actions.toml, loaded once at startup (same
-    /// timing as the TUI/GUI). JS refers to them by name (see
-    /// [`list_custom_actions`]); the definitions never cross the IPC boundary.
+    /// User-defined actions from actions.toml, loaded once at startup. JS refers to them
+    /// by name; the definitions never cross the IPC boundary.
     pub custom_actions: CustomActions,
 }
 
 impl AppState {
-    /// The authenticated login as it stands *now*. Read per call, never cached in
-    /// a command, so a login that resolved mid-session takes effect immediately
-    /// (see [`AppState::current_user`]).
+    /// The authenticated login as it stands *now*. Read per call, never cached in a
+    /// command, so a login that resolved mid-session takes effect immediately.
     ///
-    /// Cloned rather than handing out the guard: callers only need a `&str`, and
-    /// holding a read lock across their work would serialize them for no reason.
-    /// Poisoning is recovered from — the value is a plain [`CurrentUserState`],
-    /// which a panicking writer cannot leave half-updated.
+    /// Cloned rather than handing out the guard: holding a read lock across the caller's
+    /// work would serialize commands for no reason. Poisoning is recovered from — a
+    /// panicking writer cannot leave a plain [`CurrentUserState`] half-updated.
     fn login(&self) -> Option<String> {
         self.current_user
             .read()
@@ -99,9 +87,8 @@ impl AppState {
     }
 }
 
-/// One left-pane entry's unread count, as returned by [`unread_counts`]. Mirrors
-/// the `(is_filter_stream, entry_id) -> count` map that `compute_unread_counts`
-/// produces, in a shape the front-end can key on directly.
+/// One left-pane entry's unread count: the `(is_filter_stream, entry_id) -> count` map
+/// from `compute_unread_counts`, in a shape the front-end can key on directly.
 #[derive(Serialize)]
 pub struct UnreadCount {
     pub is_filter_stream: bool,
@@ -118,14 +105,12 @@ async fn dispatch(tx: &Sender<EngineCommand>, cmd: EngineCommand) -> Result<(), 
 /// Return the initial state: the left-pane entries captured at startup, plus the
 /// authenticated user *as it stands now*.
 ///
-/// Rebuilt per call rather than served from a snapshot because the login can
-/// arrive after startup, and a WebView reload re-runs the front-end's whole
-/// startup against this payload — a snapshot would resurrect the stale
-/// "login unknown" state permanently, since `CurrentUserResolved` has already been
-/// sent and won't come again.
+/// Rebuilt per call rather than served from a snapshot because the login can arrive after
+/// startup, and a WebView reload re-runs the front-end's startup against this payload — a
+/// snapshot would permanently resurrect "login unknown", since `CurrentUserResolved` has
+/// already been sent and won't come again.
 ///
-/// Assembled as an `EngineInit` so serde owns the field names. Spelling them out
-/// here instead would be a second, unchecked copy of that mapping.
+/// Assembled as an `EngineInit` so serde owns the field names.
 #[tauri::command]
 pub fn init(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let user = state.user();
@@ -138,25 +123,21 @@ pub fn init(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     .map_err(|e| e.to_string())
 }
 
-/// Quit the app (Glauca > Quit). A command rather than a window close from JS,
-/// because the `core:default` capability doesn't include window-close
-/// permissions; this also mirrors how the GUI quits through its own action.
+/// Quit the app. A command rather than a window close from JS, because the `core:default`
+/// capability doesn't include window-close permissions.
 #[tauri::command]
 pub fn quit(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-/// Rebuild the left-pane entries (root queries interleaved with their filter
-/// streams) from the DB. The front-end calls this after any structural change
-/// (add/edit/delete/reorder); the ordering logic lives in
-/// `glauca_core::engine::load_left_pane_entries`, shared with `Engine::start`,
-/// so it is never re-implemented per front-end.
+/// Rebuild the left-pane entries from the DB, called after any structural change. The
+/// ordering lives in `glauca_core::engine::load_left_pane_entries`, shared with
+/// `Engine::start`, so it is never re-implemented per front-end.
 #[tauri::command]
 pub async fn list_entries(state: State<'_, AppState>) -> Result<Vec<LeftPaneEntry>, String> {
     let entries = load_left_pane_entries(&state.pool)
         .await
         .map_err(|e| e.to_string())?;
-    // Keep the notification query-name map in sync with the latest labels.
     // Recover from poisoning: the map is plain data, consistent regardless.
     *state
         .query_names
@@ -183,16 +164,13 @@ pub fn get_settings() -> TauriSettings {
     TauriSettings::load()
 }
 
-/// Persist settings and apply the notifications flag immediately. The sync
-/// interval change takes effect on the next launch (the engine is already
-/// running). Takes the whole [`TauriSettings`] struct — serde already defines
-/// the field names and defaults, so adding a setting touches only settings.rs
-/// and the front-end sends its settings object through unchanged.
+/// Persist settings and apply the notifications flag immediately. A sync-interval change
+/// takes effect on the next launch, since the engine is already running. Takes the whole
+/// [`TauriSettings`] struct so adding a setting touches only settings.rs.
 #[tauri::command]
 pub fn save_settings(state: State<'_, AppState>, settings: TauriSettings) -> Result<(), String> {
-    // Persist first, then flip the in-memory flag — so if the write fails the
-    // runtime flag and the on-disk file stay in agreement instead of diverging for
-    // the rest of the session.
+    // Persist first, then flip the in-memory flag, so a failed write leaves the two in
+    // agreement rather than diverging for the rest of the session.
     settings.save().map_err(|e| e.to_string())?;
     state
         .notifications_enabled
@@ -200,18 +178,13 @@ pub fn save_settings(state: State<'_, AppState>, settings: TauriSettings) -> Res
     Ok(())
 }
 
-/// Compute per-entry unread counts for the entries under `query_id`, reusing
-/// `glauca_core::logic::compute_unread_counts` (the same logic the TUI/GUI use)
-/// so filter-stream scoping and the Jasper-style unread definition
-/// (`updated_at > last_read_updated_at`, per item) stay consistent across
-/// front-ends. `items` is the front-end's in-memory list for the query (with
-/// up-to-date `last_read_updated_at`), matching how the TUI recomputes.
-// These three commands are `async` on purpose: Tauri runs async commands on the
-// runtime thread pool, while synchronous commands run on the main/UI thread. Their
-// bodies are CPU-bound (serialize the whole item list from JS, then filter/count),
-// and `filter_items` fires per filter keystroke — running them on the UI thread
-// would jank input on large queries. They don't await anything; `async` alone is
-// what moves them off the UI thread.
+/// Compute per-entry unread counts for the entries under `query_id` via
+/// `glauca_core::logic::compute_unread_counts`. `items` is the front-end's in-memory list,
+/// with the `last_read_updated_at` values it advances locally on read.
+// This and the next two commands are `async` on purpose: Tauri runs async commands on the
+// runtime thread pool and synchronous ones on the UI thread. Their bodies are CPU-bound
+// and `filter_items` fires per keystroke, so running them on the UI thread would jank
+// input on large queries. They await nothing; `async` alone moves them off that thread.
 #[tauri::command]
 pub async fn unread_counts(
     state: State<'_, AppState>,
@@ -232,11 +205,9 @@ pub async fn unread_counts(
     )
 }
 
-/// One piece of an item title, pre-split on the inline filter's match
-/// boundaries so the front-end can paint the highlight without any offset
-/// arithmetic. `FilterQuery::highlight_ranges` speaks UTF-8 byte offsets,
-/// which JS strings can't index safely — the conversion happens here so that
-/// knowledge never crosses the IPC boundary.
+/// One piece of an item title, pre-split on the inline filter's match boundaries.
+/// `FilterQuery::highlight_ranges` speaks UTF-8 byte offsets, which JS strings cannot index
+/// safely, so the conversion happens here rather than crossing the IPC boundary.
 #[derive(Serialize)]
 pub struct TitleSegment {
     pub text: String,
@@ -255,10 +226,10 @@ pub struct FilteredItem {
 /// The result of [`filter_items`]: what matched, and whether the answer should be
 /// trusted at face value.
 ///
-/// `me_warning` rides along instead of being derived in JS because this command is
-/// the one place that holds both halves of the question — the filters it just
-/// applied and the login it applied them with. It carries core's wording rather
-/// than a bool so the front-end has no copy of the message to drift from.
+/// `me_warning` rides along instead of being derived in JS because this command is the one
+/// place holding both halves of the question — the filters it just applied and the login it
+/// applied them with. It carries core's wording rather than a bool, so the front-end has no
+/// copy of the message to drift from.
 #[derive(Serialize)]
 pub struct FilterResult {
     pub items: Vec<FilteredItem>,
@@ -295,12 +266,9 @@ fn split_title(title: &str, ranges: &[(usize, usize)]) -> Vec<TitleSegment> {
     out
 }
 
-/// Return the entries of `items` that match the selected entry's filter: the
-/// filter-stream filter (`stream_filter`, `None` for a root query) ANDed with the
-/// inline search-box text (`inline_filter`). Reuses `glauca_core::filter` and
-/// `expand_me` so the matching semantics (`state:`/`author:`/`label:`/… plus
-/// plain text, `@me` expansion) match the TUI/GUI exactly. Indices (not items)
-/// are returned so the front-end keeps its own item objects, preserving the
+/// Return the entries of `items` matching the selected entry's filter: the filter-stream
+/// filter (`None` for a root query) ANDed with the inline search-box text. Indices, not
+/// items, are returned so the front-end keeps its own objects and the
 /// `last_read_updated_at` values it advances locally on read.
 #[tauri::command]
 pub async fn filter_items(
@@ -342,20 +310,17 @@ pub async fn filter_items(
 /// What the banner needs to know about a background sync's results: whether to show
 /// anything, and what to say.
 ///
-/// Carries the rendered `label` rather than leaving the JS to format one, so the
-/// wording lives only in `ChangeCounts::banner_label` and can't drift between the
-/// three front-ends. `total` is likewise pre-computed so the "is there anything to
-/// show?" test is core's `is_empty`, not a re-derivation in JS.
+/// Carries the rendered `label` rather than leaving JS to format one, so the wording lives
+/// only in `ChangeCounts::banner_label`. `total` is likewise pre-computed so the "anything
+/// to show?" test is core's `is_empty`, not a re-derivation in JS.
 #[derive(serde::Serialize)]
 pub struct ItemChanges {
     pub total: usize,
     pub label: String,
 }
 
-/// Diff `fresh` against `current`, delegating to `glauca_core::logic::count_changes`
-/// so the change banner uses the exact definition the TUI/GUI use instead of a JS
-/// re-implementation. Removals are part of the result, so a sync that only pruned
-/// items no longer matching the query is not mistaken for "nothing changed".
+/// Diff `fresh` against `current` via `glauca_core::logic::count_changes`. Removals are
+/// part of the result, so a sync that only pruned is not mistaken for "nothing changed".
 #[tauri::command]
 pub async fn count_item_changes(current: Vec<ItemEntry>, fresh: Vec<ItemEntry>) -> ItemChanges {
     let counts: ChangeCounts = count_changes(&current, &fresh);
@@ -626,10 +591,9 @@ pub async fn mark_item_read(
     .await
 }
 
-/// A custom action as exposed to the front-end: just enough to render a picker.
-/// The command template and env stay on the Rust side — JS runs an action by
-/// `name` via [`run_custom_action`], so user-defined command lines never enter
-/// the webview.
+/// A custom action as exposed to the front-end: just enough to render a picker. The
+/// command template and env stay on the Rust side, so user-defined command lines never
+/// enter the webview — JS runs an action by `name` via [`run_custom_action`].
 #[derive(Serialize)]
 pub struct CustomActionInfo {
     pub name: String,
@@ -683,8 +647,8 @@ pub async fn mark_all_read(
     query_id: i64,
     filter: Option<String>,
 ) -> Result<(), String> {
-    // The engine expects an already-`@me`-expanded filter; expand here (reusing
-    // core's expand_me) so the front-end can pass the raw filter-stream filter.
+    // The engine expects an already-`@me`-expanded filter, so the front-end can pass the
+    // raw filter-stream filter.
     let login = state.login();
     let filter = filter.map(|f| expand_me(login.as_deref(), &f).into_owned());
     dispatch(&state.tx, EngineCommand::MarkAllRead { query_id, filter }).await
