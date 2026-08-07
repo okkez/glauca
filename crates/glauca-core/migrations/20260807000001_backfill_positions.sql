@@ -4,9 +4,11 @@
 -- the two migrations that added the column backfilled the rows that existed then, and
 -- every row created since sits at 0. Reordering used to exchange two rows' positions,
 -- which for a table of zeros wrote 0 back over itself and lost the reorder; it renumbers
--- now, so it no longer needs the stored values to be distinct. What still does is the
--- order the list comes back in: while positions tie, `ORDER BY position, created_at, id`
--- settles it by creation time — an order nobody chose.
+-- now, so it no longer needs the stored values to be distinct. The order the list comes back
+-- in still does: while positions tie, `ORDER BY position, created_at, id` settles it by
+-- creation time and then id — an order nobody chose, and one that is only implied by the rows
+-- rather than recorded anywhere. This migration records the order the pane already shows,
+-- which is why it does not change it.
 --
 -- Renumbering is in exactly the order the left pane already displays, so nothing the
 -- user can see moves: rows that do carry distinct positions (an order someone chose
@@ -15,11 +17,11 @@
 -- what it touches, so this runs once and the invariant holds from here on.
 
 WITH ranked AS (
-    SELECT id, ROW_NUMBER() OVER (ORDER BY position, created_at, id) - 1 AS pos
+    SELECT id, ROW_NUMBER() OVER (ORDER BY position, created_at, id) - 1 AS new_position
     FROM queries
 )
 UPDATE queries
-SET position = ranked.pos
+SET position = ranked.new_position
 FROM ranked
 WHERE queries.id = ranked.id;
 
@@ -27,10 +29,11 @@ WHERE queries.id = ranked.id;
 WITH ranked AS (
     SELECT
         id,
-        ROW_NUMBER() OVER (PARTITION BY parent_id ORDER BY position, created_at, id) - 1 AS pos
+        ROW_NUMBER() OVER (PARTITION BY parent_id ORDER BY position, created_at, id) - 1
+            AS new_position
     FROM filter_streams
 )
 UPDATE filter_streams
-SET position = ranked.pos
+SET position = ranked.new_position
 FROM ranked
 WHERE filter_streams.id = ranked.id;
