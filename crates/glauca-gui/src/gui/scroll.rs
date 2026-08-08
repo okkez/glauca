@@ -1,5 +1,4 @@
-//! Scroll-offset math and the shared pane frame. `clamp_scroll_y` is split
-//! out so the bounds logic is unit-testable without a laid-out `ScrollHandle`.
+//! Scroll-offset math and the shared pane frame.
 
 use gpui::*;
 use gpui_component::{ActiveTheme, v_flex};
@@ -7,11 +6,10 @@ use gpui_component::{ActiveTheme, v_flex};
 /// Pixels scrolled per j/k keypress in the detail pane and comments overlay.
 pub(crate) const DETAIL_SCROLL_STEP: f32 = 48.0;
 
-/// Clamp a new vertical scroll offset into gpui's valid range. gpui offsets go
-/// negative downward: `0` is the top and `-max_offset_y` is the bottom, so a
-/// positive `delta_px` (scroll down) subtracts. Split out from `scroll_vertically`
-/// so the bounds logic is unit-testable without a laid-out `ScrollHandle` (whose
-/// `max_offset` is only known after a real layout pass).
+/// Clamp a new vertical scroll offset into gpui's valid range. gpui offsets go negative
+/// downward: `0` is the top and `-max_offset_y` the bottom, so a positive `delta_px`
+/// subtracts. Split out from `scroll_vertically` so the bounds are unit-testable without a
+/// laid-out `ScrollHandle`, whose `max_offset` is only known after a layout pass.
 fn clamp_scroll_y(current_y: Pixels, delta_px: f32, max_offset_y: Pixels) -> Pixels {
     // `-max_offset_y <= 0`, so the bounds are always ordered and `clamp` can't panic.
     (current_y - px(delta_px)).clamp(-max_offset_y, px(0.))
@@ -25,10 +23,9 @@ pub(crate) fn scroll_vertically(handle: &ScrollHandle, delta_px: f32) {
     handle.set_offset(off);
 }
 
-/// Wrap a pane's `content` in the standard frame: a neutral 1px border on the
-/// left/right/bottom edges plus a top edge that turns `primary` when `focused`
-/// — the keyboard-focus indicator. gpui colors a border uniformly, so the two
-/// colors are split across an outer (top) element and an inner (other three).
+/// Wrap a pane's `content` in the standard frame: a neutral 1px border, with a top edge
+/// that turns `primary` when `focused`. gpui colors a border uniformly, so the two colors
+/// are split across an outer (top) element and an inner one (the other three).
 pub(crate) fn pane_frame(focused: bool, content: impl IntoElement, cx: &App) -> Div {
     let top = if focused {
         cx.theme().primary

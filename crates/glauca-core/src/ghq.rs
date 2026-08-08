@@ -1,8 +1,7 @@
 //! ghq のルート規約に沿ってリポジトリのローカルチェックアウト先を解決する。
 //!
-//! ghq バイナリには依存せず、ghq / gh-q が読むのと同じ設定（`GHQ_ROOT` 環境変数と
-//! `git config --get-all ghq.root`）だけを読んで規約を再現する。レイアウトは
-//! `{root}/github.com/{owner}/{name}`。
+//! ghq バイナリには依存せず、ghq が読むのと同じ設定（`GHQ_ROOT` 環境変数と
+//! `git config --get-all ghq.root`）だけを読む。レイアウトは `{root}/github.com/{owner}/{name}`。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -15,8 +14,7 @@ pub fn resolve_local_checkout(owner: &str, name: &str) -> Option<PathBuf> {
     resolve_in_roots(&ghq_roots(), owner, name)
 }
 
-/// 各ルートで `{root}/github.com/{owner}/{name}` を探し、実在するディレクトリを返す純粋関数。
-/// 環境変数や git を触らないのでユニットテストしやすい。
+/// 環境変数や git を触らない純粋関数として切り出してあるのでユニットテストできる。
 fn resolve_in_roots(roots: &[PathBuf], owner: &str, name: &str) -> Option<PathBuf> {
     let rel_path = format!("github.com/{owner}/{name}");
     roots

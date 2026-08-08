@@ -4,8 +4,6 @@
 
 use super::*;
 
-// ── Key event handler ────────────────────────────────────────────────────────
-
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     match app.input_mode {
         InputMode::Filter => handle_key_filter(app, key),
@@ -47,7 +45,6 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             app.input_mode = InputMode::Help;
         }
 
-        // Focus cycling — h/l, left/right arrows, or Tab/Shift+Tab
         KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
             app.focus = match app.focus {
                 Focus::QueryList => Focus::ItemList,
@@ -63,7 +60,6 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             };
         }
 
-        // Navigation
         KeyCode::Char('j') | KeyCode::Down => match app.focus {
             Focus::QueryList => {
                 if app.entry_cursor + 1 < app.entries.len() {
@@ -100,20 +96,18 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             }
         },
 
-        // New root query (left pane)
         KeyCode::Char('n') if app.focus == Focus::QueryList => {
             app.input_mode = InputMode::NewQuery;
             app.modal_field = 0;
             app.new_query_name = SingleLineInput::new();
             app.new_query_input = SingleLineInput::new();
         }
-        // New filter stream (left pane) — only when a root query or filter stream is selected
+        // Only when a root query or filter stream is selected.
         KeyCode::Char('f') if app.focus == Focus::QueryList && !app.entries.is_empty() => {
             app.input_mode = InputMode::NewFilterStream;
             app.modal_field = 0;
             reset_filter_stream_modal(app);
         }
-        // Edit selected entry (left pane)
         KeyCode::Char('e') if app.focus == Focus::QueryList => {
             if let Some(entry) = app.entries.get(app.entry_cursor) {
                 match entry {
@@ -141,9 +135,8 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
                 }
             }
         }
-        // Deletion sends an async engine command, which this sync handler can't
-        // do, so it's handled in the main loop. Swallow 'd' here so Normal-mode
-        // default handling doesn't also run.
+        // Deletion sends an async engine command, which this sync handler cannot, so the
+        // run loop does it. 'd' is swallowed here so Normal-mode handling doesn't rerun.
         KeyCode::Char('d')
             if app.focus == Focus::QueryList && key.modifiers.contains(KeyModifiers::NONE) => {}
 
@@ -155,7 +148,6 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             app.action_cursor = 0;
         }
 
-        // Open selected item in browser directly
         KeyCode::Char('o')
             if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
                 && app.selected_item().is_some() =>
@@ -163,7 +155,6 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             return Action::OpenBrowser;
         }
 
-        // Copy selected item URL to the clipboard directly
         KeyCode::Char('y')
             if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
                 && app.selected_item().is_some() =>
@@ -207,12 +198,10 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
         {
             return Action::RefreshItem;
         }
-        // Force a full re-fetch + prune of the selected query.
         KeyCode::Char('S') => {
             return Action::FullResync;
         }
 
-        // Apply held-back background updates to the visible list.
         KeyCode::Char('u') if !app.pending_changes.is_empty() => {
             return Action::ApplyPending;
         }
@@ -245,7 +234,6 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             ));
         }
 
-        // Enter filter mode (middle pane)
         KeyCode::Char('/') if app.focus == Focus::ItemList => {
             app.input_mode = InputMode::Filter;
         }
@@ -383,10 +371,8 @@ fn handle_key_comments_popup(app: &mut App, key: KeyEvent) -> Action {
 
 fn handle_key_filter(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
-        // Esc, Tab, or Enter leaves the filter field. The filter text is kept,
-        // so the item list stays filtered and focus remains on the item list.
-        // (This also means Enter never inserts a newline into the single-line
-        // field.)
+        // Esc, Tab, or Enter leaves the filter field, keeping the filter text applied. It
+        // also means Enter never inserts a newline into the single-line field.
         KeyCode::Esc | KeyCode::Tab | KeyCode::Enter => {
             app.input_mode = InputMode::Normal;
         }
@@ -396,10 +382,9 @@ fn handle_key_filter(app: &mut App, key: KeyEvent) -> Action {
             app.filter = SingleLineInput::new();
             app.item_cursor = 0;
         }
-        // Everything else (text, Backspace/Delete, cursor moves, Emacs keys) is
-        // handled by the TextArea widget's own key bindings. Only reset the item
-        // selection when the filter text actually changed — a pure cursor move
-        // (Left/Home/Ctrl+A/…) leaves the filtered list unchanged.
+        // Everything else goes to the TextArea's own key bindings. Only reset the item
+        // selection when the text actually changed — a pure cursor move leaves the
+        // filtered list unchanged.
         _ => {
             if app.filter.input(key) {
                 app.item_cursor = 0;
@@ -418,11 +403,9 @@ enum EnterOutcome {
     Focus(usize),
 }
 
-/// Shared key handling for the two-field input modals (new/edit × query/filter
-/// stream). They differ only in the Enter policy and the field pair (resolved
-/// via `modal_fields`); `on_enter` receives the two fields' text and the active
-/// field index and decides what Enter does. Esc/Tab/Ctrl+U and per-key text
-/// forwarding (newline/tab-inserting keys dropped) are common to all four.
+/// Shared key handling for the two-field input modals (new/edit × query/filter stream).
+/// They differ only in the Enter policy: `on_enter` receives both fields' text and the
+/// active index. Esc/Tab/Ctrl+U and text forwarding are common to all four.
 fn handle_two_field_modal(
     app: &mut App,
     key: KeyEvent,
@@ -502,13 +485,11 @@ pub(crate) fn reset_filter_stream_modal(app: &mut App) {
     app.filter_stream_filters = vec![SingleLineInput::new()];
 }
 
-/// Key handling for the filter-stream create/edit modals: a name field (field 0)
-/// plus one or more OR-group filter boxes (fields 1..=N). Tab cycles through
-/// name → each box → name; Ctrl+N inserts an empty box after the active one (or
-/// after the last box when on the name field) and focuses it; Ctrl+X removes the
-/// active box (keeping at least one); Ctrl+U clears the active field. Enter saves
-/// when the name and at least one box are non-empty, otherwise focuses the first
-/// field that still needs input. `save` is the action returned on save.
+/// Key handling for the filter-stream create/edit modals: a name field (field 0) plus one
+/// or more OR-group boxes (fields 1..=N). Tab cycles name → each box → name; Ctrl+N inserts
+/// a box after the active one and focuses it; Ctrl+X removes it, keeping at least one;
+/// Ctrl+U clears the active field. Enter saves when the name and one box are non-empty,
+/// otherwise focuses the first field that still needs input.
 fn handle_key_filter_stream_modal(app: &mut App, key: KeyEvent, save: Action) -> Action {
     match key.code {
         KeyCode::Esc => {

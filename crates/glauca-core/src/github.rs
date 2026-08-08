@@ -7,13 +7,12 @@ use tracing::{info, warn};
 /// Build an authenticated Octocrab instance.
 ///
 /// Authentication priority (mirrors go-gh's `auth.TokenForHost`):
-///   1. `GH_TOKEN` env var (GitHub Actions / manual PAT)
-///   2. `GITHUB_TOKEN` env var (GitHub Actions / manual PAT)
-///   3. `gh auth token` — covers gh's config file and system keyring.
-///      `gh` does NOT inject `GH_TOKEN` into an extension's environment, so this
-///      is what makes `gh glauca` authenticated (otherwise it falls back to the
-///      unauthenticated 60 req/hour-per-IP pool and rate-limits almost instantly).
-///   4. Unauthenticated (rate-limited to 60 req/hour)
+///   1. `GH_TOKEN` env var
+///   2. `GITHUB_TOKEN` env var
+///   3. `gh auth token` — covers gh's config file and system keyring. `gh` does NOT
+///      inject `GH_TOKEN` into an extension's environment, so this is what makes
+///      `gh glauca` authenticated rather than rate-limited almost instantly.
+///   4. Unauthenticated (60 req/hour per IP)
 pub fn build_client() -> Result<Octocrab> {
     let (token, auth_source) = resolve_token(|k| std::env::var(k).ok(), gh_auth_token);
     info!(auth = auth_source, "building GitHub client");
@@ -73,9 +72,9 @@ pub struct CurrentUser {
 /// Why [`get_current_user`] failed — specifically, whether asking again with the
 /// same client could ever give a different answer.
 ///
-/// The caller retries the lookup in the background (an app started while offline
-/// must not stay `@me`-less for its whole session), so it needs to tell a failure
-/// that will pass from one that never will.
+/// The caller retries in the background (an app started while offline must not stay
+/// `@me`-less all session), so it needs to tell a failure that will pass from one that
+/// never will.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurrentUserError {
     /// Nothing durable went wrong: offline, DNS/TLS failure, timeout, a 5xx, or a
@@ -117,10 +116,10 @@ pub async fn get_current_user(client: &Octocrab) -> Result<CurrentUser, CurrentU
 
 /// Split a failed `/user` call into "couldn't ask" and "was told no".
 ///
-/// Only a refusal GitHub actually sent back is treated as final; everything else
-/// — transport errors, a malformed body, a 5xx — is assumed transient, because
-/// the cost of retrying a hopeless case (one request per retry interval) is far
-/// below the cost of getting a recoverable one wrong (`@me` dead all session).
+/// Only a refusal GitHub actually sent back is treated as final; everything else —
+/// transport errors, a malformed body, a 5xx — is assumed transient. Retrying a hopeless
+/// case costs one request per interval; getting a recoverable one wrong costs `@me` for
+/// the whole session.
 fn classify_current_user_error(e: &octocrab::Error) -> CurrentUserError {
     match e {
         octocrab::Error::GitHub { source, .. } => {
@@ -131,8 +130,7 @@ fn classify_current_user_error(e: &octocrab::Error) -> CurrentUserError {
 }
 
 /// The response half of [`classify_current_user_error`], split out so the rule is
-/// unit-testable — octocrab's error variants carry a backtrace and are awkward to
-/// build by hand.
+/// unit-testable — octocrab's error variants are awkward to build by hand.
 fn classify_current_user_status(status: u16, message: &str) -> CurrentUserError {
     // A rate limit also arrives as 403, and it is the one refusal that lifts by
     // itself. Treating it as final would leave `@me` dead for the whole session of
@@ -146,11 +144,8 @@ fn classify_current_user_status(status: u16, message: &str) -> CurrentUserError 
     }
 }
 
-// ── GraphQL query ─────────────────────────────────────────────────────────────
-
-// Issue/PullRequest field selections shared by the list search and the
-// single-item fetch, so both produce the same node shape for
-// `node_to_cached_item`. Kept as one string to avoid the two queries drifting.
+// Issue/PullRequest field selections shared by the list search and the single-item fetch,
+// so both produce the same node shape for `node_to_cached_item`.
 const ITEM_FIELDS: &str = "
       __typename
       ... on Issue {
@@ -228,8 +223,6 @@ query FetchItem($owner: String!, $name: String!, $number: Int!) {{
     )
 }
 
-// ── GraphQL response types ────────────────────────────────────────────────────
-
 #[derive(Deserialize)]
 struct GqlResponse {
     // Optional: a rate-limited GraphQL response is HTTP 200 with `data: null`
@@ -246,8 +239,8 @@ struct GqlError {
     message: String,
 }
 
-/// Join GraphQL error messages into one human-readable line, for the error text and
-/// the partial-response warning alike so both report failures the same way.
+/// Join GraphQL error messages into one line, shared by the error text and the
+/// partial-response warning so both report failures the same way.
 fn error_detail(errors: &[GqlError]) -> String {
     errors
         .iter()
@@ -278,10 +271,9 @@ pub enum SearchError {
 
 /// Whether a GitHub response is a rate limit rather than a real refusal.
 ///
-/// GitHub overloads 403: it is both "you may not do this" and, with a telling
-/// message, "not right now". Every caller that treats a refusal as final has to
-/// make this distinction, so it lives in one place — reading it wrong means either
-/// hammering a wall or giving up on something that would work in an hour.
+/// GitHub overloads 403: it is both "you may not do this" and, with a telling message,
+/// "not right now". Reading it wrong means either hammering a wall or giving up on
+/// something that would work in an hour, so the distinction lives in one place.
 fn is_rate_limit_response(status: u16, message: &str) -> bool {
     if status == 429 {
         return true;
@@ -325,28 +317,24 @@ pub struct SearchPageResult {
     pub items: Vec<CachedItem>,
     pub has_next_page: bool,
     pub end_cursor: Option<String>,
-    /// Whether this page is a faithful view of what GitHub returned: every node
-    /// parsed into an item, and the response carried no errors alongside its data.
+    /// Whether this page is a faithful view of what GitHub returned: every node parsed
+    /// into an item, and no errors alongside the data.
     ///
-    /// A page can be lossy without failing: `nodes` elements are nullable, so a
-    /// per-node error yields a `null` (plus a top-level `errors` entry) in an
-    /// otherwise-200 response, and `node_to_cached_item` also drops any node
-    /// missing a required field. Dropping an item is harmless for upserting — it
-    /// just isn't refreshed this cycle — but it is *not* harmless for pruning: the
-    /// missing key would look like an item that left the query. `sync_task` must
-    /// therefore refuse to prune against a non-faithful page.
+    /// A page can be lossy without failing: `nodes` elements are nullable, so a per-node
+    /// error yields a `null` in an otherwise-200 response, and `node_to_cached_item` drops
+    /// any node missing a required field. Harmless for upserting, but *not* for pruning —
+    /// the missing key would look like an item that left the query, so `sync_task` must
+    /// refuse to prune against a non-faithful page.
     pub faithful: bool,
-    /// Raw `nodes` length, before parse failures were dropped. `sync_task` compares
-    /// the total against `SEARCH_RESULT_CAP`, which must count what GitHub actually
-    /// returned — using the parsed count would let dropped nodes pull a truncated
-    /// result set under the cap and enable a prune that deletes live rows.
+    /// Raw `nodes` length, before parse failures were dropped. `sync_task` compares this
+    /// against `SEARCH_RESULT_CAP`, so it must count what GitHub returned — the parsed
+    /// count would let dropped nodes pull a truncated result set under the cap and enable
+    /// a prune that deletes live rows.
     pub node_count: usize,
 }
 
-/// Append `sort:updated-desc` to `query` if no `sort:` qualifier is already present.
-///
-/// This ensures the fetch order matches the TUI display order (`updated_at DESC`).
-/// If the caller already included a `sort:` qualifier their choice is preserved.
+/// Append `sort:updated-desc` to `query` unless it already carries a `sort:` qualifier, so
+/// the fetch order matches the display order (`updated_at DESC`).
 pub(crate) fn apply_default_sort(query: &str) -> std::borrow::Cow<'_, str> {
     if query.contains("sort:") {
         std::borrow::Cow::Borrowed(query)
@@ -355,10 +343,9 @@ pub(crate) fn apply_default_sort(query: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Whether `query` already constrains `updated:` itself. Such a query is never
-/// narrowed further by `apply_updated_since` (the user's choice is preserved), so
-/// the engine must treat its fetch as a *full* one — otherwise it would skip the
-/// prune for a result set it actually fetched in full. See `engine::resolve_since`.
+/// Whether `query` already constrains `updated:` itself. Such a query is never narrowed
+/// further by `apply_updated_since`, so the engine must treat its fetch as a *full* one —
+/// otherwise it skips the prune for a result set it did fetch in full.
 pub(crate) fn constrains_updated(query: &str) -> bool {
     query.contains("updated:")
 }
@@ -381,9 +368,8 @@ pub(crate) fn apply_updated_since<'a>(
 /// Fetch a single page of GitHub search results using GraphQL.
 ///
 /// Pass `after: None` for the first page, then `Some(end_cursor)` for subsequent pages.
-/// `since` (RFC3339 UTC) narrows the fetch to items updated at/after that time for
-/// incremental syncs; `None` fetches the full result set.
-/// GraphQL gives us `reviewRequests` in a single round-trip.
+/// `since` (RFC3339 UTC) narrows the fetch to items updated at/after that time; `None`
+/// fetches the full result set.
 pub async fn search_page(
     client: &Octocrab,
     query_id: i64,
@@ -431,12 +417,11 @@ pub async fn search_page(
 /// Parse a page's `nodes` into items, and report whether the page is a *faithful*
 /// view of what GitHub returned (see [`SearchPageResult::faithful`]).
 ///
-/// Split out from `search_page` so the faithfulness accounting is testable without
-/// an HTTP mock. A partial failure is HTTP 200 with `data` *and* `errors` —
-/// typically a nullable `nodes` element the resolver couldn't produce — and an
-/// unparseable node is dropped just as quietly. Neither is fatal for upserting, but
-/// both are logged: silently serving a short page is how a transient upstream hiccup
-/// would otherwise turn into deleted rows.
+/// Split out from `search_page` so the faithfulness accounting is testable without an HTTP
+/// mock. A partial failure is HTTP 200 with `data` *and* `errors` — typically a nullable
+/// `nodes` element the resolver couldn't produce — and an unparseable node is dropped just
+/// as quietly. Both are logged: silently serving a short page is how a transient upstream
+/// hiccup would turn into deleted rows.
 fn parse_nodes(
     nodes: &[serde_json::Value],
     query_id: i64,
@@ -532,11 +517,10 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         })
         .unwrap_or_default();
 
-    // Reviewers / assignees are stored as JSON object arrays:
-    // [{"login":"alice","avatar_url":"https://…","kind":"user"}]. `kind` is written
-    // for both variants rather than left implicit, so nothing downstream has to
-    // infer a team from a missing avatar. Assignees carry no `kind` — GraphQL only
-    // ever returns users there, and `decode_users` defaults to `user`.
+    // Stored as JSON object arrays: [{"login":…,"avatar_url":…,"kind":"user"}]. `kind` is
+    // written for both variants rather than left implicit, so nothing downstream has to
+    // infer a team from a missing avatar. Assignees carry no `kind` — GraphQL only returns
+    // users there, and `decode_users` defaults to `user`.
     let requested_reviewers: Vec<serde_json::Value> = if is_pr {
         node["reviewRequests"]["nodes"]
             .as_array()
@@ -666,17 +650,14 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
     })
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::ActorKind;
     use rstest::rstest;
 
-    // Which `/user` failures the caller may retry. Getting this wrong is silent
-    // either way: retry a hopeless 401 forever, or give up on a recoverable outage
-    // and leave `@me` dead for the session.
+    // Which `/user` failures the caller may retry. Getting this wrong is silent either
+    // way: retry a hopeless 401 forever, or give up on a recoverable outage.
     #[rstest]
     // GitHub answered "no" — the token can't change while the process runs.
     #[case::unauthorized(401, "Bad credentials", CurrentUserError::Rejected)]
@@ -769,8 +750,6 @@ mod tests {
         .unwrap();
         assert!(!is_rate_limited(&ok));
     }
-
-    // ── parse_nodes: faithfulness accounting ─────────────────────────────────────
 
     /// A minimal well-formed search node.
     fn ok_node(number: i64) -> serde_json::Value {
@@ -873,7 +852,6 @@ mod tests {
             "reviewRequests": { "nodes": [] }
         });
         let item = node_to_cached_item(&node, 1).unwrap();
-        // Bot authors should have "[bot]" suffix to match REST API convention.
         assert_eq!(item.author.as_deref(), Some("renovate[bot]"));
     }
 
@@ -904,8 +882,8 @@ mod tests {
         let reviewers = crate::logic::decode_users(&item.requested_reviewers);
         let logins: Vec<&str> = reviewers.iter().map(|u| u.login.as_str()).collect();
         assert_eq!(logins, vec!["carol", "my-team", "avatarless-team"]);
-        // The User/Team split the GraphQL fragments encode must survive into the cache:
-        // flattening it is what made the two review-request qualifiers equivalent.
+        // The User/Team split the GraphQL fragments encode must survive into the cache, or
+        // the two review-request qualifiers become equivalent.
         let kinds: Vec<ActorKind> = reviewers.iter().map(|u| u.kind).collect();
         assert_eq!(
             kinds,
@@ -970,7 +948,6 @@ mod tests {
 
     #[test]
     fn node_to_cached_item_defaults_private_false_and_avatar_none() {
-        // Issue node without isPrivate / avatarUrl → safe defaults.
         let node = serde_json::json!({
             "__typename": "Issue",
             "number": 9,
@@ -1007,8 +984,6 @@ mod tests {
         assert_eq!(item.state, "merged");
     }
 
-    // ── apply_default_sort ───────────────────────────────────────────────────────
-
     #[test]
     fn apply_default_sort_appends_when_absent() {
         let result = apply_default_sort("is:pr is:open review-requested:@me");
@@ -1016,8 +991,7 @@ mod tests {
         assert!(result.contains("is:pr"));
     }
 
-    // An explicit sort: qualifier is left untouched (append test kept separate
-    // above because it verifies suffix/substring, not full-string equality).
+    // An explicit sort: qualifier is left untouched.
     #[rstest]
     #[case::explicit_sort("is:pr sort:created-desc")]
     #[case::sort_updated_asc("is:issue sort:updated-asc")]
@@ -1060,11 +1034,8 @@ mod tests {
         assert_eq!(constrains_updated(q), expected);
     }
 
-    // ── node_to_cached_item: None cases ──────────────────────────────────────────
-
     #[test]
     fn node_to_cached_item_missing_typename_returns_none() {
-        // Missing __typename → can't determine kind → None.
         let node = serde_json::json!({
             "number": 1,
             "title": "test",
@@ -1098,7 +1069,6 @@ mod tests {
 
     #[test]
     fn node_to_cached_item_pr_missing_review_requests_is_empty() {
-        // A PR node without the reviewRequests field should yield an empty list.
         let node = serde_json::json!({
             "__typename": "PullRequest",
             "number": 5,

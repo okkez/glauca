@@ -1,10 +1,8 @@
 //! Shared fixtures for `glauca-core`'s unit tests.
 //!
-//! `db` and `engine` both need a migrated throwaway cache and a `CachedItem` to put
-//! in it. Keeping one copy here means a new `items` column is added to one builder
-//! rather than several, and the two layers' tests can't drift into exercising
-//! differently-shaped rows. Mirrors the per-crate `test_support` module the TUI
-//! already uses (`glauca-tui/src/tui/test_support.rs`).
+//! `db` and `engine` both need a migrated throwaway cache and a `CachedItem` to put in it.
+//! One copy here means a new `items` column is added to one builder rather than several,
+//! and the two layers' tests can't drift into exercising differently-shaped rows.
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;

@@ -1,6 +1,5 @@
-//! Shared `#[cfg(test)]` fixtures for the tui module's split test modules
-//! (`state`, `keys`, `process`, …). Kept in one place so the extracted test
-//! modules don't each re-declare the same item / key / action builders.
+//! Shared `#[cfg(test)]` fixtures for the tui module's test modules, so they don't each
+//! re-declare the same item / key / action builders.
 
 use super::*;
 

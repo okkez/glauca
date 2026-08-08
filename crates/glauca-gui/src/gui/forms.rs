@@ -98,10 +98,9 @@ impl GlaucaApp {
         }
     }
 
-    /// Open a two-`Input` dialog (the shared shell of the query / filter-stream
-    /// forms) and hand the trimmed values to `on_submit` on OK. Field
-    /// requirements stay with the caller: `on_submit` ignores invalid input,
-    /// matching the previous behavior where OK always closes the dialog.
+    /// Open a two-`Input` dialog — the shared shell of the query / filter-stream forms —
+    /// and hand the trimmed values to `on_submit` on OK. Field requirements stay with the
+    /// caller: OK always closes, so `on_submit` ignores invalid input.
     pub(crate) fn open_two_field_form(
         &mut self,
         title: &'static str,
@@ -184,11 +183,10 @@ impl GlaucaApp {
         );
     }
 
-    /// Add (`edit=None`) or edit (`edit=Some(id)`) a filter stream via a dialog
-    /// with a name field plus one or more OR-group boxes (each box is one
-    /// AND-group; the boxes are ORed — see `glauca_core::filter::StreamFilter`).
-    /// The box set lives in `self.filter_stream_form` so add/remove re-renders;
-    /// on save the non-blank boxes are joined newline-separated.
+    /// Add (`edit=None`) or edit (`edit=Some(id)`) a filter stream via a dialog with a name
+    /// field plus one or more OR-group boxes. The box set lives in
+    /// `self.filter_stream_form` so add/remove re-renders; on save the non-blank boxes are
+    /// joined newline-separated.
     pub(crate) fn open_filter_stream_form(
         &mut self,
         params: FilterStreamFormParams,
@@ -240,9 +238,8 @@ impl GlaucaApp {
             let this_close = this.clone();
             dlg.title(title)
                 .w(px(560.))
-                // Drop the form state on any dismissal (Cancel/OK already clear it,
-                // but this also covers the close icon / Esc / backdrop) so the
-                // input entities don't linger after the dialog closes.
+                // Drop the form state on any dismissal — Cancel/OK already clear it, this
+                // also covers the close icon / Esc / backdrop — so no input entity lingers.
                 .on_close(move |_, _w, cx| {
                     if let Some(app) = this_close.upgrade() {
                         app.update(cx, |app, _| app.filter_stream_form = None);
@@ -348,11 +345,9 @@ impl GlaucaApp {
         });
     }
 
-    /// Validate and submit the open filter-stream form: read the name and join
-    /// the non-blank OR-group boxes, and if both are present, clear the form and
-    /// send the add/edit command. Returns `true` when the save went through
-    /// (caller closes the dialog) and `false` when the form is still incomplete
-    /// (name blank or every box blank), leaving the dialog open.
+    /// Validate and submit the open filter-stream form: read the name, join the non-blank
+    /// OR-group boxes, and if both are present clear the form and send the command. Returns
+    /// `false` when the form is incomplete, which leaves the dialog open.
     fn submit_filter_stream_form(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(form) = self.filter_stream_form.as_ref() else {
             return false;

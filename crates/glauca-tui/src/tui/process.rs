@@ -1,14 +1,12 @@
-//! TUI-only external-process helpers: the OSC 52 clipboard copy, the $EDITOR
-//! round-trip, the octorus PR-review launcher, and `item_actions` (the TUI's item
-//! action menu source of truth). Handing the terminal to those children and
+//! TUI-only external-process helpers: the OSC 52 clipboard copy, the $EDITOR round-trip,
+//! the octorus launcher, and `item_actions`. Handing the terminal to those children and
 //! taking it back is `super::terminal`'s job.
 
 use super::*;
 
-/// Copy `text` to the system clipboard via the OSC 52 terminal escape sequence.
-/// This works without a clipboard tool (xclip/pbcopy) or X11/Wayland, and over
-/// SSH, as long as the terminal emulator supports OSC 52. The sequence is just
-/// an escape code, so writing it mid-session does not disturb the alternate
+/// Copy `text` to the system clipboard via the OSC 52 terminal escape sequence: works
+/// without a clipboard tool or X11/Wayland, and over SSH, as long as the terminal supports
+/// it. Being just an escape code, writing it mid-session does not disturb the alternate
 /// screen.
 pub(crate) fn copy_to_clipboard_osc52(text: &str) -> std::io::Result<()> {
     use std::io::Write;
@@ -24,8 +22,6 @@ fn osc52_sequence(text: &str) -> String {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     format!("\x1b]52;c;{}\x07", STANDARD.encode(text.as_bytes()))
 }
-
-// ── Editor (TUI-only) ────────────────────────────────────────────────────────
 
 /// Does NOT leave/reenter the TUI — the caller must do that around this call.
 pub(crate) fn run_editor(initial_content: &str) -> anyhow::Result<Option<String>> {
@@ -63,10 +59,9 @@ pub(crate) fn run_editor(initial_content: &str) -> anyhow::Result<Option<String>
     Ok(result)
 }
 
-/// Actions offered for an item in the TUI action menu. This is the TUI's source
-/// of truth (used by the menu render, cursor bounds, and confirm handler): the
-/// shared `ItemAction::available_for` plus the TUI-only `ReviewOctorus` for PRs
-/// (kept out of `available_for` so it never appears in the GUI menu).
+/// Actions offered for an item in the TUI action menu — the one source the menu render,
+/// cursor bounds and confirm handler share: `ItemAction::available_for` plus the TUI-only
+/// `ReviewOctorus` for PRs, which is kept out of `available_for` so the GUI never shows it.
 pub(crate) fn item_actions(kind: &str) -> Vec<ItemAction> {
     let mut actions = ItemAction::available_for(kind);
     if kind == "pull_request" {
@@ -75,14 +70,13 @@ pub(crate) fn item_actions(kind: &str) -> Vec<ItemAction> {
     actions
 }
 
-/// Launch the external `octorus` (`or`) PR-review TUI for `item`, releasing the
-/// terminal while it runs and restoring it afterwards. Returns a status-line
-/// message. Requires `or` on PATH (`cargo install octorus`) and an authenticated
+/// Launch the external `octorus` (`or`) PR-review TUI for `item`, releasing the terminal
+/// while it runs and restoring it afterwards. Requires `or` on PATH and an authenticated
 /// `gh`.
 ///
-/// Resolves the repo's local checkout via ghq's root rules and passes it as
-/// `--working-dir` so octorus operates on the target repo rather than glauca's
-/// own CWD. If no local checkout is found, returns without launching.
+/// Resolves the repo's local checkout via ghq's root rules and passes it as `--working-dir`,
+/// so octorus operates on the target repo rather than glauca's own CWD. Without a local
+/// checkout it returns without launching.
 pub(crate) fn run_octorus_review<B: ratatui::backend::Backend + io::Write>(
     terminal: &mut Terminal<B>,
     item: &ItemEntry,

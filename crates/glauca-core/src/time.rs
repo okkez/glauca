@@ -103,11 +103,9 @@ mod tests {
 
     #[test]
     fn format_local_datetime_renders_in_local_zone() {
-        // The local timezone is environment-dependent, so instead of asserting
-        // an exact string we round-trip: the output must be parseable as the
-        // declared `%Y-%m-%d %H:%M:%S %:z` format and denote the same instant
-        // as the input. This verifies both the format and that the local-zone
-        // conversion preserves the instant, regardless of the test machine's TZ.
+        // The local timezone is environment-dependent, so round-trip instead of asserting
+        // an exact string: the output must parse as the declared format and denote the
+        // same instant, whatever the test machine's TZ.
         let input = "2026-06-19T09:00:00Z";
         let formatted = format_local_datetime(input);
         let reparsed = DateTime::parse_from_str(&formatted, "%Y-%m-%d %H:%M:%S %:z")

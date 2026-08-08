@@ -1,7 +1,6 @@
-//! Ratatui rendering for the TUI. This module owns the top-level frame
-//! (`draw` entry point, the three-pane layout, and the status bar) and the
-//! shared imports; the panes, detail view, modals/popups, comments overlay,
-//! and text/layout helpers live in the submodules.
+//! Ratatui rendering for the TUI. This module owns the top-level frame — the `draw` entry
+//! point, the three-pane layout, and the status bar; the panes, detail view, modals,
+//! comments overlay and text helpers live in the submodules.
 
 use crate::tui::icons::Icons;
 use crate::tui::single_line_input::SingleLineInput;
@@ -48,10 +47,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Split into main content + an optional warning line + the status bar.
     //
-    // The warning gets a line of its own rather than a segment in the status bar:
-    // that bar doesn't wrap, and the key hints ahead of it already run past 120
-    // columns, so anything appended there is invisible on a normal terminal. It
-    // also matches where the GUI and Tauri front-ends put the same warning.
+    // The warning gets a line of its own rather than a segment in the status bar: that bar
+    // doesn't wrap, and the key hints ahead of it already run past 120 columns, so anything
+    // appended there is invisible on a normal terminal.
     let show_me_warning = app.has_unexpanded_me();
     let root = Layout::default()
         .direction(Direction::Vertical)
@@ -96,10 +94,9 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    // Record each column so mouse events can hit-test it. The left/middle panes
-    // also record their inner list areas in the draws below (for row resolution);
-    // the whole-column rects are the pane-level fallback for clicks that miss a
-    // row (filter bar, banner, borders).
+    // Record each column so mouse events can hit-test it. The left/middle panes record
+    // their inner list areas in the draws below for row resolution; these whole-column
+    // rects are the fallback for clicks that miss a row.
     {
         let mut regions = app.mouse_regions.borrow_mut();
         regions.query_col = Some(cols[0]);
@@ -111,8 +108,6 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     draw_item_list(f, app, cols[1]);
     draw_item_detail(f, app, cols[2]);
 }
-
-// ── Status bar ────────────────────────────────────────────────────────────────
 
 /// The line explaining that an `@me` filter has no login to expand to, drawn on
 /// its own row above the status bar so the key hints can't push it off-screen.
@@ -171,8 +166,8 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::Help => "HELP     Esc/?/q:close".to_string(),
     };
 
-    // Assemble only the segments that apply, in fixed order, then join — instead
-    // of enumerating every on/off combination of syncing / pending / status.
+    // Assemble only the segments that apply, in fixed order, then join, rather than
+    // enumerating every on/off combination of syncing / pending / status.
     let mut segments = vec![mode_text];
     if app.syncing {
         segments.push(format!("{} Syncing…", app.icons.syncing));
@@ -220,14 +215,13 @@ mod tests {
             .collect::<String>()
     }
 
-    /// An `@me` filter with no login shows the wrong list and, without this,
-    /// explains nothing — so the warning has to reach the screen, disappear once the
-    /// login lands, and give its row back when it does.
+    /// An `@me` filter with no login shows the wrong list and explains nothing, so the
+    /// warning has to reach the screen, disappear once the login lands, and give its row
+    /// back when it does.
     ///
-    /// Run at several widths because neither line wraps and the status bar's key
-    /// hints alone run past 120 columns: a warning sharing that line is invisible on
-    /// a normal terminal, which is exactly what the first version of this test (at
-    /// width 200 only) failed to catch.
+    /// Run at several widths because neither line wraps and the status bar's key hints
+    /// alone run past 120 columns: a warning sharing that line is invisible on a normal
+    /// terminal, and a test at width 200 only would not catch it.
     #[rstest]
     #[case::narrow(80)]
     #[case::common(120)]

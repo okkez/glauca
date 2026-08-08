@@ -1,12 +1,9 @@
 //! A single-line text input backed by [`ratatui_textarea::TextArea`].
 //!
-//! `TextArea` is a multi-line editor, but every input field in the TUI (the
-//! inline filter bar and the two-field edit/new modals) is conceptually a
-//! single line. Rather than repeating "keep it one line" across free functions
-//! and hoping every call site honours it, this newtype *owns* the invariant:
-//! newline/tab-inserting keys are dropped in [`SingleLineInput::input`], stray
-//! `\n`/`\r` in seed text is stripped in [`SingleLineInput::from_text`], and the
-//! active line is never underlined. Callers only ever see the first line.
+//! `TextArea` is a multi-line editor, but every input field in the TUI is conceptually one
+//! line. This newtype *owns* that invariant rather than leaving it to each call site:
+//! newline/tab-inserting keys are dropped in [`SingleLineInput::input`], stray `\n`/`\r` in
+//! seed text is stripped in [`SingleLineInput::from_text`], and callers only see line one.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -31,14 +28,11 @@ impl SingleLineInput {
         Self::from_text("")
     }
 
-    /// An input pre-filled with `text`, cursor at the end (so typing continues
-    /// after the existing value). Unlike `TextArea::default()`, the active line
-    /// is not underlined (that highlight reads as noise here).
+    /// An input pre-filled with `text`, cursor at the end. Unlike `TextArea::default()`,
+    /// the active line is not underlined.
     ///
-    /// Any newline in `text` is stripped: stored values should never contain
-    /// one, but a stray `\n` (e.g. an out-of-band DB edit) must not build a
-    /// multi-line buffer that [`value`] would silently truncate on the next
-    /// save.
+    /// Any newline in `text` is stripped: a stray `\n` from an out-of-band DB edit must not
+    /// build a multi-line buffer that [`value`] would silently truncate on the next save.
     ///
     /// [`value`]: SingleLineInput::value
     pub fn from_text(text: impl Into<String>) -> Self {
@@ -65,15 +59,12 @@ impl SingleLineInput {
         *self = Self::new();
     }
 
-    /// Forward `key` to the underlying `TextArea`, dropping any key that would
-    /// break the one-line invariant by inserting a newline or a tab.
-    /// `TextArea::input` treats Enter, Ctrl+M, a literal `\n`/`\r` Char, Tab and
-    /// BackTab (Shift+Tab) as newline/tab insertion, and Ctrl+Y as paste (which
-    /// splices multi-line content via `insert_str`), so guarding only
-    /// `KeyCode::Enter`/`Tab` at the call site is not enough — [`value`] would
-    /// then silently drop everything past the first line. Returns whether the
-    /// text buffer actually changed (false for a dropped key or a pure cursor
-    /// move), so callers can react only to edits.
+    /// Forward `key` to the underlying `TextArea`, dropping any key that would break the
+    /// one-line invariant. `TextArea::input` treats Enter, Ctrl+M, a literal `\n`/`\r`
+    /// Char, Tab and BackTab as newline/tab insertion, and Ctrl+Y as paste (which splices
+    /// multi-line content), so guarding only `KeyCode::Enter`/`Tab` at the call site is not
+    /// enough — [`value`] would silently drop everything past line one. Returns whether the
+    /// buffer actually changed, so callers can react only to edits.
     ///
     /// Ctrl+U is *not* handled here: `TextArea`'s own Ctrl+U is undo, so callers
     /// intercept it to mean "clear" (via [`clear`]) before forwarding.
@@ -103,9 +94,8 @@ impl SingleLineInput {
         self.area.set_cursor_style(style);
     }
 
-    /// Whether this field currently shows its cursor (see [`set_active`]).
-    /// Test-only: production code sets active state via [`set_active`] but never
-    /// reads it back — the cursor style is consumed only by rendering.
+    /// Whether this field currently shows its cursor. Test-only: production code sets it
+    /// via [`set_active`] and never reads it back.
     ///
     /// [`set_active`]: SingleLineInput::set_active
     #[cfg(test)]

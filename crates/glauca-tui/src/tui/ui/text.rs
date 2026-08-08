@@ -30,17 +30,15 @@ pub(super) fn highlight_spans<'a>(
     spans
 }
 
-/// Wrap styled `spans` (e.g. a title's highlight fragments) to `max_cols`
-/// display columns, returning one span vector per visual line. Breaks on the
-/// last whitespace that fits (word wrap); a single word wider than `max_cols`
-/// is hard-broken at the column limit. Display width is measured with
-/// unicode-width so CJK (full-width) characters count as two columns. Each
-/// character keeps its original span style.
+/// Wrap styled `spans` to `max_cols` display columns, returning one span vector per visual
+/// line. Breaks on the last whitespace that fits; a single word wider than `max_cols` is
+/// hard-broken at the limit. Width is measured with unicode-width, so CJK characters count
+/// as two columns. Each character keeps its original span style.
 pub(super) fn wrap_spans(spans: &[Span], max_cols: usize) -> Vec<Vec<Span<'static>>> {
     let max_cols = max_cols.max(1);
 
-    // Flatten into (char, style) so we can re-break independently of the
-    // original fragment boundaries while preserving per-character styling.
+    // Flatten into (char, style) so lines can break independently of the original fragment
+    // boundaries while keeping per-character styling.
     let chars: Vec<(char, Style)> = spans
         .iter()
         .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))

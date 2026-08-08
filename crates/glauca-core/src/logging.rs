@@ -1,9 +1,8 @@
 //! Shared `tracing` setup for the front-end binaries.
 //!
-//! The TUI occupies stdout (alternate screen + raw mode), so logs go to a file
-//! under the user data dir rather than the terminal. The GUI uses the same file
-//! sink for consistency. Files rotate daily and only the most recent few days
-//! are kept, so the log never grows without bound.
+//! The TUI occupies stdout (alternate screen + raw mode), so logs go to a file under the
+//! user data dir rather than the terminal; the GUI uses the same sink. Files rotate daily
+//! and only the most recent few days are kept.
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{Builder, Rotation};
@@ -15,20 +14,17 @@ const MAX_LOG_FILES: usize = 7;
 /// Initialize file-based `tracing` for a binary and return a flush guard.
 ///
 /// `prefix` names the log file (e.g. `"glauca-tui"` → `glauca-tui.<date>.log`).
-/// `default_filter` is the `EnvFilter` directive used when `RUST_LOG` is unset
-/// (each binary passes its own crates, so core doesn't need to know them).
-/// The caller MUST keep the returned guard alive for the whole program: it owns
-/// the non-blocking writer's worker thread and flushes buffered logs on drop.
-/// Returns `None` (logging disabled, best-effort) if the data dir can't be
-/// resolved or the appender can't be built.
+/// `default_filter` is the `EnvFilter` directive used when `RUST_LOG` is unset.
+///
+/// The caller MUST keep the returned guard alive for the whole program: it owns the
+/// non-blocking writer's worker thread and flushes buffered logs on drop. Returns `None`
+/// (logging disabled) if the data dir can't be resolved or the appender can't be built.
 pub fn init(prefix: &str, default_filter: &str) -> Option<WorkerGuard> {
     let dir = dirs::data_local_dir()?.join("glauca");
 
-    // Create the log dir up front. `max_log_files` makes tracing-appender read
-    // the directory to prune old files at startup; if it doesn't exist yet
-    // (first run on a clean machine) that read prints an "Error reading the log
-    // directory/files: No such file or directory" warning to stderr. Best-effort:
-    // if this fails, the appender build below will surface the real error.
+    // `max_log_files` makes tracing-appender read the directory to prune old files at
+    // startup, and on a clean machine that read prints "Error reading the log
+    // directory/files" to stderr. Best-effort: a real failure surfaces in the build below.
     let _ = std::fs::create_dir_all(&dir);
 
     let appender = Builder::new()

@@ -15,16 +15,14 @@ pub(crate) fn enter_tui(out: &mut impl io::Write) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Undo everything [`enter_tui`] set, and show the cursor again — `Terminal::draw`
-/// hides it on every frame that sets no cursor position, and ratatui only
-/// restores it in `Terminal`'s `Drop`, which `panic = "abort"` never runs.
+/// Undo everything [`enter_tui`] set, and show the cursor again — `Terminal::draw` hides it
+/// on every frame that sets no cursor position, and ratatui only restores it in `Drop`,
+/// which `panic = "abort"` never runs.
 ///
-/// Safe to call when there is nothing to undo: the panic hook calls it for panics
-/// outside the TUI's lifetime, including before [`enter_tui`] has run. Keep it
-/// that way — anything added here has to tolerate that.
+/// Safe to call when there is nothing to undo: the panic hook calls it for panics outside
+/// the TUI's lifetime, including before [`enter_tui`] has run. Keep it that way.
 ///
-/// Takes a writer rather than the `Terminal` because the panic hook cannot borrow
-/// it.
+/// Takes a writer rather than the `Terminal` because the panic hook cannot borrow it.
 pub(crate) fn leave_tui(out: &mut impl io::Write) -> anyhow::Result<()> {
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(

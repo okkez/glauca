@@ -9,9 +9,8 @@ use glauca_core::types::*;
 use super::*;
 
 impl GlaucaApp {
-    /// Mirror of the TUI run_app startup: prime unread counts for every root
-    /// query, load the initially selected entry, and enqueue the rest for
-    /// background refresh.
+    /// Prime unread counts for every root query, load the initially selected entry, and
+    /// enqueue the rest for background refresh.
     pub(crate) fn prime(&mut self) {
         let root_ids: Vec<i64> = self
             .entries
@@ -91,17 +90,15 @@ impl GlaucaApp {
         self.send(EngineCommand::LoadCached { query_id: root_id });
     }
 
-    /// Scroll the detail body back to the top. Called whenever the shown item
-    /// changes (cursor move / entry switch / re-filter), mirroring the TUI's
-    /// `detail_scroll = 0` reset.
+    /// Scroll the detail body back to the top. Called whenever the shown item changes
+    /// (cursor move / entry switch / re-filter).
     pub(crate) fn reset_detail_scroll(&self) {
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
     }
 
-    /// Move the item-list cursor: reveal the row, reset the detail scroll,
-    /// mark the item read, and repaint. Every cursor-move path must end in
-    /// `cx.notify()` — `mark_current_item_read` alone doesn't repaint when the
-    /// target item is already read.
+    /// Move the item-list cursor: reveal the row, reset the detail scroll, mark the item
+    /// read, and repaint. Every cursor-move path must end in `cx.notify()` —
+    /// `mark_current_item_read` alone doesn't repaint an already-read item.
     fn move_item_cursor(&mut self, cursor: usize, cx: &mut Context<Self>) {
         let t = std::time::Instant::now();
         self.item_cursor = cursor;

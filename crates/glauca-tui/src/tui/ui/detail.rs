@@ -45,12 +45,11 @@ pub(super) fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             };
             let milestone = item.milestone.clone().unwrap_or_else(|| "—".to_string());
 
-            // Build combined reviewer list: submitted reviews + pending requests
+            // Submitted reviews + pending requests.
             let reviewed_logins: std::collections::HashSet<&str> =
                 item.reviews.iter().map(|(u, _)| u.login.as_str()).collect();
-            // Collect reviewers (submitted reviews first, then still-pending
-            // requests) as (badge, style, login) groups so we can pack them onto
-            // lines as indivisible units below.
+            // Collected as (badge, style, login) groups so the wrap below can pack them
+            // onto lines as indivisible units.
             let mut reviewer_groups: Vec<(&'static str, Style, String)> = Vec::new();
             for (user, state) in &item.reviews {
                 let (badge, style) = app.icons.review_state_badge(state);
@@ -66,11 +65,9 @@ pub(super) fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                 }
             }
 
-            // Wrap the reviewer list by hand so a break never lands inside an
-            // "icon  login" group: each group stays whole, groups are separated by
-            // 3 spaces, and a continuation line is indented to sit under the first
-            // reviewer. (ratatui's word wrap would split on the icon↔login space,
-            // and NBSP doesn't help — it counts as whitespace there too.)
+            // Wrapped by hand so a break never lands inside an "icon  login" group:
+            // ratatui's word wrap splits on the icon↔login space, and NBSP does not help
+            // because it counts as whitespace there too.
             let label = "Reviewers:";
             let label_style = Style::default().fg(Color::Gray);
             let gap = "  "; // gap between a reviewer's icon and login
@@ -115,8 +112,7 @@ pub(super) fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let mut lines = vec![
-                // Title header: combined kind+state icon (same as the list row),
-                // coloured by state; number in cyan; title bold.
+                // Title header: the same kind+state icon as the list row.
                 Line::from(vec![
                     Span::styled(item_icon, state_style(&state)),
                     Span::styled(format!("  #{number} "), Style::default().fg(Color::Cyan)),
@@ -133,8 +129,7 @@ pub(super) fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                     Span::raw(author),
                 ]),
                 Line::from({
-                    // State is shown by the header icon's colour; here just the
-                    // word, coloured to match (the badge would be redundant).
+                    // The header icon's colour already carries the state, so no badge here.
                     let mut spans = vec![
                         Span::styled("State:    ", Style::default().fg(Color::Gray)),
                         Span::styled(state.clone(), state_style(&state)),

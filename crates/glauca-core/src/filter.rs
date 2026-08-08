@@ -7,10 +7,9 @@ use std::collections::HashMap;
 
 /// Shared frizbee config for plain-text token matching.
 ///
-/// `max_typos: 0` keeps matching to a strict subsequence (fzf-style, no typo
-/// tolerance). frizbee matches case-insensitively by default (case only
-/// influences scoring, which we ignore). `sort: false` — we test single items,
-/// so result order is unused.
+/// `max_typos: 0` keeps matching to a strict subsequence (fzf-style). frizbee matches
+/// case-insensitively by default — case only influences scoring, which we ignore.
+/// `sort: false` because we test single items, so result order is unused.
 fn fuzzy_config() -> Config {
     Config {
         max_typos: Some(0),
@@ -20,11 +19,10 @@ fn fuzzy_config() -> Config {
 }
 
 thread_local! {
-    /// Per-thread cache of compiled matchers, keyed by needle. Building a
-    /// `Matcher` allocates a prefilter + Smith-Waterman state; filtering runs
-    /// over every item on each keystroke, so rebuilding one per item (via the
-    /// free `frizbee::match_list`) measured ~8x slower than reusing a single
-    /// matcher per token. Cleared past a cap to bound memory over a session.
+    /// Per-thread cache of compiled matchers, keyed by needle. Building a `Matcher`
+    /// allocates a prefilter + Smith-Waterman state, and filtering runs over every item
+    /// on each keystroke: rebuilding one per item (via the free `frizbee::match_list`)
+    /// measured ~8x slower. Cleared past a cap to bound memory over a session.
     static MATCHERS: RefCell<HashMap<String, Matcher>> = RefCell::new(HashMap::new());
 }
 
@@ -57,28 +55,19 @@ fn fuzzy_hit(needle: &str, haystacks: &[&str]) -> bool {
 /// Syntax:
 ///   - Plain token: fuzzy-matches title, author, repo, labels (case-insensitive
 ///     subsequence, fzf-style — `fltr` matches `filter`)
-///   - `is:pr` / `is:issue` — filter by item kind (matches `item.kind`)
-///   - `is:draft` — only draft pull requests
-///   - `is:public` / `is:private` — filter by repository visibility
-///   - `state:<value>` or `is:<value>` — filter by state (case-insensitive
-///     substring; e.g. open/closed/merged — values are not restricted).
-///     Note: `is:pr`/`is:issue`/`is:draft`/`is:public`/`is:private` are treated
-///     as their own filters, not states.
-///   - `author:<login>` — filter by author login
-///   - `assignee:<login>` — filter by an assignee login
-///   - `label:<name>` — filter by label (substring)
-///   - `milestone:<title>` — filter by milestone title (substring; single word
-///     only — whitespace-separated values are not supported)
-///   - `repo:<owner/name>` — filter by repository (substring)
-///   - `base:<branch>` / `head:<branch>` — filter PRs by base/head branch
-///   - `review-requested:<login>` / `team-review-requested:<slug>` — filter by a
-///     requested reviewer, matching only that actor kind, as on GitHub.
-///   - `-<token>` — negate any token above, GitHub-style: the item must NOT
-///     match it (`-label:bug`, `-is:draft`, `-wip`). A lone `-` is a plain
-///     text token, not a negation.
+///   - `is:pr` / `is:issue` / `is:draft` / `is:public` / `is:private` — each its own
+///     filter, *not* a state
+///   - `state:<value>`, or any other `is:<value>` — state, case-insensitive substring.
+///     Values are not restricted.
+///   - `author:` / `assignee:` / `label:` / `repo:` / `base:` / `head:` — substring
+///   - `milestone:<title>` — substring, single word only (values cannot contain
+///     whitespace)
+///   - `review-requested:<login>` / `team-review-requested:<slug>` — matches only that
+///     actor kind, as on GitHub
+///   - `-<token>` — negate any token above (`-label:bug`, `-is:draft`, `-wip`). A lone
+///     `-` is a plain text token, not a negation.
 ///
-/// Multiple tokens are ANDed together; each negated token independently
-/// excludes matching items.
+/// Multiple tokens are ANDed together; each negated token independently excludes.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct FilterQuery {
     /// Positive conditions — an item must match every one.
@@ -109,17 +98,15 @@ struct Conditions {
     is_private: Option<bool>,
 }
 
-/// Signature shared by every entry in [`QUALIFIER_FIELDS`]. Named to keep the
-/// table's type readable (clippy flags the raw fn-pointer type as
-/// `type_complexity`).
+/// Signature shared by every entry in [`QUALIFIER_FIELDS`]. Named because clippy flags
+/// the raw fn-pointer type as `type_complexity`.
 type QualifierField = fn(&mut Conditions) -> &mut Vec<String>;
 
-/// Value-taking qualifiers: name (no `:`) → the field it appends to. Adding one is a
-/// single line; the order carries no meaning, because `Conditions::add_token` splits a
-/// token at its first `:` and looks the name up exactly.
+/// Value-taking qualifiers: name (no `:`) → the field it appends to. The order carries no
+/// meaning, because `Conditions::add_token` splits a token at its first `:` and looks the
+/// name up exactly.
 ///
-/// `is:` is absent deliberately — it is overloaded (kind / draft / repo visibility /
-/// state) and gets its own arm.
+/// `is:` is absent deliberately — it is overloaded and gets its own arm.
 const QUALIFIER_FIELDS: &[(&str, QualifierField)] = &[
     ("state", |c| &mut c.states),
     ("author", |c| &mut c.authors),
@@ -129,9 +116,8 @@ const QUALIFIER_FIELDS: &[(&str, QualifierField)] = &[
     ("repo", |c| &mut c.repos),
     ("base", |c| &mut c.base_refs),
     ("head", |c| &mut c.head_refs),
-    // GitHub keeps these apart and so do we: each `requested_reviewers` entry
-    // carries an `ActorKind`, so `review-requested:` reaches only users and
-    // `team-review-requested:` only teams.
+    // Each `requested_reviewers` entry carries an `ActorKind`, so `review-requested:`
+    // reaches only users and `team-review-requested:` only teams, as on GitHub.
     ("review-requested", |c| &mut c.review_requested_users),
     ("team-review-requested", |c| &mut c.review_requested_teams),
 ];
@@ -139,14 +125,12 @@ const QUALIFIER_FIELDS: &[(&str, QualifierField)] = &[
 impl Conditions {
     /// Record a qualifier's value, unless it is empty.
     ///
-    /// A qualifier typed without a value (`label:`) is a half-typed token from the
-    /// type-ahead filter, not a constraint, and storing it would do the opposite of
-    /// nothing: every qualifier matches with `contains`, and `contains("")` is true, so
-    /// an empty value matches every item that has the field at all.
+    /// A qualifier typed without a value (`label:`) is a half-typed token, not a
+    /// constraint, and storing it would do the opposite of nothing: qualifiers match with
+    /// `contains`, and `contains("")` matches every item that has the field at all.
     ///
-    /// The test is on the *value*, deliberately, not on the token's shape. A plain word
-    /// ending in `:` (`fix:`, `wip:`) strips no known prefix and must still reach
-    /// `text_tokens` and filter as text.
+    /// The test is on the *value*, not the token's shape: a plain word ending in `:`
+    /// (`fix:`, `wip:`) strips no known prefix and must still filter as text.
     fn push_value(target: &mut Vec<String>, val: &str) {
         if !val.is_empty() {
             target.push(val.to_string());
@@ -155,13 +139,12 @@ impl Conditions {
 
     /// Normalise a qualifier's value before the empty-value gate sees it.
     ///
-    /// Only `team-review-requested:` needs it. GitHub spells the value `org/team-slug`,
-    /// but only the bare slug is cached, so keep the last path segment — without this
-    /// the *canonical* form a user copies out of their saved query would match nothing,
-    /// exactly the silent failure the qualifier was added to fix. A trailing slash
-    /// (`my-org/`) leaves that segment empty; fall back to the raw value, which still
-    /// contains a `/` and so matches nothing — for a half-typed *value* that is the
-    /// honest answer, where a missing value constrains nothing at all.
+    /// Only `team-review-requested:` needs it. GitHub spells the value `org/team-slug`
+    /// but only the bare slug is cached, so keep the last path segment — otherwise the
+    /// canonical form a user copies out of their saved query matches nothing. A trailing
+    /// slash (`my-org/`) leaves that segment empty; fall back to the raw value, which
+    /// still contains a `/` and so matches nothing, which is the honest answer for a
+    /// half-typed *value* (a missing value constrains nothing at all).
     fn normalize_value<'a>(qualifier: &str, val: &'a str) -> &'a str {
         if qualifier != "team-review-requested" {
             return val;
@@ -174,9 +157,9 @@ impl Conditions {
 
     /// Parse one token (already lowercased, `-` stripped) into this set.
     ///
-    /// Dispatch is on the qualifier *name*, taken as everything before the first `:`,
-    /// so `QUALIFIER_FIELDS` needs no ordering discipline and every value passes
-    /// through one normalisation and one empty-value gate.
+    /// Dispatch is on the qualifier *name*, everything before the first `:`, so
+    /// `QUALIFIER_FIELDS` needs no ordering discipline and every value passes through one
+    /// normalisation and one empty-value gate.
     fn add_token(&mut self, lower: &str) {
         let Some((qualifier, val)) = lower.split_once(':') else {
             Self::push_value(&mut self.text_tokens, lower);
@@ -209,31 +192,26 @@ impl Conditions {
     /// `item` — `want == true` checks a require set (all must hit),
     /// `want == false` an exclude set (none may hit).
     fn all_eval_to(&self, item: &ItemEntry, want: bool) -> bool {
-        // kind filter (is:pr / is:issue) — exact match on normalized kind
         for k in &self.kinds {
             if (item.kind.to_lowercase() == k.as_str()) != want {
                 return false;
             }
         }
-        // is:draft — draft pull requests
         if let Some(v) = self.is_draft
             && (item.is_draft == v) != want
         {
             return false;
         }
-        // is:public / is:private — repository visibility
         if let Some(v) = self.is_private
             && (item.repo_private == v) != want
         {
             return false;
         }
-        // state filter
         for s in &self.states {
             if item.state.to_lowercase().contains(s.as_str()) != want {
                 return false;
             }
         }
-        // author filter
         let author_lower = item
             .author
             .as_ref()
@@ -244,7 +222,6 @@ impl Conditions {
                 return false;
             }
         }
-        // assignee filter
         for a in &self.assignees {
             let hit = item
                 .assignees
@@ -254,7 +231,6 @@ impl Conditions {
                 return false;
             }
         }
-        // label filter
         for l in &self.labels {
             let hit = item
                 .labels
@@ -264,21 +240,18 @@ impl Conditions {
                 return false;
             }
         }
-        // milestone filter
         for m in &self.milestones {
             let milestone_lower = item.milestone.as_deref().unwrap_or_default().to_lowercase();
             if milestone_lower.contains(m.as_str()) != want {
                 return false;
             }
         }
-        // repo filter
         let repo_lower = item.repo_display().to_lowercase();
         for r in &self.repos {
             if repo_lower.contains(r.as_str()) != want {
                 return false;
             }
         }
-        // base/head branch filter (PRs)
         for b in &self.base_refs {
             let base_lower = item.base_ref.as_deref().unwrap_or_default().to_lowercase();
             if base_lower.contains(b.as_str()) != want {
@@ -291,8 +264,8 @@ impl Conditions {
                 return false;
             }
         }
-        // review-requested filter — the qualifier picks the actor kind, so a team
-        // slug and a user login of the same name do not collide.
+        // The qualifier picks the actor kind, so a team slug and a user login of the
+        // same name do not collide.
         for (values, kind) in [
             (&self.review_requested_users, ActorKind::User),
             (&self.review_requested_teams, ActorKind::Team),
@@ -308,7 +281,7 @@ impl Conditions {
                 }
             }
         }
-        // plain text tokens — fuzzy-match title | author | repo | labels
+        // Plain text tokens fuzzy-match title | author | repo | labels.
         if !self.text_tokens.is_empty() {
             let author_login = item.author.as_ref().map(|u| u.login.as_str()).unwrap_or("");
             let repo = item.repo_display();
@@ -349,13 +322,12 @@ impl FilterQuery {
         self.require.all_eval_to(item, true) && self.exclude.all_eval_to(item, false)
     }
 
-    /// Byte ranges `(start, end)` in `text` covering every plain-text-token
-    /// fuzzy match (case-insensitive subsequence), snapped to char boundaries
-    /// and merged into ascending, non-overlapping runs. Empty when there is no
-    /// plain text token or no match. Frontends turn these into styled spans.
+    /// Byte ranges `(start, end)` in `text` covering every plain-text-token fuzzy match,
+    /// snapped to char boundaries and merged into ascending, non-overlapping runs. Empty
+    /// when there is no plain text token or no match.
     ///
-    /// Because fuzzy matches are non-contiguous, a single token can produce
-    /// several ranges. Negated (`-`) text tokens never highlight.
+    /// Because fuzzy matches are non-contiguous, one token can produce several ranges.
+    /// Negated (`-`) text tokens never highlight.
     pub fn highlight_ranges(&self, text: &str) -> Vec<(usize, usize)> {
         if self.require.text_tokens.is_empty() {
             return Vec::new();
@@ -380,10 +352,9 @@ impl FilterQuery {
         byte_hits.sort_unstable();
         byte_hits.dedup();
 
-        // Coalesce consecutive byte offsets into `(start, end)` runs (end
-        // exclusive), snap each end to char boundaries, then merge runs that
-        // snapping pushed into (or adjacent to) one another — this keeps whole
-        // multibyte chars intact when a matched byte lands mid-character.
+        // Coalesce consecutive byte offsets into `(start, end)` runs (end exclusive), snap
+        // each end to char boundaries, then merge runs that snapping pushed together —
+        // this keeps whole multibyte chars intact when a matched byte lands mid-character.
         let mut ranges: Vec<(usize, usize)> = Vec::new();
         let mut run_start = byte_hits[0];
         let mut run_end = byte_hits[0]; // last byte in the current run (inclusive)
@@ -411,23 +382,20 @@ impl FilterQuery {
 
 /// Separator between OR-groups within a single stored filter-stream string.
 ///
-/// A filter stream's `filter` is one AND-group per line; the groups are ORed
-/// (see [`StreamFilter`]). A newline can never appear inside a single group —
-/// every frontend's filter input is single-line — so legacy single-group
-/// filters (no newline) read back as exactly one group with no migration.
+/// A filter stream's `filter` is one AND-group per line; the groups are ORed (see
+/// [`StreamFilter`]). A newline can never appear inside a group — every frontend's filter
+/// input is single-line — so a filter with no newline reads back as exactly one group.
 pub const FILTER_GROUP_SEP: char = '\n';
 
-/// Split a stored filter-stream string into its raw OR-group segments,
-/// preserving empty segments. The form layer uses this to map the stored
-/// string back onto one input box per group (an empty string yields one empty
-/// box). Matching drops empty groups; see [`StreamFilter::parse`].
+/// Split a stored filter-stream string into its raw OR-group segments, preserving empty
+/// segments so the form layer can map the stored string back onto one input box per group
+/// (an empty string yields one empty box). Matching drops empty groups.
 pub fn split_filter_groups(s: &str) -> Vec<&str> {
     s.split(FILTER_GROUP_SEP).collect()
 }
 
-/// Join box values into a stored filter-stream string, dropping blank groups
-/// and trimming each. The inverse of [`split_filter_groups`] for the round trip
-/// through the create/edit form.
+/// Join box values into a stored filter-stream string, dropping blank groups and trimming
+/// each. The inverse of [`split_filter_groups`].
 pub fn join_filter_groups<I, S>(groups: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -449,19 +417,17 @@ where
 
 /// A filter-stream filter: an OR of AND-groups ([`FilterQuery`]).
 ///
-/// The stored string holds one group per line (see [`FILTER_GROUP_SEP`]); an
-/// item matches when it matches **any** group. Blank groups are dropped, and a
-/// filter with no non-blank group matches everything (same as an empty
-/// [`FilterQuery`] on the stream side previously).
+/// The stored string holds one group per line (see [`FILTER_GROUP_SEP`]); an item matches
+/// when it matches **any** group. Blank groups are dropped, and a filter with no non-blank
+/// group matches everything.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct StreamFilter {
     groups: Vec<FilterQuery>,
 }
 
 impl StreamFilter {
-    /// Parse a stored filter into its OR-groups, expanding `@me` (against
-    /// `current_user`) within each group. Splitting into groups first keeps each
-    /// group an independent AND-group; blank groups are dropped by `from_groups`.
+    /// Parse a stored filter into its OR-groups, expanding `@me` (against `current_user`)
+    /// within each group. Splitting first keeps each group an independent AND-group.
     pub fn parse(input: &str, current_user: Option<&str>) -> Self {
         Self::from_groups(
             split_filter_groups(input)
@@ -470,9 +436,9 @@ impl StreamFilter {
         )
     }
 
-    /// Like [`StreamFilter::parse`], but for a string whose `@me` tokens are
-    /// already expanded (e.g. the persisted filter carried on a mark-read
-    /// request), so it must not be expanded a second time.
+    /// Like [`StreamFilter::parse`], but for a string whose `@me` tokens are already
+    /// expanded (e.g. the filter carried on a mark-read request), so it must not be
+    /// expanded a second time.
     pub fn parse_expanded(input: &str) -> Self {
         // With no `current_user`, `parse` expands nothing (`expand_me(None, _)`
         // is a no-op), so this is exactly "split and parse each group".
@@ -495,8 +461,6 @@ impl StreamFilter {
         self.groups.is_empty() || self.groups.iter().any(|g| g.matches(item))
     }
 }
-
-// ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -533,35 +497,26 @@ mod tests {
         }
     }
 
-    // Single-qualifier / plain-text matching against the `item()` builder.
-    // Each case carries `(query, item, expected)`; positive and negative rows
-    // are listed adjacently so a failing qualifier is obvious from its name.
+    // Positive and negative rows are listed adjacently so a failing qualifier is obvious
+    // from its case name.
     #[rstest]
-    // plain text matches the title …
     #[case::text_title_hit("fix", item("Fix the bug", "alice", "open", &[], "owner/repo"), true)]
     #[case::text_title_miss("fix", item("Add feature", "alice", "open", &[], "owner/repo"), false)]
-    // … the author …
     #[case::text_author_hit("alice", item("some PR", "alice", "open", &[], "o/r"), true)]
     #[case::text_author_miss("alice", item("some PR", "bob", "open", &[], "o/r"), false)]
-    // … a label …
     #[case::text_label_hit("bug", item("some PR", "a", "open", &["bug"], "o/r"), true)]
     #[case::text_label_miss("bug", item("some PR", "a", "open", &["enhancement"], "o/r"), false)]
-    // … and the "owner/name" repo string.
     #[case::text_repo_hit("myrepo", item("PR", "a", "open", &[], "owner/myrepo"), true)]
     #[case::text_repo_miss("myrepo", item("PR", "a", "open", &[], "owner/other"), false)]
-    // state:
     #[case::state_open("state:open", item("PR", "a", "open", &[], "o/r"), true)]
     #[case::state_closed("state:open", item("PR", "a", "closed", &[], "o/r"), false)]
-    // is: is an alias for state:
+    // `is:` with an unreserved value is an alias for `state:`.
     #[case::is_merged_hit("is:merged", item("PR", "a", "merged", &[], "o/r"), true)]
     #[case::is_merged_miss("is:merged", item("PR", "a", "open", &[], "o/r"), false)]
-    // author:
     #[case::author_hit("author:bob", item("PR", "bob", "open", &[], "o/r"), true)]
     #[case::author_miss("author:bob", item("PR", "alice", "open", &[], "o/r"), false)]
-    // label:
     #[case::label_hit("label:bug", item("PR", "a", "open", &["bug", "wontfix"], "o/r"), true)]
     #[case::label_miss("label:bug", item("PR", "a", "open", &["enhancement"], "o/r"), false)]
-    // repo:
     #[case::repo_hit("repo:owner/myrepo", item("PR", "a", "open", &[], "owner/myrepo"), true)]
     #[case::repo_miss("repo:owner/myrepo", item("PR", "a", "open", &[], "other/repo"), false)]
     fn matches(#[case] q: &str, #[case] it: ItemEntry, #[case] expected: bool) {
@@ -616,11 +571,10 @@ mod tests {
         assert!(sf.matches(&item("PR", "bob", "closed", &[], "o/r"))); // 2nd group
     }
 
-    /// A *negated* `@me` runs the opposite way from a positive one when the login
-    /// never resolved: `author:@me` matches nobody (visibly empty), but
-    /// `-author:@me` matches EVERYBODY. Harmless in a list; catastrophic in
-    /// mark-all-read, which would wipe the query's unread state. This pins the
-    /// hazard that `engine::mark_all_read_task` refuses to act on.
+    /// A *negated* `@me` runs the opposite way from a positive one when the login never
+    /// resolved: `author:@me` matches nobody, but `-author:@me` matches EVERYBODY. Harmless
+    /// in a list; catastrophic in mark-all-read, which `engine::mark_all_read_task` refuses
+    /// to run because of this.
     #[test]
     fn negated_unexpanded_me_matches_everything() {
         let sf = StreamFilter::parse_expanded("-author:@me");
@@ -630,9 +584,8 @@ mod tests {
 
     #[test]
     fn stream_filter_parse_expanded_skips_me_expansion() {
-        // parse_expanded must leave `@me` literal (the string is already expanded
-        // upstream), so it matches an author whose login is literally "@me" and
-        // NOT some other user.
+        // parse_expanded must leave `@me` literal, so it matches an author whose login is
+        // literally "@me" and NOT some other user.
         let sf = StreamFilter::parse_expanded("author:@me");
         assert!(sf.matches(&item("PR", "@me", "open", &[], "o/r")));
         assert!(!sf.matches(&item("PR", "alice", "open", &[], "o/r")));
@@ -640,14 +593,11 @@ mod tests {
 
     #[test]
     fn mark_read_pipeline_preserves_or_groups_with_at_me() {
-        // Regression guard for the mark-all-read pipeline: the callers (TUI
-        // run.rs, GUI entries.rs, Tauri commands.rs) expand `@me` on the WHOLE
-        // stored filter string before sending MarkAllRead, and the engine parses
-        // it with `parse_expanded`. `expand_me` USED TO collapse whitespace
-        // (including the '\n' group separators), which merged a multi-group
-        // `@me` filter into one AND-group so mark-all-read marked the
-        // intersection. It now preserves the separators; assert the marked set
-        // equals the union the list shows.
+        // Regression guard for the mark-all-read pipeline: the callers expand `@me` on the
+        // WHOLE stored filter string before sending MarkAllRead, and the engine parses it
+        // with `parse_expanded`. If `expand_me` collapsed the '\n' group separators, a
+        // multi-group filter would become one AND-group and mark-all-read would mark the
+        // intersection instead of the union the list shows.
         let raw = "author:@me\nstate:closed";
         let user = Some("alice");
 
@@ -709,8 +659,6 @@ mod tests {
 
     #[test]
     fn is_pr_combined_with_state_and_author() {
-        // Reproduces the reported case: a child-query filter that previously
-        // matched nothing because `is:pr` was checked against item.state.
         // The `[bot]` brackets must be treated as literal characters.
         let q = FilterQuery::parse("is:pr is:open author:repro-atlantis[bot]");
         assert!(q.matches(&item("PR", "repro-atlantis[bot]", "open", &[], "o/r")));
@@ -799,15 +747,14 @@ mod tests {
         let mut pr = with_assignees(&["bob"]);
         pr.is_draft = true;
         assert!(q.matches(&pr));
-        // Same item but not a draft must fail.
         let mut non_draft = with_assignees(&["bob"]);
         non_draft.is_draft = false;
         assert!(!q.matches(&non_draft));
     }
 
-    /// Build a PR with the given requested reviewers. A `team:`-prefixed entry
-    /// becomes a team reviewer; anything else a user. An entry with no prefix also
-    /// stands in for a row cached before `kind` existed, which decodes as a user.
+    /// Build a PR with the given requested reviewers. A `team:`-prefixed entry becomes a
+    /// team reviewer; anything else a user — which is also how a row cached before `kind`
+    /// existed decodes.
     fn pr_with_reviewers(reviewers: &[&str]) -> ItemEntry {
         let mut pr = item("PR", "alice", "open", &[], "o/r");
         pr.requested_reviewers = reviewers
@@ -829,9 +776,7 @@ mod tests {
     #[case::requested_carol("review-requested:carol", &["bob", "carol"], true)]
     #[case::unrequested_login("review-requested:dave", &["bob", "carol"], false)]
     #[case::no_reviewers("review-requested:bob", &[], false)]
-    // Each qualifier matches only its own actor kind, as on GitHub. Before
-    // `ActorKind` the two were interchangeable, because a team slug was stored in
-    // the same shape as a user login.
+    // Each qualifier matches only its own actor kind, as on GitHub.
     #[case::team_requested("team-review-requested:my-team", &["bob", "team:my-team"], true)]
     #[case::team_not_requested("team-review-requested:other-team", &["bob", "team:my-team"], false)]
     #[case::team_negated("-team-review-requested:my-team", &["bob", "team:my-team"], false)]
@@ -888,9 +833,8 @@ mod tests {
         assert!(q.matches(&labelled));
     }
 
-    /// A plain word that happens to end in `:` is not a qualifier — it has no known
-    /// prefix, so it must reach `text_tokens` and keep filtering. Dropping it because
-    /// of the token's *shape* would silently unfilter the list.
+    /// A plain word that happens to end in `:` names no qualifier, so it must keep
+    /// filtering as text. Dropping it for its *shape* would silently unfilter the list.
     #[test]
     fn text_token_ending_in_colon_still_filters() {
         let q = FilterQuery::parse("fix:");
@@ -907,8 +851,6 @@ mod tests {
         assert!(q.is_empty());
         assert!(q.matches(&item("anything", "a", "open", &[], "o/r")));
     }
-
-    // ── highlight_ranges ────────────────────────────────────────────────────────
 
     #[rstest]
     // No 'x','y','z' subsequence in the text → no ranges.
@@ -933,8 +875,6 @@ mod tests {
     ) {
         assert_eq!(FilterQuery::parse(q).highlight_ranges(text), expected);
     }
-
-    // ── parse edge cases ────────────────────────────────────────────────────────
 
     #[test]
     fn parse_case_insensitive_structured_token() {
@@ -969,9 +909,8 @@ mod tests {
         assert!(q.require.labels.is_empty());
     }
 
-    /// A word that merely ends in `:` names no qualifier, so it filters as text —
-    /// colon included. The lookup is by qualifier *name*, so this must not depend on
-    /// which prefixes happen to be in the table.
+    /// A word that merely ends in `:` filters as text, colon included. The lookup is by
+    /// qualifier *name*, so this cannot depend on which prefixes are in the table.
     #[test]
     fn unknown_qualifier_keeps_its_colon_and_filters_as_text() {
         let q = FilterQuery::parse("fix: wip:");
@@ -982,9 +921,9 @@ mod tests {
         assert!(q.require.states.is_empty());
     }
 
-    /// `review-requested` is a *suffix* of `team-review-requested` — neither is a prefix
-    /// of the other, and they no longer share a field. Each token is dispatched on its
-    /// full qualifier name, so neither can shadow the other however the table is ordered.
+    /// `review-requested` is a *suffix* of `team-review-requested`. Each token dispatches
+    /// on its full qualifier name, so neither shadows the other however the table is
+    /// ordered.
     #[test]
     fn overlapping_qualifier_names_are_dispatched_in_full() {
         let q = FilterQuery::parse("team-review-requested:my-org/my-team review-requested:alice");
@@ -995,8 +934,6 @@ mod tests {
         assert_eq!(q.require.review_requested_users, vec!["alice".to_string()]);
         assert!(q.require.text_tokens.is_empty());
     }
-
-    // ── negation (`-` prefix) ─────────────────────────────────────────────────
 
     #[test]
     fn negated_label_excludes_matching_items() {
@@ -1107,8 +1044,6 @@ mod tests {
         assert!(!q.matches(&with_ms));
     }
 
-    // ── matches edge cases ───────────────────────────────────────────────────────
-
     #[test]
     fn author_filter_none_author_does_not_match() {
         let q = FilterQuery::parse("author:alice");
@@ -1154,11 +1089,10 @@ mod tests {
 
     #[test]
     fn frizbee_reports_byte_offsets() {
-        // Pins the load-bearing assumption in `highlight_ranges`: frizbee 0.9.x
-        // returns BYTE offsets, not char indices. "あ" is 3 bytes, so the 'b' in
-        // "あb" is at byte 3 but char index 1. If a future frizbee returns char
-        // indices (as its upstream `main` does), this fails loudly instead of
-        // silently mis-highlighting multibyte titles.
+        // Pins the load-bearing assumption in `highlight_ranges`: frizbee 0.9.x returns
+        // BYTE offsets, not char indices. "あ" is 3 bytes, so the 'b' in "あb" is at byte 3
+        // but char index 1. If a future frizbee returns char indices (as its upstream
+        // `main` does), this fails loudly instead of mis-highlighting multibyte titles.
         let hits: Vec<usize> = frizbee::match_list_indices("b", &["あb"], &fuzzy_config())
             .into_iter()
             .flat_map(|m| m.indices)
@@ -1175,9 +1109,8 @@ mod tests {
 
     #[test]
     fn highlight_ranges_multibyte_highlights_correct_chars() {
-        // "バグ" = 6 bytes (2 chars × 3), " " = 1 byte, then "bug" at bytes 7..10.
-        // Verifies frizbee indices are treated as char indices: the highlighted
-        // slice must be exactly "bug", not garbage from byte/char confusion.
+        // "バグ" = 6 bytes (2 chars × 3), " " = 1 byte, so "bug" is at bytes 7..10. The
+        // highlighted slice must be exactly "bug", not garbage from byte/char confusion.
         let q = FilterQuery::parse("bug");
         let text = "バグ bug";
         let ranges = q.highlight_ranges(text);

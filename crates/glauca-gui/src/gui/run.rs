@@ -1,6 +1,5 @@
-//! Application entry point: builds the engine and gpui window, then runs the
-//! event loop. Split out of `main` so `main.rs` stays thin (mirrors the TUI's
-//! `tui::run`).
+//! Application entry point: builds the engine and gpui window, then runs the event loop.
+//! Split out of `main` so `main.rs` stays thin.
 
 use anyhow::Result;
 use glauca_core::db;
@@ -40,9 +39,8 @@ pub(crate) fn run(db_path_override: Option<PathBuf>) -> Result<()> {
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
-            // gpui defaults to a NullHttpClient, which can't fetch the remote
-            // GitHub avatar URLs the item-list avatars use (every fetch fails and
-            // the Avatar falls back to its placeholder). Install a real client.
+            // gpui defaults to a NullHttpClient, which can't fetch the remote avatar URLs
+            // the item list uses — every Avatar would fall back to its placeholder.
             match reqwest_client::ReqwestClient::user_agent("glauca-gui") {
                 Ok(client) => cx.set_http_client(std::sync::Arc::new(client)),
                 Err(e) => tracing::warn!(error = %e, "failed to init HTTP client for avatars"),
@@ -50,12 +48,10 @@ pub(crate) fn run(db_path_override: Option<PathBuf>) -> Result<()> {
             gpui_component::init(cx);
 
             // Navigation/edit keys are scoped to "Glauca && !Input": a bare "Glauca"
-            // binding would still fire while a gpui-component Input is focused, because
-            // dispatch bubbles to the root node (where the context is just [Glauca]) and
-            // matches there — swallowing letters meant for the text box. The `!Input`
-            // term is evaluated against the *full* focus path, so it disables these
-            // bindings whenever an Input is anywhere in the chain. Escape stays plain
-            // "Glauca" so it can blur the filter / close a dialog from inside the Input.
+            // binding still fires while a gpui-component Input is focused, because
+            // dispatch bubbles to the root node and matches there, swallowing letters
+            // meant for the text box. `!Input` is evaluated against the *full* focus path.
+            // Escape stays plain "Glauca" so it can blur the filter from inside the Input.
             cx.bind_keys([
                 KeyBinding::new("j", MoveDown, Some(NAV_CONTEXT)),
                 KeyBinding::new("k", MoveUp, Some(NAV_CONTEXT)),
@@ -103,7 +99,6 @@ pub(crate) fn run(db_path_override: Option<PathBuf>) -> Result<()> {
             .detach();
         });
 
-    // Keep the runtime alive across the whole GUI lifetime.
     drop(rt);
     Ok(())
 }

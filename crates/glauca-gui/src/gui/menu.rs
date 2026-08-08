@@ -10,8 +10,7 @@ use glauca_core::types::ItemEntry;
 use super::*;
 
 impl GlaucaApp {
-    /// Open a `PopupMenu` (right-click / Enter action menu) anchored at `pos`. The
-    /// menu is a self-managed anchored overlay (see `render`); it focuses itself and
+    /// Open a `PopupMenu` anchored at `pos`. A self-managed overlay: it focuses itself and
     /// emits `DismissEvent` on selection/Esc/outside-click, which clears `self.menu`.
     pub(crate) fn open_menu(
         &mut self,
@@ -95,8 +94,7 @@ where
     )
 }
 
-/// Build the action menu for a given `MenuKind`, reusing `dispatch_action` and the
-/// index-based entry helpers. Shared by right-click and the Enter action menu.
+/// Build the action menu for a given `MenuKind`. Shared by right-click and Enter.
 pub(crate) fn populate_menu(
     mut menu: PopupMenu,
     app: &Entity<GlaucaApp>,
@@ -164,9 +162,8 @@ pub(crate) fn populate_menu(
     menu
 }
 
-/// Populate `menu` with one item per custom `action`, each sending
-/// `RunCustomAction` for `item` on click. Shared by the item menu's "Custom
-/// actions" submenu and the `x` picker (`MenuKind::CustomActions`).
+/// Populate `menu` with one item per custom `action`, each sending `RunCustomAction` on
+/// click. Shared by the item menu's submenu and the `x` picker.
 pub(crate) fn add_custom_action_items(
     mut menu: PopupMenu,
     app: &Entity<GlaucaApp>,

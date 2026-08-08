@@ -3,11 +3,9 @@
 
 use super::*;
 
-/// Draw a centered two-field input modal (a name field plus a second field).
-/// `border_color` tints the border and the active field's label. Each field is
-/// an editable `TextArea` that renders its own cursor (visible only on the
-/// active field; see `sync_modal_cursors`). Shared by the new/edit query and
-/// filter-stream modals, which differ only in these strings.
+/// Draw a centered two-field input modal. `border_color` tints the border and the active
+/// field's label. Each field is a `TextArea` that renders its own cursor, visible only on
+/// the active field (see `sync_modal_cursors`).
 fn draw_two_field_modal(
     f: &mut Frame,
     area: Rect,
@@ -99,10 +97,9 @@ pub(super) fn draw_modal(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// Draw the filter-stream create/edit modal: a name field plus one or more
-/// OR-group filter boxes. Each box is one AND-group; an item matches when it
-/// matches any box (see `glauca_core::filter::StreamFilter`). The active field
-/// (`app.modal_field`: 0 = name, i>=1 = box i-1) is tinted and shows the cursor.
+/// Draw the filter-stream create/edit modal: a name field plus one or more OR-group boxes.
+/// The active field (`app.modal_field`: 0 = name, i>=1 = box i-1) is tinted and shows the
+/// cursor.
 fn draw_filter_stream_modal(f: &mut Frame, app: &App, area: Rect, title: &str, color: Color) {
     let boxes = &app.filter_stream_filters;
     // Rows: name label + name input + (label + input) per box + one hint row.

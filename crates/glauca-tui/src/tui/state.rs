@@ -1,13 +1,11 @@
 //! `App` state: construction, accessors, the memoized filter cache, unread-count
-//! recomputation, and the two-field modal input helpers. Split out of the tui
-//! module so `mod.rs` holds only the central types and the run loop wiring.
+//! recomputation, and the two-field modal input helpers.
 
 use super::*;
 
-/// The two fields of the active two-field modal (name/value order), or `None`
-/// outside the input modals. Single source of the input_mode → field pair
-/// mapping used by cursor sync and field clearing. Keep [`modal_fields_ref`]
-/// (the render-path counterpart) in sync with this mapping.
+/// The two fields of the active two-field modal (name/value order), or `None` outside the
+/// input modals. Keep [`modal_fields_ref`], the render-path counterpart, in sync with this
+/// mapping.
 pub(crate) fn modal_fields(app: &mut App) -> Option<(&mut SingleLineInput, &mut SingleLineInput)> {
     match app.input_mode {
         InputMode::NewQuery => Some((&mut app.new_query_name, &mut app.new_query_input)),
@@ -57,10 +55,9 @@ pub(crate) fn sync_modal_cursors(app: &mut App) {
     f1.set_active(field == 1);
 }
 
-/// The active field of a filter-stream modal: `modal_field` 0 = name, `i>=1` =
-/// box `i-1`. Single source of the index→field mapping used by the clear and
-/// text-input paths (`sync_modal_cursors` touches every box, so it keeps its
-/// own loop). Returns `None` for an out-of-range box index.
+/// The active field of a filter-stream modal: `modal_field` 0 = name, `i>=1` = box `i-1`.
+/// Shared by the clear and text-input paths; `sync_modal_cursors` touches every box, so it
+/// keeps its own loop. Returns `None` for an out-of-range box index.
 pub(crate) fn active_filter_stream_field_mut(app: &mut App) -> Option<&mut SingleLineInput> {
     match app.modal_field {
         0 => Some(&mut app.filter_stream_name),
@@ -146,9 +143,8 @@ impl App {
         }
     }
 
-    /// Whether any custom action applies to the selected item. Cheaper than
-    /// `custom_actions_for_selected` for the common "is the list non-empty?"
-    /// check (per-frame status hint, `x` guard) — it allocates nothing.
+    /// Whether any custom action applies to the selected item. Allocates nothing, unlike
+    /// `custom_actions_for_selected`, which matters for the per-frame status hint.
     pub fn has_custom_actions_for_selected(&self) -> bool {
         match self.selected_item() {
             Some(item) => self.custom_actions.has_for_kind(&item.kind),
@@ -169,9 +165,8 @@ impl App {
     pub fn filtered_items(&self) -> Vec<&ItemEntry> {
         {
             let mut cache = self.filtered_cache.borrow_mut();
-            // Compare inputs against the cached key by reference first — this runs
-            // several times per render, so we only allocate an owned key on an
-            // actual miss (filter/stream/user changed or items were replaced).
+            // Compare against the cached key by reference first: this runs several times
+            // per render, so an owned key is only allocated on an actual miss.
             let stale = match &cache.key {
                 Some((version, stream, inline, user)) => {
                     *version != self.items_version
@@ -225,9 +220,8 @@ impl App {
         }
     }
 
-    /// Install `items` as the visible list, clamping the cursor. `is_new` (unread)
-    /// is already set per item by `cached_item_to_item_entry` when the engine builds
-    /// them, so there is nothing to recompute here.
+    /// Install `items` as the visible list, clamping the cursor. `is_new` is already set
+    /// per item by `cached_item_to_item_entry`, so nothing is recomputed here.
     pub(crate) fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
         self.items = items;
         self.items_version = self.items_version.wrapping_add(1);
@@ -261,10 +255,9 @@ impl App {
         self.apply_items_to_view(items);
     }
 
-    /// Whether the filters shaping the current view lean on `@me` while the login
-    /// is unknown — i.e. the list is wrong (empty, or unfiltered for a negated
-    /// `@me`) for a reason the list itself can't show. The status bar turns this
-    /// into a warning; see [`glauca_core::logic::has_unexpanded_me`].
+    /// Whether the filters shaping the current view lean on `@me` while the login is
+    /// unknown — the list is then wrong for a reason it cannot show, and the status bar
+    /// turns this into a warning. See [`glauca_core::logic::has_unexpanded_me`].
     pub fn has_unexpanded_me(&self) -> bool {
         glauca_core::logic::has_unexpanded_me(
             self.current_user.as_deref(),
@@ -273,31 +266,27 @@ impl App {
         )
     }
 
-    /// Adopt a login the engine resolved after startup (see
-    /// `AppMessage::CurrentUserResolved`) and redo the work that was wrong without
-    /// it: every `@me` filter had been matching nobody.
+    /// Adopt a login the engine resolved after startup and redo the work that was wrong
+    /// without it: every `@me` filter had been matching nobody.
     ///
-    /// The visible list needs no nudge — `filtered_items`'s cache keys on the login,
-    /// so the next frame recomputes it. Unread badges do: they are only recomputed
-    /// when a query's items load. Refreshing the selected query's badges here fixes
-    /// what the user is looking at; the rest correct themselves on their next
-    /// background sync, a minute or so later.
+    /// The visible list needs no nudge — `filtered_items`'s cache keys on the login. Unread
+    /// badges do, since they are only recomputed when a query's items load. The selected
+    /// query is refreshed here; the rest correct themselves on their next sync.
     pub(crate) fn adopt_current_user(&mut self, login: String) {
         self.status = Some(format!("signed in as {login}"));
         self.current_user = Some(login);
         if let Some(query_id) = self.selected_root_query_id() {
             self.recompute_unread_counts_live(query_id);
         }
-        // A resolved login can *shrink* the list as well as grow it — `-author:@me`
-        // matched everything while `@me` was literal — so the cursor can be left
-        // past the end, which empties the detail pane and makes `j` do nothing.
+        // A resolved login can *shrink* the list as well as grow it — `-author:@me` matched
+        // everything while `@me` was literal — leaving the cursor past the end, which
+        // empties the detail pane and makes `j` do nothing.
         self.clamp_item_cursor();
     }
 
-    /// [`Self::recompute_unread_counts_for_query`] against the items already on
-    /// screen. Separate because that one borrows `items` while this borrows `self`
-    /// mutably; callers with nothing fresher to install would otherwise have to
-    /// move `self.items` out and back just to satisfy the borrow checker.
+    /// [`Self::recompute_unread_counts_for_query`] against the items already on screen.
+    /// Separate because that one borrows `items` while this borrows `self` mutably, so
+    /// callers with nothing fresher would have to move `self.items` out and back.
     pub(crate) fn recompute_unread_counts_live(&mut self, query_id: i64) {
         let updates = glauca_core::logic::compute_unread_counts(
             &self.entries,
@@ -340,10 +329,8 @@ mod tests {
         assert_eq!(app.item_cursor, 1);
     }
 
-    /// Applying a background sync that *removed* items must not leave the cursor
-    /// past the end, and must invalidate the memoized filter cache. Removals only
-    /// reach this path now that `count_changes` counts them, so this locks in that
-    /// the shrinking case is handled.
+    /// Applying a background sync that *removed* items must not leave the cursor past the
+    /// end, and must invalidate the memoized filter cache.
     #[test]
     fn apply_pending_items_clamps_cursor_after_removal() {
         let mut app = make_app_with_items(&["Alpha", "Beta", "Gamma"]);
@@ -372,9 +359,8 @@ mod tests {
 
     #[test]
     fn filtered_cache_invalidates_on_items_change() {
-        // The memoized filter cache keys on items_version; clearing or replacing
-        // items must invalidate it so stale indices are never mapped into a
-        // changed list (which would return wrong results or panic).
+        // The memoized filter cache keys on items_version, so clearing or replacing items
+        // must invalidate it — stale indices into a changed list panic or answer wrongly.
         let mut app = make_app_with_items(&["Fix a", "Fix b", "Add c"]);
         app.filter = ta("fix");
         assert_eq!(app.filtered_items().len(), 2); // populates the cache
@@ -441,11 +427,9 @@ mod tests {
         assert_eq!(app.filtered_items().len(), 2);
     }
 
-    /// `has_unexpanded_me` only forwards `App`'s two filters to core, which owns and
-    /// tests the predicate itself. What's worth pinning here is that *both* fields
-    /// are wired up — a wrapper that forgot the search box would look fine until
-    /// someone typed `@me` into it. Whether it clears is covered end-to-end by the
-    /// status-bar render test.
+    /// `has_unexpanded_me` only forwards `App`'s two filters to core, which tests the
+    /// predicate itself. What is worth pinning here is that *both* fields are wired up — a
+    /// wrapper that forgot the search box would look fine until someone typed `@me` in it.
     #[rstest]
     #[case::from_the_stream_filter(Some("author:@me"), "")]
     #[case::from_the_search_box(None, "author:@me")]
@@ -479,9 +463,8 @@ mod tests {
         assert_eq!(app.filtered_items().len(), 1);
     }
 
-    /// A negated `@me` filter runs the other way: it matched everything while the
-    /// login was literal, and shrinks once it resolves. The cursor must come back
-    /// inside the list, or the detail pane goes blank and `j` stops responding.
+    /// A negated `@me` filter runs the other way: it matched everything while the login was
+    /// literal and shrinks once it resolves, so the cursor must come back inside the list.
     #[test]
     fn adopting_a_late_login_pulls_the_cursor_back_into_a_shrunken_list() {
         let mut app = make_app_with_items(&["alice's PR", "alice's other PR"]);
@@ -495,8 +478,8 @@ mod tests {
         assert_eq!(app.item_cursor, 0, "cursor left past the end of the list");
     }
 
-    /// Unread badges are computed against the same filters, so they were wrong for
-    /// the same reason and must be refreshed too — not just the visible list.
+    /// Unread badges are computed against the same filters, so they were wrong for the same
+    /// reason and must be refreshed too.
     #[test]
     fn adopting_a_late_login_refreshes_unread_counts() {
         let mut app = App::new(vec![]);
@@ -600,8 +583,6 @@ mod tests {
         assert_eq!(app.unread_counts.get(&(true, 2)), Some(&1));
     }
 
-    // ── App::new defaults ────────────────────────────────────────────────────────
-
     #[test]
     fn app_new_default_state() {
         let app = App::new(vec![]);
@@ -664,8 +645,6 @@ mod tests {
         assert_eq!(app.action_cursor, 0);
         assert_eq!(app.merge_strategy_cursor, 0);
     }
-
-    // ── expand_me ────────────────────────────────────────────────────────────────
 
     #[rstest]
     #[case::author_at_me(Some("octocat"), "author:@me", "author:octocat")]

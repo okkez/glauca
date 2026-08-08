@@ -1,10 +1,8 @@
 //! Persisted GUI preferences (pane sizes, …).
 //!
-//! Kept separate from the core `cache.db`: these are GUI-only, presentation
-//! settings that the TUI neither reads nor writes, so a small TOML file under
-//! the user config dir is simpler than a DB table. Reads/writes are
-//! best-effort — a missing or corrupt file falls back to defaults, and write
-//! failures are swallowed (a non-persisted layout is not worth crashing over).
+//! A small TOML file under the user config dir, kept out of `cache.db` because it is
+//! GUI-only presentation state. Reads and writes are best-effort: a missing or corrupt
+//! file falls back to defaults, and write failures are swallowed.
 
 use std::path::PathBuf;
 
@@ -23,34 +21,24 @@ pub enum ThemePreference {
     Dark,
 }
 
-/// Default when the settings file omits `sync_interval_secs`. Defined in core so
-/// the GUI and TUI share one default; clamped to `MIN_SYNC_INTERVAL_SECS` by the
-/// engine.
 fn default_sync_interval_secs() -> u64 {
     glauca_core::engine::DEFAULT_SYNC_INTERVAL_SECS
 }
 
-/// Default when the settings file omits `full_fetch_interval_secs`. Shared across
-/// front-ends; clamped to at least the sync interval by `SyncConfig::effective`.
 fn default_full_fetch_interval_secs() -> u64 {
     glauca_core::engine::DEFAULT_FULL_FETCH_INTERVAL_SECS
 }
 
-/// Default when the settings file omits `retention_days`. Shared across
-/// front-ends. See `db::clear_stale_bodies`.
 fn default_retention_days() -> u64 {
     glauca_core::engine::DEFAULT_RETENTION_DAYS
 }
 
-/// Default when the settings file omits `max_items_per_query`. See
-/// `db::prune_query_overflow`.
 fn default_max_items_per_query() -> u64 {
     glauca_core::engine::DEFAULT_MAX_ITEMS_PER_QUERY
 }
 
-// `Default` is implemented manually rather than derived: a derived default would
-// give `sync_interval_secs = 0` (an invalid interval), so it must fall back to
-// the same value as the serde default.
+// `Default` is hand-written below rather than derived: a derived default would give
+// `sync_interval_secs = 0`, an invalid interval, instead of the serde default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuiSettings {
     /// Pixel widths of the resizable panes, left-to-right. Empty until the
@@ -60,29 +48,25 @@ pub struct GuiSettings {
     /// Color theme. Defaults to `System` (follow the OS appearance).
     #[serde(default)]
     pub theme: ThemePreference,
-    /// Whether desktop notifications fire when a background sync surfaces new or
-    /// updated items. Defaults to `false` (opt-in).
+    /// Whether desktop notifications fire when a background sync surfaces new or updated
+    /// items. Opt-in.
     #[serde(default)]
     pub notifications_enabled: bool,
-    /// Background auto-sync interval (seconds). Defaults to
-    /// `DEFAULT_SYNC_INTERVAL_SECS`; the engine clamps it to a sane minimum.
+    /// Background auto-sync interval (seconds); the engine clamps it to a minimum.
     #[serde(default = "default_sync_interval_secs")]
     pub sync_interval_secs: u64,
-    /// How often an incremental background sync is upgraded to a full fetch, which
-    /// is what prunes items that silently stopped matching the query. Lower it to
-    /// drop such items sooner, raise it to spend less API quota on large queries.
-    /// Defaults to `DEFAULT_FULL_FETCH_INTERVAL_SECS`.
+    /// How often an incremental background sync is upgraded to a full fetch, which is what
+    /// prunes items that silently stopped matching. Lower it to drop such items sooner,
+    /// raise it to spend less API quota on large queries.
     #[serde(default = "default_full_fetch_interval_secs")]
     pub full_fetch_interval_secs: u64,
-    /// Age (days) past which a cached item's re-fetchable `body` is cleared to
-    /// reclaim cache space (terminal-state items are cleared regardless of age).
-    /// Defaults to `DEFAULT_RETENTION_DAYS`.
+    /// Age (days) past which a cached item's re-fetchable `body` is cleared; terminal-state
+    /// items are cleared regardless of age.
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
-    /// Per-query cap on cached rows; read overflow beyond it is pruned. Defaults
-    /// to `DEFAULT_MAX_ITEMS_PER_QUERY`, and is raised to GitHub search's
-    /// ~1000-result cap if set lower (a smaller cap deletes rows the next sync
-    /// re-inserts as unread).
+    /// Per-query cap on cached rows; read overflow beyond it is pruned. Raised to GitHub
+    /// search's ~1000-result cap if set lower, since a smaller cap deletes rows the next
+    /// sync re-inserts as unread.
     #[serde(default = "default_max_items_per_query")]
     pub max_items_per_query: u64,
 }
@@ -120,8 +104,8 @@ impl GuiSettings {
             .unwrap_or_default()
     }
 
-    /// Persist settings via `glauca_core::fs::atomic_write` (temp file + rename;
-    /// see there for why). Best-effort: any I/O or serialization error is ignored.
+    /// Persist settings via `glauca_core::fs::atomic_write`. Best-effort: any I/O or
+    /// serialization error is ignored.
     pub fn save(&self) {
         let Some(path) = Self::path() else {
             return;

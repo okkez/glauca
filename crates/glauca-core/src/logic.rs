@@ -6,33 +6,30 @@ use crate::db::CachedItem;
 use crate::filter::{FilterQuery, StreamFilter};
 use crate::types::{ActorKind, ItemEntry, LeftPaneEntry, UserRef};
 
-/// An item is unread iff its current `updated_at` is newer than the `updated_at`
-/// the user had seen when they last read it. Never-read items (`None`) are always
-/// unread. Unread items are highlighted as "new" and counted in the unread badge.
+/// An item is unread iff its current `updated_at` is newer than the `updated_at` the user
+/// had seen when they last read it. Never-read items (`None`) are always unread.
 ///
 /// String comparison is valid because every `updated_at` is RFC3339 UTC (`…Z`), so
-/// lexicographic order equals chronological order (the same assumption behind the
-/// `ORDER BY updated_at DESC` in `db::fetch_items`).
+/// lexicographic order equals chronological order — the same assumption behind the
+/// `ORDER BY updated_at DESC` in `db::fetch_items`.
 pub fn is_item_unread(updated_at: &str, last_read_updated_at: Option<&str>) -> bool {
     last_read_updated_at
         .map(|seen| updated_at > seen)
         .unwrap_or(true)
 }
 
-/// What a freshly synced list changed relative to the list currently on screen.
-/// Items are keyed by (repo_owner, repo_name, number). Drives the deferred-refresh
-/// banner shown when a background sync's results are held back from the view.
+/// What a freshly synced list changed relative to the list currently on screen, keyed by
+/// (repo_owner, repo_name, number). Drives the deferred-refresh banner.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChangeCounts {
     /// Items new to the list, or whose `updated_at` advanced.
     pub updated: usize,
-    /// Items on screen but absent from the fresh list. Usually they stopped matching
-    /// the query and were pruned (`db::prune_missing_items`), though the cache-size
-    /// sweep (`db::prune_query_overflow`) can remove rows too.
+    /// Items on screen but absent from the fresh list — pruned by
+    /// `db::prune_missing_items`, or by the cache-size sweep.
     ///
-    /// Counting these is what makes a removal-only background sync visible. A
-    /// front-end that looked at `updated` alone would see zero changes, discard the
-    /// pruned list, and keep displaying the removed item forever.
+    /// Counting these is what makes a removal-only background sync visible. A front-end
+    /// looking at `updated` alone would see zero changes, discard the pruned list, and
+    /// keep displaying the removed item forever.
     pub removed: usize,
 }
 
@@ -42,15 +39,13 @@ impl ChangeCounts {
         self.updated + self.removed
     }
 
-    /// Nothing changed, so no banner should be shown and the held-back list can be
-    /// dropped. This is the check front-ends gate on.
+    /// Nothing changed, so no banner is shown and the held-back list can be dropped.
     pub fn is_empty(&self) -> bool {
         self.total() == 0
     }
 
-    /// Banner text for the deferred-refresh affordance: "3 updated",
-    /// "2 no longer match", or "3 updated, 2 no longer match". Empty when nothing
-    /// changed — callers show no banner then.
+    /// Banner text: "3 updated", "2 no longer match", or "3 updated, 2 no longer match".
+    /// Empty when nothing changed.
     pub fn banner_label(&self) -> String {
         match (self.updated, self.removed) {
             (0, 0) => String::new(),
@@ -63,15 +58,14 @@ impl ChangeCounts {
 
 /// Diff `fresh` against `current`, counting new/updated items and removals.
 ///
-/// Note the deliberate asymmetry with [`crate::notify::ItemTracker`]: desktop
-/// notifications count only the `updated` side, so a removal never fires one.
+/// Deliberately asymmetric with [`crate::notify::ItemTracker`]: desktop notifications
+/// count only the `updated` side, so a removal never fires one.
 ///
-/// TODO(known limitation): the diff key is (owner, repo, number) plus `updated_at`, so
-/// a field that changes *without* `updated_at` advancing is not counted and the
-/// held-back list is discarded. The cached row is already correct by then; the view
-/// catches up on the next foreground load. Applying silently when `is_empty()` is
-/// deliberately not done — `MarkItemRead` is fire-and-forget, so an in-flight fresh
-/// list could resurrect an item the user just read as unread.
+/// TODO(known limitation): the diff key is (owner, repo, number) plus `updated_at`, so a
+/// field that changes *without* `updated_at` advancing is not counted and the held-back
+/// list is discarded. The cached row is already correct by then. Applying silently when
+/// `is_empty()` is deliberately not done — `MarkItemRead` is fire-and-forget, so an
+/// in-flight fresh list could resurrect an item the user just read as unread.
 pub fn count_changes(current: &[ItemEntry], fresh: &[ItemEntry]) -> ChangeCounts {
     type Key<'a> = (&'a str, &'a str, i64);
     fn key(it: &ItemEntry) -> Key<'_> {
@@ -105,26 +99,21 @@ pub fn decode_labels(raw: &str) -> Vec<String> {
 }
 
 /// Reviewers / assignees are stored as a JSON array of objects, e.g.
-/// '[{"login":"alice","avatar_url":"https://…","kind":"user"}]'. Rows written
-/// before `kind` existed omit it and decode as users (`UserRef::kind` carries
-/// `#[serde(default)]`, and `ActorKind`'s default variant is `User`). Older
-/// cache rows hold a plain string array
-/// ('["alice"]'); fall back to that for backward compat (those rows render
-/// without avatars until the next re-sync).
+/// '[{"login":"alice","avatar_url":"https://…","kind":"user"}]'. Rows written before `kind`
+/// existed omit it and decode as users (`UserRef::kind` is `#[serde(default)]`); older rows
+/// still hold a plain string array ('["alice"]') and fall back to that, rendering without
+/// avatars until the next re-sync.
 ///
-/// A row can also carry a `kind` this binary does not recognise (an older
-/// binary reading a row a newer one wrote). `ActorKind` has no catch-all
-/// variant, so such an element fails to deserialize; salvage the array
-/// element-by-element in that case instead of losing every reviewer for one
-/// unrecognised entry.
+/// A row can also carry a `kind` this binary does not recognise (an older binary reading
+/// what a newer one wrote). `ActorKind` has no catch-all variant, so such an element fails
+/// to deserialize; salvage the array element-by-element rather than losing every reviewer
+/// for one unrecognised entry.
 pub fn decode_users(raw: &str) -> Vec<UserRef> {
     if let Ok(users) = serde_json::from_str::<Vec<UserRef>>(raw) {
         return users;
     }
-    // Legacy string-array format: must keep working, so it is checked before
-    // the per-element salvage below (which would otherwise "succeed" on it
-    // too, but decode every bare string to nothing, since a plain string
-    // never converts to a `UserRef` object).
+    // Checked before the per-element salvage below, which would otherwise "succeed" on a
+    // string array but decode every bare string to nothing.
     if let Ok(logins) = serde_json::from_str::<Vec<String>>(raw) {
         return logins.into_iter().map(UserRef::new).collect();
     }
@@ -182,9 +171,8 @@ impl ReviewState {
     }
 }
 
-/// Reviewers to show on an item, as (user, state): everyone who submitted a
-/// review (with their state) plus requested reviewers who have not yet reviewed
-/// (as `Pending`). Mirrors the TUI detail-pane reviewer logic.
+/// Reviewers to show on an item, as (user, state): everyone who submitted a review, plus
+/// requested reviewers who have not yet reviewed (as `Pending`).
 pub fn reviewer_overlays(item: &ItemEntry) -> Vec<(UserRef, ReviewState)> {
     let mut out: Vec<(UserRef, ReviewState)> = item
         .reviews
@@ -200,7 +188,6 @@ pub fn reviewer_overlays(item: &ItemEntry) -> Vec<(UserRef, ReviewState)> {
 }
 
 pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
-    // Unread (highlighted as new) iff updated since the user last read it.
     let is_new = is_item_unread(&c.updated_at, c.last_read_updated_at.as_deref());
     ItemEntry {
         number: c.number,
@@ -241,15 +228,11 @@ const ME_TOKEN: &str = "@me";
 /// Falls back to `@me` unchanged if the user is not known yet.
 pub fn expand_me<'a>(current_user: Option<&str>, s: &'a str) -> Cow<'a, str> {
     match current_user {
-        // Only rewrite when an `@me` token actually appears; otherwise borrow
-        // unchanged. Tokenised rather than a substring test, so the gate accepts
-        // exactly what the expansion below would rewrite — a case-sensitive
-        // `contains` used to swallow `AUTHOR:@ME` here and leave it unexpanded,
-        // despite the per-token rule accepting it.
+        // Tokenised rather than a substring test, so the gate accepts exactly what the
+        // expansion below rewrites — including `AUTHOR:@ME`.
         Some(login) if has_me_token(s) => Cow::Owned(
-            // Expand per line so newline group separators survive: a filter
-            // stream's `filter` holds one OR-group per line (see
-            // `filter::StreamFilter`), and collapsing `\n` into a space here
+            // Expand per line so newline group separators survive: a filter stream's
+            // `filter` holds one OR-group per line, and collapsing `\n` into a space
             // would merge the groups into a single AND-group.
             s.split('\n')
                 .map(|line| expand_me_line(line, login))
@@ -263,13 +246,12 @@ pub fn expand_me<'a>(current_user: Option<&str>, s: &'a str) -> Cow<'a, str> {
 /// The part of `tok` that survives `@me` substitution, or `None` when the token
 /// carries no `@me` to substitute.
 ///
-/// The two accepted spellings are a bare `@me` (prefix `""`) and a qualifier's
-/// value, `author:@me` (prefix `author:`, case-insensitive). A token that merely
-/// *contains* the letters — a plain search for `@mentions` — is not one of them.
+/// The two accepted spellings are a bare `@me` (prefix `""`) and a qualifier's value,
+/// `author:@me` (prefix `author:`, case-insensitive). A token that merely *contains* the
+/// letters — a plain search for `@mentions` — is not one of them.
 ///
-/// Both expansion and [`has_unexpanded_me`] route through here, so they cannot
-/// disagree about what counts as an `@me`: a warning about a filter that actually
-/// works is as wrong as silence about one that doesn't.
+/// Both expansion and [`has_unexpanded_me`] route through here, so they cannot disagree
+/// about what counts as an `@me`.
 fn me_token_prefix(tok: &str) -> Option<&str> {
     if tok.eq_ignore_ascii_case(ME_TOKEN) {
         return Some("");
@@ -283,9 +265,9 @@ fn me_token_prefix(tok: &str) -> Option<&str> {
 
 /// `true` when any token in `s` is an `@me` (see [`me_token_prefix`]).
 ///
-/// Public for the one caller that has no login to compare against: code handed a
-/// string that [`expand_me`] has *already* run over. A surviving `@me` there means
-/// the login was unknown at expansion time — see `engine`'s `MarkAllRead`.
+/// Public for the one caller that has no login to compare against: code handed a string
+/// [`expand_me`] has *already* run over, where a surviving `@me` means the login was
+/// unknown at expansion time. See `engine`'s `MarkAllRead`.
 pub fn has_me_token(s: &str) -> bool {
     s.split_whitespace()
         .any(|tok| me_token_prefix(tok).is_some())
@@ -306,20 +288,17 @@ fn expand_me_line(line: &str, login: &str) -> String {
 /// query) ANDed with the inline search box — lean on `@me` while the login is
 /// unknown, so [`expand_me`] leaves the token literal.
 ///
-/// A literal `@me` doesn't fail in one direction: `author:@me` matches nobody,
-/// while `-author:@me` excludes only the login literally named "@me" and so
-/// matches *everybody*. Either way the list on screen is not the one asked for,
-/// and nothing about it says why — that silence is what this predicate exists to
-/// break. Front-ends call it for the view they are about to render and show
-/// [`ME_UNEXPANDED_WARNING`] next to the result.
+/// A literal `@me` doesn't fail in one direction: `author:@me` matches nobody, while
+/// `-author:@me` excludes only the login literally named "@me" and so matches *everybody*.
+/// Either way the list on screen is not the one asked for and nothing says why — front-ends
+/// show [`ME_UNEXPANDED_WARNING`] next to the result.
 ///
-/// It takes both filters rather than one because all three front-ends ask about
-/// exactly this pair; three copies of "either of them" would drift the moment a
-/// third filter layer appears.
+/// It takes both filters rather than one because all three front-ends ask about exactly
+/// this pair; three copies of "either of them" would drift.
 ///
-/// Tokenised exactly as expansion is (see [`me_token_prefix`]) rather than by
-/// substring: `@mentions` is a search term, not a broken `@me`, and warning about
-/// it would teach the user to ignore the warning.
+/// Tokenised exactly as expansion is (see [`me_token_prefix`]) rather than by substring:
+/// `@mentions` is a search term, and warning about it would teach the user to ignore the
+/// warning.
 pub fn has_unexpanded_me(
     current_user: Option<&str>,
     stream_filter: Option<&str>,
@@ -329,12 +308,12 @@ pub fn has_unexpanded_me(
         && (stream_filter.is_some_and(has_me_token) || has_me_token(inline_filter))
 }
 
-/// What to tell the user when [`has_unexpanded_me`] holds. Lives here, next to the
-/// predicate, so the three front-ends explain the same empty list the same way.
+/// What to tell the user when [`has_unexpanded_me`] holds. Lives next to the predicate so
+/// the three front-ends explain the same empty list the same way.
 ///
-/// States the fact and nothing more. It is tempting to add "retrying…", but the
-/// retry gives up on a refusal (`engine::current_user_retry_task`), and a promise
-/// of recovery that may never come is worse than the bare cause.
+/// It is tempting to add "retrying…", but the retry gives up on a refusal
+/// (`engine::current_user_retry_task`), and a promise of recovery that may never come is
+/// worse than the bare cause.
 pub const ME_UNEXPANDED_WARNING: &str = "@me not expanded: GitHub login unknown";
 
 /// Filter `items` by an optional stream filter ANDed with the inline filter.
@@ -351,9 +330,8 @@ pub fn filter_items<'a>(
         .collect()
 }
 
-/// Like [`filter_items`], but returns the indices of the matching items instead
-/// of borrowing them. Callers that memoize the filter result store these
-/// (indices don't borrow `items`, so they can be cached) and map back on demand.
+/// Like [`filter_items`], but returns indices instead of borrowing the items — callers that
+/// memoize the filter result can cache these, where borrows of `items` would not.
 pub fn filter_item_indices(
     items: &[ItemEntry],
     stream_filter: Option<&str>,
@@ -428,9 +406,8 @@ pub fn group_range(entries: &[LeftPaneEntry], query_idx: usize) -> std::ops::Ran
     query_idx..end
 }
 
-/// Moves the query group at `query_idx` one position down (past the next query
-/// group). Returns the new index of the moved group, or `None` if it was
-/// already at the bottom.
+/// Moves the query group at `query_idx` one position down, past the next query group.
+/// Returns the new index of the moved group, or `None` if it was already at the bottom.
 pub fn move_group_down(entries: &mut Vec<LeftPaneEntry>, query_idx: usize) -> Option<usize> {
     let range_a = group_range(entries, query_idx);
     let next_query_idx = range_a.end;
@@ -470,10 +447,7 @@ mod tests {
         );
     }
 
-    /// `expand_me` documents itself as case-insensitive, but wasn't: the gate in
-    /// front of it was a case-sensitive `contains`, and the bare-token arm compared
-    /// with `==`. Only the qualifier arm (`:@me`) lowercased, so `AUTHOR:@ME` and
-    /// `@Me` were both left literal and matched nobody.
+    /// Case-insensitive in every arm: a token left literal would match nobody.
     #[rstest]
     #[case::uppercase_qualifier("AUTHOR:@ME", "AUTHOR:alice")]
     #[case::mixed_case_bare("@Me", "alice")]
@@ -493,9 +467,8 @@ mod tests {
         assert_eq!(expand_me(Some("alice"), input), input);
     }
 
-    // Either filter shaping the view can be the inert one, and the warning speaks
-    // for both — a stream filter the user can't see the text of, and the search box.
-    // (*Which* strings count as an `@me` is pinned by the agreement test below.)
+    // Either filter shaping the view can be the inert one, and the warning speaks for
+    // both. (*Which* strings count as an `@me` is pinned by the agreement test below.)
     #[rstest]
     #[case::stream_filter(Some("author:@me"), "", true)]
     #[case::inline_filter(None, "author:@me", true)]
@@ -523,9 +496,8 @@ mod tests {
         ));
     }
 
-    /// The warning must fire on exactly the filters a login would have changed. If
-    /// the two ever disagree, either a working filter gets flagged or a broken one
-    /// stays silent — and both teach the user to distrust the warning.
+    /// The warning must fire on exactly the filters a login would have changed. If the two
+    /// disagree, either a working filter is flagged or a broken one stays silent.
     #[rstest]
     #[case::qualifier("author:@me")]
     #[case::bare_token("@me")]
@@ -565,17 +537,16 @@ mod tests {
 
     #[test]
     fn decode_users_treats_a_missing_kind_as_a_user() {
-        // Rows cached before `kind` existed carry no discriminator. Reading them as
-        // users is what bounds the upgrade window to "teams look like users until the
-        // next full fetch" instead of the reverse, which would mis-render real users.
+        // Rows cached before `kind` existed carry no discriminator. Reading them as users
+        // bounds the upgrade window to "teams look like users until the next full fetch"
+        // instead of the reverse, which would mis-render real users.
         let users = decode_users(r#"[{"login":"my-team","avatar_url":null}]"#);
         assert_eq!(users[0].kind, ActorKind::User);
     }
 
     #[test]
     fn decode_users_falls_back_to_legacy_string_array() {
-        // Old cache rows stored a plain string array; they should still parse
-        // (with no avatar) until the next re-sync.
+        // Old cache rows stored a plain string array; they must still parse, without avatars.
         let users = decode_users(r#"["bob","carol"]"#);
         let logins: Vec<&str> = users.iter().map(|u| u.login.as_str()).collect();
         assert_eq!(logins, vec!["bob", "carol"]);
@@ -585,10 +556,9 @@ mod tests {
 
     #[test]
     fn decode_users_salvages_well_formed_entries_around_an_unrecognised_kind() {
-        // An older binary must not lose every reviewer just because a newer binary
-        // wrote a `kind` it doesn't know about (e.g. a future `"bot"` variant):
-        // the well-formed entries in the same array should still come through,
-        // rather than the whole row decoding to nothing.
+        // An older binary must not lose every reviewer because a newer one wrote a `kind`
+        // it doesn't know (e.g. a future `"bot"`): the well-formed entries still come
+        // through rather than the whole row decoding to nothing.
         let users = decode_users(
             r#"[{"login":"alice","avatar_url":null,"kind":"user"},
                 {"login":"some-bot","avatar_url":null,"kind":"bot"}]"#,
@@ -705,7 +675,6 @@ mod tests {
 
     #[test]
     fn is_item_unread_updated_after_read_resurfaces() {
-        // Read at the older updated_at; a newer update makes it unread again.
         assert!(is_item_unread(
             "2026-06-02T00:00:00Z",
             Some("2026-06-01T00:00:00Z")
@@ -714,7 +683,6 @@ mod tests {
 
     #[test]
     fn is_item_unread_same_updated_at_is_read() {
-        // No change since it was last read → stays read.
         assert!(!is_item_unread(
             "2026-06-01T00:00:00Z",
             Some("2026-06-01T00:00:00Z")

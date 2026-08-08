@@ -18,8 +18,8 @@ impl GlaucaApp {
             .cloned()
     }
 
-    /// `o` — open the selected item in the browser (only from the item list,
-    /// mirroring the TUI). Also available via the action menu.
+    /// `o` — open the selected item in the browser, only from the item list. Also
+    /// available via the action menu.
     pub(crate) fn on_open_in_browser(
         &mut self,
         _: &OpenInBrowser,
@@ -52,9 +52,8 @@ impl GlaucaApp {
         }
     }
 
-    /// `x` — open the custom-action picker for the selected item, anchored near
-    /// the last pointer position (mirroring the Enter action menu). No-op with a
-    /// status hint when no defined action applies to the item's kind.
+    /// `x` — open the custom-action picker for the selected item, anchored near the last
+    /// pointer position. No-op with a status hint when none applies to the item's kind.
     pub(crate) fn on_run_custom_action(
         &mut self,
         _: &RunCustomAction,
@@ -95,9 +94,8 @@ impl GlaucaApp {
             .collect()
     }
 
-    /// The query string of the root query with `root_id` (found in the left-pane
-    /// entries) — needed to re-sync the list backing a filter stream, which has
-    /// no query string of its own.
+    /// The query string of the root query with `root_id` — needed to re-sync the list
+    /// backing a filter stream, which has no query string of its own.
     pub(crate) fn root_query_str_for(&self, root_id: i64) -> Option<String> {
         self.entries.iter().find_map(|e| match e {
             LeftPaneEntry::Query(q) if q.id == root_id => Some(q.query_str.clone()),
