@@ -138,6 +138,10 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             app.status = Some(msg);
         }
         AppMessage::ActionError(err) => {
+            // Also the failure path for a reorder round trip (both the reorder and the
+            // read-back failed, so no EntriesReloaded followed) — clear the gate here too,
+            // or a rejected reorder would leave J/K dead for the rest of the session.
+            app.reorder_pending = false;
             app.status = Some(format!("Error: {err}"));
         }
         AppMessage::CommentsLoaded(comments) => {
@@ -200,12 +204,29 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             select_current_entry(app, engine, true).await;
         }
         AppMessage::EntriesReloaded { entries, active } => {
+            app.reorder_pending = false;
+            let previous = app.entries.get(app.entry_cursor).map(|e| e.key());
+            let (cursor, changed) = glauca_core::logic::resolve_reloaded_selection(
+                &entries,
+                active,
+                previous,
+                app.entry_cursor,
+            );
             app.entries = entries;
-            app.entry_cursor = app
-                .entries
-                .iter()
-                .position(|e| e.key() == active)
-                .unwrap_or_else(|| app.entry_cursor.min(app.entries.len().saturating_sub(1)));
+            app.entry_cursor = cursor;
+            if changed {
+                // The previously selected entry is gone from the reload — it was deleted by
+                // another instance between the keypress and this read-back, one of the two
+                // ways a reorder can be rejected. `items`/`stream_filter` still belong to
+                // that entry, so follow the cursor to the new selection rather than leaving
+                // the item pane showing it under a different highlight.
+                app.clear_items();
+                app.item_cursor = 0;
+                app.detail_scroll = 0;
+                app.filter = SingleLineInput::new();
+                app.stream_filter = None;
+                select_current_entry(app, engine, true).await;
+            }
         }
         AppMessage::CurrentUserResolved { login, .. } => app.adopt_current_user(login),
     }

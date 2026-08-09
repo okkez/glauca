@@ -279,16 +279,30 @@ impl GlaucaApp {
                 needs_refilter |= self.remove_entries_and_reselect(|e| e.id() != id);
             }
             AppMessage::EntriesReloaded { entries, active } => {
+                self.reorder_pending = false;
+                let previous = self.entries.get(self.entry_cursor).map(|e| e.key());
+                let (cursor, changed) =
+                    resolve_reloaded_selection(&entries, active, previous, self.entry_cursor);
                 self.entries = entries;
-                self.entry_cursor = self
-                    .entries
-                    .iter()
-                    .position(|e| e.key() == active)
-                    .unwrap_or_else(|| self.entry_cursor.min(self.entries.len().saturating_sub(1)));
+                if changed {
+                    // The previously selected entry is gone from the reload — it was
+                    // deleted by another instance between the keypress and this read-back,
+                    // one of the two ways a reorder can be rejected. `items`/`stream_filter`
+                    // still belong to that entry, so follow the cursor to the new selection
+                    // rather than leaving the item pane showing it under a different
+                    // highlight.
+                    self.select_index(cursor);
+                } else {
+                    self.entry_cursor = cursor;
+                }
             }
 
             AppMessage::ActionDone(s) => self.status = Some(s),
             AppMessage::ActionError(e) => {
+                // Also the failure path for a reorder round trip (both the reorder and the
+                // read-back failed, so no EntriesReloaded followed) — clear the gate here
+                // too, or a rejected reorder would leave reordering dead for the session.
+                self.reorder_pending = false;
                 self.status = Some(format!("Error: {e}"));
                 window.push_notification(Notification::error(e), cx);
             }

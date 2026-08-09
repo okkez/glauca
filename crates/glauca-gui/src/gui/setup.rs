@@ -103,6 +103,7 @@ impl GlaucaApp {
             pending_items: None,
             pending_changes: ChangeCounts::default(),
             syncing: false,
+            reorder_pending: false,
             bg_sync_pending: 0,
             status: None,
             left_scroll: ScrollHandle::new(),

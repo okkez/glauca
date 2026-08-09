@@ -196,6 +196,11 @@ pub(crate) struct GlaucaApp {
 
     /// Whether a manual GitHub sync is in progress for the selected query.
     syncing: bool,
+    /// True from the moment a `ReorderQuery`/`ReorderFilterStream` command is sent until
+    /// its `EntriesReloaded`/`ActionError` reply arrives. `reorder_entry` drops input while
+    /// this is set: the pair it would otherwise send is computed from `entries`, which the
+    /// in-flight reorder may already have invalidated in the DB.
+    reorder_pending: bool,
     /// Number of pending background auto-refresh jobs (queued + in-progress).
     bg_sync_pending: usize,
     status: Option<String>,

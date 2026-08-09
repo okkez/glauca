@@ -35,6 +35,8 @@ const state = {
   bgSyncPending: 0,        // queued background-sync jobs (BgSyncQueued − BgSyncJobDone)
   bodyRefreshRequested: new Set(), // itemKey()s whose cleared body we've already
                           // asked to re-fetch this session (dedup for selectItem)
+  reorderPending: false,  // true from the reorder_query/reorder_filter_stream call until
+                          // EntriesReloaded/ActionError replies; see moveEntry
 };
 
 
@@ -1415,8 +1417,15 @@ async function deleteEntry(e) {
 }
 
 function moveEntry(idx, down) {
+  // Drop input while a reorder round trip is outstanding: `reorderArgs` computes the pair
+  // from `state.entries`, which isn't refreshed until the reply lands, so a repeat move
+  // would resend a pair the DB may have already rejected as no longer adjacent.
+  if (state.reorderPending) return;
   const r = reorderArgs(idx, down);
-  if (r) call(r.cmd, r.args);
+  if (r) {
+    state.reorderPending = true;
+    call(r.cmd, r.args);
+  }
 }
 
 function markAllRead(e) {
@@ -1756,6 +1765,10 @@ function handleMessage(msg) {
       setStatus(d);
       break;
     case "ActionError":
+      // Also the failure path for a reorder round trip (both the reorder and the
+      // read-back failed, so no EntriesReloaded followed) — clear the gate here too, or a
+      // rejected reorder would leave Shift+J/K dead for the rest of the session.
+      state.reorderPending = false;
       setStatus(d, true);
       break;
     case "SyncStarted":
@@ -1799,7 +1812,10 @@ function handleMessage(msg) {
     case "FilterStreamUpdated":
     case "QueryDeleted":
     case "FilterStreamDeleted":
+      refreshEntries();
+      break;
     case "EntriesReloaded":
+      state.reorderPending = false;
       refreshEntries();
       break;
     default:

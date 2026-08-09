@@ -82,7 +82,15 @@ impl GlaucaApp {
 
     /// Move the entry at `cursor` up/down within its group (index-based; no focus
     /// guard so right-click can target any row).
+    ///
+    /// Dropped while a reorder round trip is outstanding (see `reorder_pending`): the pair
+    /// computed below comes from `self.entries`, which isn't updated until the engine
+    /// replies, so a second move before then would resend a pair the DB may have already
+    /// rejected as no longer adjacent.
     pub(crate) fn reorder_entry(&mut self, cursor: usize, down: bool) {
+        if self.reorder_pending {
+            return;
+        }
         let cmd = match self.entries.get(cursor) {
             Some(LeftPaneEntry::Query(q)) => {
                 let current_id = q.id;
@@ -142,6 +150,7 @@ impl GlaucaApp {
             None => None,
         };
         if let Some(cmd) = cmd {
+            self.reorder_pending = true;
             self.send(cmd);
         }
     }

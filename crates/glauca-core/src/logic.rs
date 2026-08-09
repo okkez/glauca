@@ -406,9 +406,33 @@ pub fn group_range(entries: &[LeftPaneEntry], query_idx: usize) -> std::ops::Ran
     query_idx..end
 }
 
+/// Resolve the left-pane cursor after `AppMessage::EntriesReloaded`: the position of
+/// `active` in the freshly-loaded `entries`, or `fallback_cursor` (clamped) when `active`
+/// is no longer present. That absence means the moved row was deleted by another instance
+/// between the keypress and this reload — one of the two ways a reorder can be rejected.
+///
+/// Also reports whether the resolved position holds a *different* entry than `previous`,
+/// compared by identity (`EntryKey`) rather than index. This is true only in that deletion
+/// case: a successful reorder's `active` is the row that was already selected, so its
+/// identity is unchanged and the front-end has no reason to touch the item pane.
+pub fn resolve_reloaded_selection(
+    entries: &[LeftPaneEntry],
+    active: EntryKey,
+    previous: Option<EntryKey>,
+    fallback_cursor: usize,
+) -> (usize, bool) {
+    let cursor = entries
+        .iter()
+        .position(|e| e.key() == active)
+        .unwrap_or_else(|| fallback_cursor.min(entries.len().saturating_sub(1)));
+    let changed = entries.get(cursor).map(|e| e.key()) != previous;
+    (cursor, changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::QueryEntry;
     use rstest::rstest;
 
     #[test]
@@ -666,5 +690,70 @@ mod tests {
             "2026-06-01T00:00:00Z",
             Some("2026-06-01T00:00:00Z")
         ));
+    }
+
+    fn query(id: i64) -> LeftPaneEntry {
+        LeftPaneEntry::Query(QueryEntry {
+            id,
+            label: format!("q{id}"),
+            query_str: "is:open".into(),
+            kind: "pull_request".into(),
+        })
+    }
+
+    /// A successful reorder: `active` is still present at its (possibly new) position,
+    /// which is the same entry the caller says was already selected. Regression guard for
+    /// the "reload items on every reorder" property called out in the fix — this must
+    /// report `changed = false`.
+    #[test]
+    fn resolve_reloaded_selection_no_change_on_successful_reorder() {
+        // [B, A, C] after swapping A and B; A (id 1) is the row that was moved and was
+        // already selected before the swap.
+        let entries = vec![query(2), query(1), query(3)];
+        let active = EntryKey {
+            is_filter_stream: false,
+            id: 1,
+        };
+        let previous = Some(active);
+        let (cursor, changed) =
+            resolve_reloaded_selection(&entries, active, previous, /* fallback */ 0);
+        assert_eq!(cursor, 1);
+        assert!(!changed);
+    }
+
+    /// A rejected reorder where the active row was deleted by another instance in the
+    /// meantime: `active` is absent from `entries`, the cursor falls back, and — because
+    /// the fallback lands on a different entry than the one previously selected — the
+    /// caller must be told to re-select.
+    #[test]
+    fn resolve_reloaded_selection_reports_change_when_active_row_is_gone() {
+        let entries = vec![query(2), query(3)];
+        let deleted = EntryKey {
+            is_filter_stream: false,
+            id: 1,
+        };
+        // The user had entry id 1 selected (now gone); fallback_cursor mirrors the old
+        // cursor position, which now points at a surviving entry (id 2).
+        let previous = Some(deleted);
+        let (cursor, changed) = resolve_reloaded_selection(&entries, deleted, previous, 0);
+        assert_eq!(cursor, 0);
+        assert!(changed);
+        assert_eq!(entries[cursor].key().id, 2);
+    }
+
+    /// A rejected reorder where the active row survives (the pair merely drifted apart,
+    /// e.g. a second reorder keypress racing the first's reload): `active` is still found,
+    /// so nothing changed even though the reorder itself failed.
+    #[test]
+    fn resolve_reloaded_selection_no_change_when_active_survives_a_rejected_reorder() {
+        let entries = vec![query(1), query(2), query(3)];
+        let active = EntryKey {
+            is_filter_stream: false,
+            id: 1,
+        };
+        let previous = Some(active);
+        let (cursor, changed) = resolve_reloaded_selection(&entries, active, previous, 5);
+        assert_eq!(cursor, 0);
+        assert!(!changed);
     }
 }

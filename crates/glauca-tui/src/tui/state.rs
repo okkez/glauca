@@ -120,6 +120,7 @@ impl App {
             comments_sort_desc: false,
             status: None,
             syncing: false,
+            reorder_pending: false,
             bg_sync_pending: 0,
             detail_scroll: 0,
             current_user: None,

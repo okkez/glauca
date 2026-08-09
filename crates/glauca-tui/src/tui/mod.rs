@@ -160,6 +160,11 @@ pub struct App {
     pub status: Option<String>,
     /// Whether a manual GitHub sync is in progress for the selected query.
     pub syncing: bool,
+    /// True from the moment a `ReorderQuery`/`ReorderFilterStream` command is sent until
+    /// its `EntriesReloaded`/`ActionError` reply arrives. The J/K handler drops input while
+    /// this is set: the pair it would otherwise send is computed from `entries`, which the
+    /// in-flight reorder may already have invalidated in the DB.
+    pub reorder_pending: bool,
     /// Number of pending background auto-refresh jobs (queued + in-progress).
     pub bg_sync_pending: usize,
     /// Scroll offset for the detail pane (right column).
