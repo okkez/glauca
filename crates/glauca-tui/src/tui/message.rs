@@ -216,17 +216,20 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             app.entry_cursor = cursor;
             if changed {
                 // The reload lands on a different entry than was selected before this
-                // message (deleted by another instance, a reorder whose `active` names a
+                // message (deleted by a concurrent delete, a reorder whose `active` names a
                 // row other than the previous selection, or the cursor having moved while
                 // this round trip was in flight). `items`/`stream_filter` still belong to
                 // the old selection, so follow the cursor to the new one rather than
-                // leaving the item pane showing it under a different highlight.
+                // leaving the item pane showing it under a different highlight. Pass
+                // `false`: this reload is a purely local, offline-safe reorder, so only
+                // sync if the cache is stale rather than firing an unconditional network
+                // call on every cursor drift.
                 app.clear_items();
                 app.item_cursor = 0;
                 app.detail_scroll = 0;
                 app.filter = SingleLineInput::new();
                 app.stream_filter = None;
-                select_current_entry(app, engine, true).await;
+                select_current_entry(app, engine, false).await;
             }
         }
         AppMessage::CurrentUserResolved { login, .. } => app.adopt_current_user(login),

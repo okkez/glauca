@@ -286,14 +286,17 @@ impl GlaucaApp {
                 self.entries = entries;
                 if changed {
                     // The reload lands on a different entry than was selected before this
-                    // message (deleted by another instance, a reorder whose `active` names
-                    // a row other than the previous selection — e.g. the right-click menu
-                    // reordering a row that isn't selected — or the cursor having moved
-                    // while this round trip was in flight). `items`/`stream_filter` still
-                    // belong to the old selection, so follow the cursor to the new one
-                    // rather than leaving the item pane showing it under a different
-                    // highlight.
-                    self.select_index(cursor);
+                    // message (deleted by a concurrent delete, a reorder whose `active`
+                    // names a row other than the previous selection — e.g. the right-click
+                    // menu reordering a row that isn't selected — or the cursor having
+                    // moved while this round trip was in flight). `items`/`stream_filter`
+                    // still belong to the old selection, so follow the cursor to the new
+                    // one rather than leaving the item pane showing it under a different
+                    // highlight. Use `preview_entry`, not `select_index`: this reload is a
+                    // purely local, offline-safe reorder, and `select_index` ends in an
+                    // unconditional `Sync` that would fire a network call on every cursor
+                    // drift, not just an actual deletion.
+                    self.preview_entry(cursor);
                 } else {
                     self.entry_cursor = cursor;
                 }
