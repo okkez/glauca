@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use crate::db::CachedItem;
 use crate::filter::{FilterQuery, StreamFilter};
-use crate::types::{ActorKind, ItemEntry, LeftPaneEntry, UserRef};
+use crate::types::{ActorKind, EntryKey, ItemEntry, LeftPaneEntry, UserRef};
 
 /// An item is unread iff its current `updated_at` is newer than the `updated_at` the user
 /// had seen when they last read it. Never-read items (`None`) are always unread.
@@ -353,13 +353,13 @@ pub fn filter_item_indices(
 }
 
 /// Compute unread counts for every left-pane entry belonging to `query_id`.
-/// Returns `(entry_id, unread_count)` pairs for the caller to store.
+/// Returns `(key, unread_count)` pairs for the caller to store.
 pub fn compute_unread_counts(
     entries: &[LeftPaneEntry],
     query_id: i64,
     items: &[ItemEntry],
     current_user: Option<&str>,
-) -> Vec<((bool, i64), usize)> {
+) -> Vec<(EntryKey, usize)> {
     let mut out = Vec::new();
     for entry in entries
         .iter()
@@ -383,7 +383,7 @@ pub fn compute_unread_counts(
                     .count()
             }
         };
-        out.push((entry.unread_key(), unread));
+        out.push((entry.key(), unread));
     }
     out
 }
@@ -406,30 +406,37 @@ pub fn group_range(entries: &[LeftPaneEntry], query_idx: usize) -> std::ops::Ran
     query_idx..end
 }
 
-/// Moves the query group at `query_idx` one position down, past the next query group.
-/// Returns the new index of the moved group, or `None` if it was already at the bottom.
-pub fn move_group_down(entries: &mut Vec<LeftPaneEntry>, query_idx: usize) -> Option<usize> {
-    let range_a = group_range(entries, query_idx);
-    let next_query_idx = range_a.end;
-    if next_query_idx >= entries.len() {
-        return None; // already at the bottom
-    }
-    let range_b = group_range(entries, next_query_idx);
-
-    // Drain higher indices first to keep lower indices valid.
-    let group_b: Vec<_> = entries.drain(range_b.clone()).collect();
-    let group_a: Vec<_> = entries.drain(range_a.clone()).collect();
-    let insert_at = range_a.start;
-    let b_len = group_b.len();
-    for (i, item) in group_b.into_iter().chain(group_a).enumerate() {
-        entries.insert(insert_at + i, item);
-    }
-    Some(insert_at + b_len) // new start index of the moved group
+/// Resolve the left-pane cursor after `AppMessage::EntriesReloaded`: the position of
+/// `active` in the freshly-loaded `entries`, or `fallback_cursor` (clamped) when `active`
+/// is no longer present. That absence means the moved row was deleted by a concurrent
+/// delete between the keypress and this reload — one of the two ways a reorder can be
+/// rejected.
+///
+/// Also reports whether the resolved position holds a *different* entry than `previous`,
+/// compared by identity (`EntryKey`) rather than index — true whenever the reload changes
+/// which entry is selected, for any reason (the active row was deleted, `active` names a
+/// row other than the previously selected one, or the selection moved out from under this
+/// reload). The one case this is guaranteed `false` for is the one that matters for
+/// avoiding needless work: a successful reorder of the row that was already selected keeps
+/// `active` equal to `previous`, so the front-end can skip reloading the item pane.
+pub fn resolve_reloaded_selection(
+    entries: &[LeftPaneEntry],
+    active: EntryKey,
+    previous: Option<EntryKey>,
+    fallback_cursor: usize,
+) -> (usize, bool) {
+    let cursor = entries
+        .iter()
+        .position(|e| e.key() == active)
+        .unwrap_or_else(|| fallback_cursor.min(entries.len().saturating_sub(1)));
+    let changed = entries.get(cursor).map(|e| e.key()) != previous;
+    (cursor, changed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::QueryEntry;
     use rstest::rstest;
 
     #[test]
@@ -687,5 +694,70 @@ mod tests {
             "2026-06-01T00:00:00Z",
             Some("2026-06-01T00:00:00Z")
         ));
+    }
+
+    fn query(id: i64) -> LeftPaneEntry {
+        LeftPaneEntry::Query(QueryEntry {
+            id,
+            label: format!("q{id}"),
+            query_str: "is:open".into(),
+            kind: "pull_request".into(),
+        })
+    }
+
+    /// A successful reorder: `active` is still present at its (possibly new) position,
+    /// which is the same entry the caller says was already selected. Regression guard for
+    /// the "reload items on every reorder" property called out in the fix — this must
+    /// report `changed = false`.
+    #[test]
+    fn resolve_reloaded_selection_no_change_on_successful_reorder() {
+        // [B, A, C] after swapping A and B; A (id 1) is the row that was moved and was
+        // already selected before the swap.
+        let entries = vec![query(2), query(1), query(3)];
+        let active = EntryKey {
+            is_filter_stream: false,
+            id: 1,
+        };
+        let previous = Some(active);
+        let (cursor, changed) =
+            resolve_reloaded_selection(&entries, active, previous, /* fallback */ 0);
+        assert_eq!(cursor, 1);
+        assert!(!changed);
+    }
+
+    /// A rejected reorder where the active row was deleted by another instance in the
+    /// meantime: `active` is absent from `entries`, the cursor falls back, and — because
+    /// the fallback lands on a different entry than the one previously selected — the
+    /// caller must be told to re-select.
+    #[test]
+    fn resolve_reloaded_selection_reports_change_when_active_row_is_gone() {
+        let entries = vec![query(2), query(3)];
+        let deleted = EntryKey {
+            is_filter_stream: false,
+            id: 1,
+        };
+        // The user had entry id 1 selected (now gone); fallback_cursor mirrors the old
+        // cursor position, which now points at a surviving entry (id 2).
+        let previous = Some(deleted);
+        let (cursor, changed) = resolve_reloaded_selection(&entries, deleted, previous, 0);
+        assert_eq!(cursor, 0);
+        assert!(changed);
+        assert_eq!(entries[cursor].key().id, 2);
+    }
+
+    /// A rejected reorder where the active row survives (the pair merely drifted apart,
+    /// e.g. a second reorder keypress racing the first's reload): `active` is still found,
+    /// so nothing changed even though the reorder itself failed.
+    #[test]
+    fn resolve_reloaded_selection_no_change_when_active_survives_a_rejected_reorder() {
+        let entries = vec![query(1), query(2), query(3)];
+        let active = EntryKey {
+            is_filter_stream: false,
+            id: 1,
+        };
+        let previous = Some(active);
+        let (cursor, changed) = resolve_reloaded_selection(&entries, active, previous, 5);
+        assert_eq!(cursor, 0);
+        assert!(!changed);
     }
 }

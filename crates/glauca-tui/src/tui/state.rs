@@ -120,6 +120,7 @@ impl App {
             comments_sort_desc: false,
             status: None,
             syncing: false,
+            reorder_pending: false,
             bg_sync_pending: 0,
             detail_scroll: 0,
             current_user: None,
@@ -502,7 +503,7 @@ mod tests {
             updated_at: "2026-05-24T10:00:00Z".into(),
             ..make_item(1, "alice's unread PR")
         }];
-        let stream_key = app.entries[1].unread_key();
+        let stream_key = app.entries[1].key();
 
         app.recompute_unread_counts_for_query(1, &app.items.clone());
         assert_eq!(app.unread_counts.get(&stream_key), Some(&0));
@@ -579,8 +580,20 @@ mod tests {
 
         // Query #1 (no filter) → items 1 and 3 are unread → 2.
         // Filter stream #2 (state:open) → only item 1 (item 2 read, item 3 closed) → 1.
-        assert_eq!(app.unread_counts.get(&(false, 1)), Some(&2));
-        assert_eq!(app.unread_counts.get(&(true, 2)), Some(&1));
+        assert_eq!(
+            app.unread_counts.get(&EntryKey {
+                is_filter_stream: false,
+                id: 1
+            }),
+            Some(&2)
+        );
+        assert_eq!(
+            app.unread_counts.get(&EntryKey {
+                is_filter_stream: true,
+                id: 2
+            }),
+            Some(&1)
+        );
     }
 
     #[test]

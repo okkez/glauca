@@ -185,13 +185,21 @@ where
                     }
 
                     // J/K: move the selected entry within its group. The entries vec is
-                    // reordered only on the engine's *Swapped confirmation.
+                    // replaced wholesale when the engine's EntriesReloaded arrives. Dropped
+                    // while a round trip is outstanding: the pair `reorder_command` would
+                    // compute from `app.entries` may already have been invalidated in the DB
+                    // by the in-flight reorder, since `app.entries` isn't updated until the
+                    // reply lands.
                     if (key.code == KeyCode::Char('J') || key.code == KeyCode::Char('K'))
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
                     {
+                        if app.reorder_pending {
+                            continue;
+                        }
                         let down = key.code == KeyCode::Char('J');
                         if let Some(cmd) = reorder_command(&app.entries, app.entry_cursor, down) {
+                            app.reorder_pending = true;
                             engine.send(cmd).await;
                         }
                         continue;

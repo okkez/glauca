@@ -138,6 +138,10 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             app.status = Some(msg);
         }
         AppMessage::ActionError(err) => {
+            // Also the failure path for a reorder round trip (both the reorder and the
+            // read-back failed, so no EntriesReloaded followed) — clear the gate here too,
+            // or a rejected reorder would leave J/K dead for the rest of the session.
+            app.reorder_pending = false;
             app.status = Some(format!("Error: {err}"));
         }
         AppMessage::CommentsLoaded(comments) => {
@@ -199,46 +203,33 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             app.stream_filter = None;
             select_current_entry(app, engine, true).await;
         }
-        AppMessage::QueriesSwapped {
-            upper_id,
-            active_id,
-            ..
-        } => {
-            // Move the upper group down past the next group, then follow the
-            // active query with the cursor.
-            if let Some(idx) = app
-                .entries
-                .iter()
-                .position(|e| matches!(e, LeftPaneEntry::Query(q) if q.id == upper_id))
-            {
-                move_group_down(&mut app.entries, idx);
-                if let Some(new_cursor) = app
-                    .entries
-                    .iter()
-                    .position(|e| matches!(e, LeftPaneEntry::Query(q) if q.id == active_id))
-                {
-                    app.entry_cursor = new_cursor;
-                }
-            }
-        }
-        AppMessage::FilterStreamsSwapped {
-            upper_id,
-            lower_id,
-            active_id,
-        } => {
-            let upper_idx = app
-                .entries
-                .iter()
-                .position(|e| matches!(e, LeftPaneEntry::FilterStream(fs) if fs.id == upper_id));
-            let lower_idx = app
-                .entries
-                .iter()
-                .position(|e| matches!(e, LeftPaneEntry::FilterStream(fs) if fs.id == lower_id));
-            if let (Some(u), Some(l)) = (upper_idx, lower_idx) {
-                app.entries.swap(u, l);
-                if let Some(new_cursor) = app.entries.iter().position(|e| e.id() == active_id) {
-                    app.entry_cursor = new_cursor;
-                }
+        AppMessage::EntriesReloaded { entries, active } => {
+            app.reorder_pending = false;
+            let previous = app.entries.get(app.entry_cursor).map(|e| e.key());
+            let (cursor, changed) = glauca_core::logic::resolve_reloaded_selection(
+                &entries,
+                active,
+                previous,
+                app.entry_cursor,
+            );
+            app.entries = entries;
+            app.entry_cursor = cursor;
+            if changed {
+                // The reload lands on a different entry than was selected before this
+                // message (deleted by a concurrent delete, a reorder whose `active` names a
+                // row other than the previous selection, or the cursor having moved while
+                // this round trip was in flight). `items`/`stream_filter` still belong to
+                // the old selection, so follow the cursor to the new one rather than
+                // leaving the item pane showing it under a different highlight. Pass
+                // `false`: this reload is a purely local, offline-safe reorder, so only
+                // sync if the cache is stale rather than firing an unconditional network
+                // call on every cursor drift.
+                app.clear_items();
+                app.item_cursor = 0;
+                app.detail_scroll = 0;
+                app.filter = SingleLineInput::new();
+                app.stream_filter = None;
+                select_current_entry(app, engine, false).await;
             }
         }
         AppMessage::CurrentUserResolved { login, .. } => app.adopt_current_user(login),

@@ -42,6 +42,22 @@ pub async fn foreign_database(table_sql: &str) -> NamedTempFile {
     file
 }
 
+/// A saved query whose search string is `query`; the kind is arbitrary.
+pub async fn seed_query(pool: &SqlitePool, query: &str) -> i64 {
+    crate::db::upsert_query(pool, query, "issue", None)
+        .await
+        .expect("seed query")
+}
+
+/// Three queries in a known order, so a reorder test opens with the state it is about.
+pub async fn seed_three_queries(pool: &SqlitePool) -> [i64; 3] {
+    [
+        seed_query(pool, "query:first").await,
+        seed_query(pool, "query:second").await,
+        seed_query(pool, "query:third").await,
+    ]
+}
+
 /// A minimal open pull request in `owner/repo`, identified by `number`.
 pub fn make_item(query_id: i64, number: i64, title: &str) -> CachedItem {
     CachedItem {

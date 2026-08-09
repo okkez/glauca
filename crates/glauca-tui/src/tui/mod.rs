@@ -48,13 +48,13 @@ pub(crate) use terminal::{enter_tui, leave_tui, reenter_tui};
 use glauca_core::actions::{CustomAction, CustomActions};
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
-use glauca_core::logic::{ChangeCounts, group_range, is_item_unread, move_group_down, query_label};
+use glauca_core::logic::{ChangeCounts, group_range, is_item_unread, query_label};
 use glauca_core::notify::ItemTracker;
 use settings::TuiSettings;
 
 // glauca-core::types を従来名で使えるよう re-export。
 pub use glauca_core::types::{
-    CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
+    CommentEntry, EntryKey, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -115,7 +115,7 @@ pub struct App {
     /// Memoized `filter_items` indices; see [`FilteredCache`].
     filtered_cache: RefCell<FilteredCache>,
     pub item_cursor: usize,
-    pub unread_counts: HashMap<(bool, i64), usize>,
+    pub unread_counts: HashMap<EntryKey, usize>,
     /// Freshly-synced items for the currently-viewed query, held back because
     /// they came from a background sync. Applied on explicit action (`u`).
     pub pending_items: Option<Vec<ItemEntry>>,
@@ -160,6 +160,11 @@ pub struct App {
     pub status: Option<String>,
     /// Whether a manual GitHub sync is in progress for the selected query.
     pub syncing: bool,
+    /// True from the moment a `ReorderQuery`/`ReorderFilterStream` command is sent until
+    /// its `EntriesReloaded`/`ActionError` reply arrives. The J/K handler drops input while
+    /// this is set: the pair it would otherwise send is computed from `entries`, which the
+    /// in-flight reorder may already have invalidated in the DB.
+    pub reorder_pending: bool,
     /// Number of pending background auto-refresh jobs (queued + in-progress).
     pub bg_sync_pending: usize,
     /// Scroll offset for the detail pane (right column).

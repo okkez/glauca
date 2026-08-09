@@ -38,7 +38,15 @@ impl GlaucaApp {
     /// Send a command to the engine. Errors (channel closed/full) are ignored,
     /// matching the engine's own fire-and-forget semantics.
     pub(crate) fn send(&self, cmd: EngineCommand) {
-        let _ = self.cmd_tx.try_send(cmd);
+        self.try_send(cmd);
+    }
+
+    /// Like `send`, but reports whether the command was actually enqueued. Callers that
+    /// track "a reply is now outstanding" state (e.g. `reorder_pending`) need this instead
+    /// of `send`: a dropped-on-the-floor command never produces a reply, so setting such a
+    /// flag unconditionally on a failed send would wedge it for the rest of the session.
+    pub(crate) fn try_send(&self, cmd: EngineCommand) -> bool {
+        self.cmd_tx.try_send(cmd).is_ok()
     }
 
     pub(crate) fn selected_root_query_id(&self) -> Option<i64> {

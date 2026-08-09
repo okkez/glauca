@@ -35,6 +35,9 @@ const state = {
   bgSyncPending: 0,        // queued background-sync jobs (BgSyncQueued − BgSyncJobDone)
   bodyRefreshRequested: new Set(), // itemKey()s whose cleared body we've already
                           // asked to re-fetch this session (dedup for selectItem)
+  reorderPending: false,  // true until the reply's entries refresh completes; see moveEntry
+  reorderSeq: 0,          // bumped per reorder attempt; only the newest generation's
+                          // refresh is allowed to clear reorderPending
 };
 
 
@@ -1350,7 +1353,18 @@ async function refreshEntries() {
   }
 }
 
-// Build the SwapQuery/SwapFilterStream args for moving entry `idx` up/down,
+// Refresh the left pane, then open the reorder gate — in that order, because clearing
+// the gate before `state.entries` is back in sync would let the very next Shift+J/K
+// build a pair from stale entries and get rejected. Only the newest reorder generation
+// may clear the flag: a stale reply's finally must not reopen a newer reorder's gate.
+function refreshEntriesThenClearReorderGate() {
+  const seq = state.reorderSeq;
+  return refreshEntries().finally(() => {
+    if (seq === state.reorderSeq) state.reorderPending = false;
+  });
+}
+
+// Build the ReorderQuery/ReorderFilterStream args for moving entry `idx` up/down,
 // mirroring the TUI's reorder_command. Returns {cmd, args} or null at an edge.
 function reorderArgs(idx, down) {
   const e = state.entries[idx];
@@ -1361,22 +1375,22 @@ function reorderArgs(idx, down) {
       while (j < state.entries.length && state.entries[j].isFilterStream) j++;
       const next = state.entries[j];
       if (next && !next.isFilterStream)
-        return { cmd: "swap_query_positions", args: { upperId: e.id, lowerId: next.id, activeId: e.id } };
+        return { cmd: "reorder_query", args: { upperId: e.id, lowerId: next.id, activeId: e.id } };
     } else {
       let j = idx - 1;
       while (j >= 0 && state.entries[j].isFilterStream) j--;
       const prev = state.entries[j];
       if (prev && !prev.isFilterStream)
-        return { cmd: "swap_query_positions", args: { upperId: prev.id, lowerId: e.id, activeId: e.id } };
+        return { cmd: "reorder_query", args: { upperId: prev.id, lowerId: e.id, activeId: e.id } };
     }
   } else if (down) {
     const next = state.entries[idx + 1];
     if (next && next.isFilterStream && next.rootQueryId === e.rootQueryId)
-      return { cmd: "swap_filter_stream_positions", args: { upperId: e.id, lowerId: next.id, activeId: e.id } };
+      return { cmd: "reorder_filter_stream", args: { upperId: e.id, lowerId: next.id, activeId: e.id } };
   } else {
     const prev = state.entries[idx - 1];
     if (prev && prev.isFilterStream && prev.rootQueryId === e.rootQueryId)
-      return { cmd: "swap_filter_stream_positions", args: { upperId: prev.id, lowerId: e.id, activeId: e.id } };
+      return { cmd: "reorder_filter_stream", args: { upperId: prev.id, lowerId: e.id, activeId: e.id } };
   }
   return null;
 }
@@ -1415,8 +1429,23 @@ async function deleteEntry(e) {
 }
 
 function moveEntry(idx, down) {
+  // Drop input while a reorder round trip is outstanding: `reorderArgs` computes the pair
+  // from `state.entries`, which isn't refreshed until the reply lands, so a repeat move
+  // would resend a pair the DB may have already rejected as no longer adjacent.
+  if (state.reorderPending) return;
   const r = reorderArgs(idx, down);
-  if (r) call(r.cmd, r.args);
+  if (r) {
+    state.reorderSeq++;
+    state.reorderPending = true;
+    const seq = state.reorderSeq;
+    // Not `call()`: its .catch swallows the rejection, so this handler is the only place
+    // that can see an invoke failure and undo the gate — a rejected invoke means neither
+    // ActionError nor EntriesReloaded is coming to clear it.
+    invoke(r.cmd, r.args).catch((e) => {
+      if (seq === state.reorderSeq) state.reorderPending = false;
+      setStatus(`${r.cmd}: ${e}`, true);
+    });
+  }
 }
 
 function markAllRead(e) {
@@ -1756,6 +1785,10 @@ function handleMessage(msg) {
       setStatus(d);
       break;
     case "ActionError":
+      // Also the failure path for a reorder round trip (both the reorder and the
+      // read-back failed, so no EntriesReloaded followed) — clear the gate here too, or a
+      // rejected reorder would leave Shift+J/K dead for the rest of the session.
+      if (state.reorderPending) refreshEntriesThenClearReorderGate();
       setStatus(d, true);
       break;
     case "SyncStarted":
@@ -1799,9 +1832,10 @@ function handleMessage(msg) {
     case "FilterStreamUpdated":
     case "QueryDeleted":
     case "FilterStreamDeleted":
-    case "QueriesSwapped":
-    case "FilterStreamsSwapped":
       refreshEntries();
+      break;
+    case "EntriesReloaded":
+      refreshEntriesThenClearReorderGate();
       break;
     default:
       break;

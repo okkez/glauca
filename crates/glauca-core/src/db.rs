@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use sqlx::{
-    SqlitePool,
+    ConnectOptions, Connection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
 };
 use std::path::{Path, PathBuf};
@@ -19,10 +19,10 @@ pub async fn open_pool(db_path: &Path) -> Result<SqlitePool> {
     info!(path = %db_path.display(), "opening cache");
 
     create_parent_dir(db_path)?;
+    ensure_glauca_cache(db_path).await?;
     let pool = SqlitePool::connect_with(connect_options(db_path))
         .await
         .with_context(|| format!("opening cache database {}", db_path.display()))?;
-    ensure_glauca_cache(&pool, db_path).await?;
 
     // sqlx's migration error names the offending version but not the database file.
     sqlx::migrate!("./migrations")
@@ -43,6 +43,10 @@ fn create_parent_dir(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Block on a locked DB rather than failing — chiefly so anything touching the file during
+/// the maintenance pass's VACUUM (which holds an exclusive lock) waits its turn.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// SQLite tuning for this cache: WAL, `synchronous = NORMAL`, and a busy timeout.
 fn connect_options(db_path: &Path) -> SqliteConnectOptions {
     SqliteConnectOptions::new()
@@ -61,9 +65,7 @@ fn connect_options(db_path: &Path) -> SqliteConnectOptions {
         // `cache.db-shm`) next to the DB.
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        // Block on a locked DB rather than failing: chiefly so a write during the
-        // maintenance pass's VACUUM (which needs exclusive access) waits its turn.
-        .busy_timeout(Duration::from_secs(30))
+        .busy_timeout(BUSY_TIMEOUT)
 }
 
 /// Require `db_path` to be a glauca cache, refusing to migrate a SQLite file that belongs
@@ -75,16 +77,31 @@ fn connect_options(db_path: &Path) -> SqliteConnectOptions {
 /// A glauca cache always carries `_sqlx_migrations`, so its absence beside other tables
 /// means this database is someone else's.
 ///
-/// FIXME: the protection covers schema and rows only. `journal_mode = WAL` is already
-/// applied by the time this runs and is a persistent header flag, so a database we refuse
-/// can still be left in WAL mode. Inspecting the schema over a connection that sets no
-/// pragmas would remove the side effect.
-async fn ensure_glauca_cache(pool: &SqlitePool, db_path: &Path) -> Result<()> {
-    let mut tables: Vec<String> =
+/// The connection sets no pragma that persists to the file: `connect_options`'
+/// `journal_mode = WAL` is a persistent header flag, so applying it before this check would
+/// convert a database we then refuse.
+async fn ensure_glauca_cache(db_path: &Path) -> Result<()> {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        // Safe alongside the no-pragma property above: sqlx applies this through
+        // `sqlite3_busy_timeout()`, not a PRAGMA, so it writes nothing to the file.
+        // Do not add `journal_mode`/`synchronous` here — those persist to the header.
+        .busy_timeout(BUSY_TIMEOUT)
+        .connect()
+        .await
+        .with_context(|| format!("opening cache database {}", db_path.display()))?;
+
+    let tables: Result<Vec<String>, _> =
         sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
-            .fetch_all(pool)
-            .await
-            .with_context(|| format!("reading the schema of {}", db_path.display()))?;
+            .fetch_all(&mut conn)
+            .await;
+    // Closed before the verdict so a refusal doesn't leave a connection on someone
+    // else's database.
+    conn.close().await.ok();
+
+    let mut tables =
+        tables.with_context(|| format!("reading the schema of {}", db_path.display()))?;
 
     let is_fresh_file = tables.is_empty();
     let is_glauca_cache = tables.iter().any(|t| t == "_sqlx_migrations");
@@ -149,7 +166,7 @@ pub struct QueryRecord {
 /// `id` closes the ordering: `created_at` has second granularity, so rows added in the same
 /// second tie on both other keys and SQLite may then return them in any order.
 ///
-/// Generic over the executor so [`swap_query_positions`] can read this ordering from inside its
+/// Generic over the executor so [`reorder_query`] can read this ordering from inside its
 /// transaction — it numbers rows in the order it reads, so a second hand-copied `ORDER BY`
 /// could drift from this one.
 pub async fn list_queries<'e, E>(exec: E) -> Result<Vec<QueryRecord>>
@@ -246,14 +263,10 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
 
 /// Exchange the places of two sibling filter streams (they must share the same parent).
 ///
-/// Renumbers only `upper_id`'s parent, for the reasons on [`swap_query_positions`] — including
-/// why the transaction is `IMMEDIATE`. Either stream having been deleted meanwhile fails the
-/// call rather than reporting success; see [`exchanged`].
-pub async fn swap_filter_stream_positions(
-    pool: &SqlitePool,
-    upper_id: i64,
-    lower_id: i64,
-) -> Result<()> {
+/// Renumbers only `upper_id`'s parent, for the reasons on [`reorder_query`] — including
+/// why the transaction is `IMMEDIATE`. Either stream having been deleted, or the two having
+/// drifted apart, fails the call rather than reporting success; see [`exchanged`].
+pub async fn reorder_filter_stream(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let parent_id = sqlx::query_scalar!(
         "SELECT parent_id FROM filter_streams WHERE id = ?",
@@ -268,7 +281,7 @@ pub async fn swap_filter_stream_positions(
         .map(|fs| fs.id)
         .collect();
     let ids = exchanged(ids, upper_id, lower_id).with_context(|| {
-        format!("filter streams {upper_id} and {lower_id} are no longer both under one query")
+        format!("filter streams {upper_id} and {lower_id} are no longer adjacent under one query")
     })?;
     for (position, id) in ids.iter().enumerate() {
         let position = position as i64;
@@ -369,11 +382,11 @@ pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
 /// `BEGIN IMMEDIATE` because this reads before it writes — see `prune_missing_items`.
 /// `position` cannot carry `UNIQUE`: renumbering writes transient duplicates and SQLite cannot
 /// defer the check to commit.
-pub async fn swap_query_positions(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
+pub async fn reorder_query(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let ids: Vec<i64> = list_queries(&mut *tx).await?.iter().map(|q| q.id).collect();
     let ids = exchanged(ids, upper_id, lower_id).with_context(|| {
-        format!("queries {upper_id} and {lower_id} are no longer both in the cache")
+        format!("queries {upper_id} and {lower_id} are no longer adjacent in the cache")
     })?;
     for (position, id) in ids.iter().enumerate() {
         let position = position as i64;
@@ -385,20 +398,19 @@ pub async fn swap_query_positions(pool: &SqlitePool, upper_id: i64, lower_id: i6
     Ok(())
 }
 
-/// `ids` with the entries `a` and `b` in each other's place, or `None` if either is absent —
-/// another front-end deleted the row after the caller last read the list.
+/// `ids` with the adjacent pair `upper`/`lower` exchanged, or `None` if `upper` is not
+/// immediately followed by `lower` — either row was deleted, or another front-end reordered
+/// the list after the caller last read it.
 ///
-/// `None` must reach the caller as an error, never as a silent success: the TUI and the gpui GUI
-/// move the entry in their own `entries` vec on the engine's confirmation without re-reading the
-/// DB, so an unearned `Ok` shows an order that is gone on the next launch.
-///
-/// FIXME(no cross-process invalidation): adjacency is not checked, so another front-end
-/// reordering in that same gap leaves the two ids non-adjacent and this jumps whatever ended up
-/// between them. Closing it means telling the front-ends to re-read, as the Tauri one does.
-fn exchanged(mut ids: Vec<i64>, a: i64, b: i64) -> Option<Vec<i64>> {
-    let a_idx = ids.iter().position(|id| *id == a)?;
-    let b_idx = ids.iter().position(|id| *id == b)?;
-    ids.swap(a_idx, b_idx);
+/// `None` must reach the caller as an error, never as a silent success. Swapping a pair that
+/// drifted apart would jump whatever ended up between them and write that wrong order to the
+/// DB — the store every front-end re-reads its left pane from.
+fn exchanged(mut ids: Vec<i64>, upper: i64, lower: i64) -> Option<Vec<i64>> {
+    let upper_idx = ids.iter().position(|id| *id == upper)?;
+    if ids.get(upper_idx + 1) != Some(&lower) {
+        return None;
+    }
+    ids.swap(upper_idx, upper_idx + 1);
     Some(ids)
 }
 
@@ -1079,7 +1091,9 @@ pub async fn is_full_fetch_due(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{foreign_database, make_item, raw_pool, test_pool};
+    use crate::test_support::{
+        foreign_database, make_item, raw_pool, seed_query, seed_three_queries, test_pool,
+    };
 
     /// Driving `resolve_db_path_with` directly keeps this off the process environment,
     /// which every other test in this binary shares.
@@ -1187,6 +1201,25 @@ mod tests {
             schema,
             vec![("queries".to_string(), FOREIGN_SCHEMA.to_string())]
         );
+    }
+
+    /// Refusing has to leave no trace at all, not merely no schema change. `journal_mode`
+    /// is a persistent header flag, so applying it before the check would convert a
+    /// database we then refuse.
+    #[tokio::test]
+    async fn open_pool_leaves_a_refused_database_in_its_original_journal_mode() {
+        let file = foreign_database(FOREIGN_SCHEMA).await;
+
+        open_pool(file.path())
+            .await
+            .expect_err("a foreign database must not be migrated");
+
+        let pool = raw_pool(file.path()).await;
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .expect("journal_mode");
+        assert_eq!(journal_mode, "delete");
     }
 
     /// A cache written by a newer glauca must not be mistaken for a fresh file. sqlx
@@ -1305,21 +1338,6 @@ mod tests {
         let [first, second, third] = seed_three_queries(&pool).await;
 
         assert_eq!(query_ids_in_order(&pool).await, vec![first, second, third]);
-    }
-
-    /// Three queries in a known order, so each reorder test opens with the state it is about.
-    async fn seed_three_queries(pool: &SqlitePool) -> [i64; 3] {
-        [
-            seed_query(pool, "query:first").await,
-            seed_query(pool, "query:second").await,
-            seed_query(pool, "query:third").await,
-        ]
-    }
-
-    async fn seed_query(pool: &SqlitePool, query: &str) -> i64 {
-        upsert_query(pool, query, "issue", None)
-            .await
-            .expect("seed query")
     }
 
     /// Three streams under one parent, returning the parent alongside them.
@@ -1570,21 +1588,46 @@ mod tests {
     /// An in-session reorder looks right whether or not the DB changed, so what is asserted is
     /// the part the user only sees on the next launch.
     #[tokio::test]
-    async fn swap_query_positions_persists_the_new_order() {
+    async fn reorder_query_persists_the_new_order() {
         let (pool, _file) = test_pool().await;
         let [first, second, third] = seed_three_queries(&pool).await;
 
-        swap_query_positions(&pool, first, second)
-            .await
-            .expect("swap");
+        reorder_query(&pool, first, second).await.expect("swap");
 
         assert_eq!(query_ids_in_order(&pool).await, vec![second, first, third]);
+    }
+
+    #[test]
+    fn exchanged_swaps_an_adjacent_pair() {
+        assert_eq!(exchanged(vec![1, 2, 3], 1, 2), Some(vec![2, 1, 3]));
+        assert_eq!(exchanged(vec![1, 2, 3], 2, 3), Some(vec![1, 3, 2]));
+    }
+
+    /// Another front-end reordered in the gap between the caller reading the list and this
+    /// running, so the pair it picked is no longer neighbouring. Swapping anyway would jump
+    /// the entry that ended up between them.
+    #[test]
+    fn exchanged_refuses_a_pair_that_is_no_longer_adjacent() {
+        assert_eq!(exchanged(vec![1, 2, 3], 1, 3), None);
+    }
+
+    /// Every caller passes the pair in list order. Reversed means the two moved apart and
+    /// back past each other, not that the caller meant "swap these two".
+    #[test]
+    fn exchanged_refuses_a_reversed_pair() {
+        assert_eq!(exchanged(vec![1, 2, 3], 2, 1), None);
+    }
+
+    #[test]
+    fn exchanged_refuses_a_pair_with_a_deleted_row() {
+        assert_eq!(exchanged(vec![1, 2, 3], 1, 9), None);
+        assert_eq!(exchanged(vec![1, 2, 3], 9, 2), None);
     }
 
     /// A cache an older binary wrote has every position at the default, and reordering has to
     /// work from that too — not only from one the migration has tidied.
     #[tokio::test]
-    async fn swap_query_positions_persists_the_new_order_when_positions_are_all_equal() {
+    async fn reorder_query_persists_the_new_order_when_positions_are_all_equal() {
         let (pool, _file) = test_pool().await;
         let [first, second, third] = seed_three_queries(&pool).await;
         sqlx::query!("UPDATE queries SET position = 0")
@@ -1592,9 +1635,7 @@ mod tests {
             .await
             .expect("flatten positions");
 
-        swap_query_positions(&pool, second, third)
-            .await
-            .expect("swap");
+        reorder_query(&pool, second, third).await.expect("swap");
 
         assert_eq!(query_ids_in_order(&pool).await, vec![first, third, second]);
     }
@@ -1602,7 +1643,7 @@ mod tests {
     /// A front-end can be showing a query another has deleted; see `exchanged` for why naming a
     /// row that is gone has to fail rather than report a move the DB never made.
     #[tokio::test]
-    async fn swap_query_positions_fails_when_a_query_is_gone() {
+    async fn reorder_query_fails_when_a_query_is_gone() {
         let (pool, _file) = test_pool().await;
         let [first, second, third] = seed_three_queries(&pool).await;
         // Sparse, so that "nothing was written" is distinguishable from "renumbered".
@@ -1616,10 +1657,35 @@ mod tests {
             .expect("spread positions");
         delete_query(&pool, second).await.expect("delete");
 
-        assert!(swap_query_positions(&pool, first, second).await.is_err());
-        assert!(swap_query_positions(&pool, second, first).await.is_err());
+        assert!(reorder_query(&pool, first, second).await.is_err());
+        assert!(reorder_query(&pool, second, first).await.is_err());
         assert_eq!(query_position(&pool, first).await, 5);
         assert_eq!(query_position(&pool, third).await, 9);
+    }
+
+    /// The pair the front-end picked was adjacent when it read the list; a concurrent
+    /// reorder can leave a third query between them. The DB has to refuse rather than jump
+    /// the intruder.
+    #[tokio::test]
+    async fn reorder_query_refuses_a_pair_that_is_no_longer_adjacent() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, third] = seed_three_queries(&pool).await;
+
+        reorder_query(&pool, first, third)
+            .await
+            .expect_err("first and third are not adjacent");
+
+        let ids: Vec<i64> = list_queries(&pool)
+            .await
+            .expect("list")
+            .iter()
+            .map(|q| q.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![first, second, third],
+            "the order must be untouched"
+        );
     }
 
     #[tokio::test]
@@ -1810,11 +1876,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swap_filter_stream_positions_persists_the_new_order() {
+    async fn reorder_filter_stream_persists_the_new_order() {
         let (pool, _file) = test_pool().await;
         let (parent, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
 
-        swap_filter_stream_positions(&pool, first, second)
+        reorder_filter_stream(&pool, first, second)
             .await
             .expect("swap");
 
@@ -1825,7 +1891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swap_filter_stream_positions_persists_the_new_order_when_positions_are_all_equal() {
+    async fn reorder_filter_stream_persists_the_new_order_when_positions_are_all_equal() {
         let (pool, _file) = test_pool().await;
         let (parent, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
         sqlx::query!("UPDATE filter_streams SET position = 0")
@@ -1833,7 +1899,7 @@ mod tests {
             .await
             .expect("flatten positions");
 
-        swap_filter_stream_positions(&pool, second, third)
+        reorder_filter_stream(&pool, second, third)
             .await
             .expect("swap");
 
@@ -1845,13 +1911,13 @@ mod tests {
 
     /// A reorder renumbers one parent's group and must leave every other group's numbering alone.
     #[tokio::test]
-    async fn swap_filter_stream_positions_leaves_other_parents_alone() {
+    async fn reorder_filter_stream_leaves_other_parents_alone() {
         let (pool, _file) = test_pool().await;
         let (_, [first, second, _]) = seed_parent_with_three_streams(&pool).await;
         let other_parent = seed_query(&pool, "query:other").await;
         let untouched = seed_filter_stream(&pool, other_parent, "elsewhere", "state:open").await;
 
-        swap_filter_stream_positions(&pool, first, second)
+        reorder_filter_stream(&pool, first, second)
             .await
             .expect("swap");
 
@@ -1861,7 +1927,7 @@ mod tests {
     /// Both arguments are covered because the ids reach the DB by different routes here: the
     /// upper one through the parent lookup, the lower one through `exchanged`.
     #[tokio::test]
-    async fn swap_filter_stream_positions_fails_when_a_stream_is_gone() {
+    async fn reorder_filter_stream_fails_when_a_stream_is_gone() {
         let (pool, _file) = test_pool().await;
         let (_, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
         // Sparse for the reason given in the query counterpart above.
@@ -1875,18 +1941,33 @@ mod tests {
             .expect("spread positions");
         delete_filter_stream(&pool, second).await.expect("delete");
 
-        assert!(
-            swap_filter_stream_positions(&pool, first, second)
-                .await
-                .is_err()
-        );
-        assert!(
-            swap_filter_stream_positions(&pool, second, first)
-                .await
-                .is_err()
-        );
+        assert!(reorder_filter_stream(&pool, first, second).await.is_err());
+        assert!(reorder_filter_stream(&pool, second, first).await.is_err());
         assert_eq!(filter_stream_position(&pool, first).await, 5);
         assert_eq!(filter_stream_position(&pool, third).await, 9);
+    }
+
+    /// Same guard, one level down: filter streams are numbered per parent.
+    #[tokio::test]
+    async fn reorder_filter_stream_refuses_a_pair_that_is_no_longer_adjacent() {
+        let (pool, _file) = test_pool().await;
+        let (parent, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
+
+        reorder_filter_stream(&pool, first, third)
+            .await
+            .expect_err("first and third are not adjacent");
+
+        let ids: Vec<i64> = list_filter_streams(&pool, parent)
+            .await
+            .expect("list")
+            .iter()
+            .map(|fs| fs.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![first, second, third],
+            "the order must be untouched"
+        );
     }
 
     #[tokio::test]

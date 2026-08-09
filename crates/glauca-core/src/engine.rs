@@ -7,7 +7,7 @@ use crate::logic::{
     ME_UNEXPANDED_WARNING, cached_item_to_item_entry, has_me_token, is_item_unread,
 };
 use crate::types::{
-    CommentEntry, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
+    CommentEntry, EntryKey, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
 use crate::{db, github};
 use chrono::Utc;
@@ -25,7 +25,7 @@ use tracing::{debug, info, instrument, warn};
 /// Serialized adjacently tagged (`{"type": "ItemsLoaded", "data": {…}}`) for glauca-tauri,
 /// which forwards each one to JavaScript over the Tauri event bus. The adjacent
 /// representation handles every variant shape uniformly. The TUI/GUI never serialize it.
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AppMessage {
     ItemsLoaded {
@@ -83,19 +83,13 @@ pub enum AppMessage {
     FilterStreamDeleted {
         id: i64,
     },
-    /// Two query groups swapped position in the DB; `active_id` is the query the
-    /// cursor should follow after the front-end reorders its entries.
-    QueriesSwapped {
-        upper_id: i64,
-        lower_id: i64,
-        active_id: i64,
-    },
-    /// Two sibling filter streams swapped position in the DB; `active_id` is the
-    /// filter stream the cursor should follow.
-    FilterStreamsSwapped {
-        upper_id: i64,
-        lower_id: i64,
-        active_id: i64,
+    /// The left pane's authoritative contents, re-read from the DB after a change that can
+    /// reorder it. Front-ends replace their entry list wholesale and move the cursor to
+    /// `active`, rather than reproducing the move locally — the DB is the only place that
+    /// knows what another front-end did in between.
+    EntriesReloaded {
+        entries: Vec<LeftPaneEntry>,
+        active: EntryKey,
     },
     /// The authenticated user, resolved by a retry after the lookup at startup
     /// failed (see [`current_user_retry_task`]). Front-ends adopt it so `@me` starts
@@ -112,6 +106,14 @@ pub enum AppMessage {
 pub struct SyncJob {
     pub query_id: i64,
     pub query_str: String,
+}
+
+/// A job request sent to the dedicated reorder worker (see `reorder_worker_task`).
+pub struct ReorderJob {
+    pub is_filter_stream: bool,
+    pub upper_id: i64,
+    pub lower_id: i64,
+    pub active_id: i64,
 }
 
 /// Coalesces background sync jobs: tracks which queries already have a queued or
@@ -1305,12 +1307,12 @@ pub enum EngineCommand {
     DeleteFilterStream {
         id: i64,
     },
-    SwapQueryPositions {
+    ReorderQuery {
         upper_id: i64,
         lower_id: i64,
         active_id: i64,
     },
-    SwapFilterStreamPositions {
+    ReorderFilterStream {
         upper_id: i64,
         lower_id: i64,
         active_id: i64,
@@ -1395,6 +1397,111 @@ pub async fn load_left_pane_entries(pool: &SqlitePool) -> anyhow::Result<Vec<Lef
     Ok(entries)
 }
 
+/// Apply a left-pane reorder and re-read the pane, returning the messages to send
+/// (in order) for every combination of reorder/reload outcome.
+///
+/// The two calls are independent failure points — a reorder that committed can still
+/// fail to read back — so the caller must not collapse them into one `Result` chain
+/// (that was the bug: it reported an applied reorder as a failed one whenever the
+/// read-back errored).
+///
+/// The reload is sent on a rejected reorder too. `reorder_query`/`reorder_filter_stream`
+/// reject a pair that has drifted apart (see `db::exchanged`) rather than reporting an
+/// unearned success, and without the pane the front-end would keep retrying from the same
+/// stale view and failing the same way.
+///
+/// `active_id` is the moved row, so it is one end of the attempted pair. A rejection can
+/// mean that row was deleted, so `active` may name a row absent from `entries` — the
+/// front-ends clamp the cursor rather than assuming it is there.
+async fn reorder_and_reload(
+    pool: &SqlitePool,
+    is_filter_stream: bool,
+    upper_id: i64,
+    lower_id: i64,
+    active_id: i64,
+) -> Vec<AppMessage> {
+    let reorder_result = if is_filter_stream {
+        db::reorder_filter_stream(pool, upper_id, lower_id).await
+    } else {
+        db::reorder_query(pool, upper_id, lower_id).await
+    };
+    let reload_result = load_left_pane_entries(pool).await;
+
+    let reloaded = |entries| AppMessage::EntriesReloaded {
+        entries,
+        active: EntryKey {
+            is_filter_stream,
+            id: active_id,
+        },
+    };
+    match (reorder_result, reload_result) {
+        (Ok(()), Ok(entries)) => vec![reloaded(entries)],
+        // A reload failure after a successful reorder must not read as the reorder
+        // having failed — that leaves the front-end stuck retrying an already-applied
+        // move forever.
+        (Ok(()), Err(e)) => vec![AppMessage::ActionError(format!(
+            "reorder applied, but the left pane could not be re-read: {e}"
+        ))],
+        (Err(e), Ok(entries)) => vec![
+            AppMessage::ActionError(format!("reorder: {e}")),
+            reloaded(entries),
+        ],
+        // The reorder's ActionError already covers the failed reload: nothing else
+        // changed, so a second message would be noise.
+        (Err(e), Err(_)) => vec![AppMessage::ActionError(format!("reorder: {e}"))],
+    }
+}
+
+/// Enqueue a `ReorderJob` to the dedicated reorder worker, and — since that queue is the
+/// only path to an `EntriesReloaded`/`ActionError` reply — surface an `ActionError` when
+/// the enqueue itself fails. Without this, a dead `reorder_worker_task` (e.g. panicked)
+/// makes every subsequent reorder a silent no-op: no reply ever arrives, so every
+/// front-end's input gate (`reorder_pending`) latches shut for the rest of the session.
+async fn send_reorder_job(
+    reorder_tx: &mpsc::Sender<ReorderJob>,
+    msg_tx: &mpsc::Sender<AppMessage>,
+    job: ReorderJob,
+) {
+    if reorder_tx.send(job).await.is_err() {
+        warn!("reorder worker is gone; dropping reorder job");
+        let _ = msg_tx
+            .send(AppMessage::ActionError(
+                "reorder: the reorder worker is gone; restart glauca".to_string(),
+            ))
+            .await;
+    }
+}
+
+/// Processes `ReorderJob`s one at a time, forwarding `reorder_and_reload`'s messages
+/// to the front-end in order.
+///
+/// This single consumer draining one queue is what makes reorder ordering structural
+/// rather than incidental: each job's commit-then-reread-then-send finishes before the
+/// next one starts, so the last `EntriesReloaded` delivered is always the last reorder
+/// submitted. `command_loop` spawns an independent task per command for every other
+/// DB-touching arm, but must not do that here — two spawned reorders can commit and
+/// read back in submission order yet still *send* out of order if the first is
+/// descheduled before its `send`, which is the exact bug this worker exists to rule out.
+pub async fn reorder_worker_task(
+    pool: SqlitePool,
+    mut rx: mpsc::Receiver<ReorderJob>,
+    tx: mpsc::Sender<AppMessage>,
+) {
+    while let Some(job) = rx.recv().await {
+        for msg in reorder_and_reload(
+            &pool,
+            job.is_filter_stream,
+            job.upper_id,
+            job.lower_id,
+            job.active_id,
+        )
+        .await
+        {
+            let _ = tx.send(msg).await;
+        }
+    }
+}
+
 /// Async engine shared by the TUI and GUI front-ends. Owns the background worker,
 /// refresh timer, and command-handling loop; exposes a command channel in and an
 /// `AppMessage` channel out.
@@ -1427,6 +1534,14 @@ impl Engine {
         let (msg_tx, msg_rx) = mpsc::channel::<AppMessage>(32);
         let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(64);
+        // `command_loop` drains `cmd_rx` continuously, so nothing here structurally bounds
+        // how many `ReorderJob`s can be produced over time — what keeps this queue
+        // effectively empty is that every front-end allows at most one outstanding reorder
+        // (its `reorder_pending` gate) before the previous one's reply arrives. A front-end
+        // without that gate could fill this queue, and then `command_loop`'s `send().await`
+        // on the ReorderQuery/ReorderFilterStream arms would block on DB-paced work (up to
+        // the 30s busy timeout under VACUUM), stalling every other command behind it.
+        let (reorder_job_tx, reorder_job_rx) = mpsc::channel::<ReorderJob>(64);
 
         let interval = sync.interval_secs;
         info!(
@@ -1456,6 +1571,13 @@ impl Engine {
         ));
         // Purely local, so the maintenance sweep ignores the rate-limit gate.
         tokio::spawn(maintenance_task(pool.clone(), maintenance));
+        // Dedicated single consumer — see `reorder_worker_task` for why reorders must not
+        // be spawned per-command like the other DB-touching arms below.
+        tokio::spawn(reorder_worker_task(
+            pool.clone(),
+            reorder_job_rx,
+            msg_tx.clone(),
+        ));
         // Chase the login in the background when the startup lookup couldn't reach
         // GitHub, so `@me` starts working mid-session instead of after a restart.
         if should_retry_current_user {
@@ -1472,6 +1594,7 @@ impl Engine {
             cmd_rx,
             msg_tx,
             sync_job_tx,
+            reorder_job_tx,
             sync,
             gate,
             pending,
@@ -1521,6 +1644,7 @@ async fn command_loop(
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
     msg_tx: mpsc::Sender<AppMessage>,
     sync_tx: mpsc::Sender<SyncJob>,
+    reorder_tx: mpsc::Sender<ReorderJob>,
     sync: SyncConfig,
     gate: RateLimitGate,
     pending: SyncCoalescer,
@@ -1791,59 +1915,41 @@ async fn command_loop(
                     }
                 });
             }
-            EngineCommand::SwapQueryPositions {
+            EngineCommand::ReorderQuery {
                 upper_id,
                 lower_id,
                 active_id,
             } => {
-                let pool2 = pool.clone();
-                let tx2 = msg_tx.clone();
-                tokio::spawn(async move {
-                    // Confirm only what the DB took — see `db::exchanged` for why an unearned
-                    // confirmation is the bug itself.
-                    match db::swap_query_positions(&pool2, upper_id, lower_id).await {
-                        Ok(()) => {
-                            let _ = tx2
-                                .send(AppMessage::QueriesSwapped {
-                                    upper_id,
-                                    lower_id,
-                                    active_id,
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx2
-                                .send(AppMessage::ActionError(format!("reorder: {e}")))
-                                .await;
-                        }
-                    }
-                });
+                // Enqueued to the dedicated reorder worker rather than spawned here — see
+                // `reorder_worker_task` for why a per-command spawn would race.
+                send_reorder_job(
+                    &reorder_tx,
+                    &msg_tx,
+                    ReorderJob {
+                        is_filter_stream: false,
+                        upper_id,
+                        lower_id,
+                        active_id,
+                    },
+                )
+                .await;
             }
-            EngineCommand::SwapFilterStreamPositions {
+            EngineCommand::ReorderFilterStream {
                 upper_id,
                 lower_id,
                 active_id,
             } => {
-                let pool2 = pool.clone();
-                let tx2 = msg_tx.clone();
-                tokio::spawn(async move {
-                    match db::swap_filter_stream_positions(&pool2, upper_id, lower_id).await {
-                        Ok(()) => {
-                            let _ = tx2
-                                .send(AppMessage::FilterStreamsSwapped {
-                                    upper_id,
-                                    lower_id,
-                                    active_id,
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx2
-                                .send(AppMessage::ActionError(format!("reorder: {e}")))
-                                .await;
-                        }
-                    }
-                });
+                send_reorder_job(
+                    &reorder_tx,
+                    &msg_tx,
+                    ReorderJob {
+                        is_filter_stream: true,
+                        upper_id,
+                        lower_id,
+                        active_id,
+                    },
+                )
+                .await;
             }
             EngineCommand::LoadComments {
                 owner,
@@ -1989,7 +2095,7 @@ async fn mark_filtered_items_read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
+    use crate::test_support::{seed_three_queries, test_pool};
     use rstest::rstest;
 
     /// Cache one unread PR by `alice` under `query_id`.
@@ -2418,5 +2524,260 @@ mod tests {
         enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, 60, &gate, &pending).await;
         let second = sync_rx.recv().await.expect("re-enqueued job");
         assert_eq!(second.query_id, q1, "released slot allows re-enqueue");
+    }
+
+    /// A successful adjacent swap sends exactly one `EntriesReloaded`, with the entries
+    /// in the new order and `active` naming the query the cursor was on — this is the
+    /// case Finding 1 broke: folding the reload into the reorder's `Result` reported an
+    /// applied move as a failure whenever the read-back itself errored.
+    #[tokio::test]
+    async fn reorder_and_reload_query_success_sends_one_entries_reloaded() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, third] = seed_three_queries(&pool).await;
+
+        let messages = reorder_and_reload(&pool, false, first, second, first).await;
+
+        match &messages[..] {
+            [AppMessage::EntriesReloaded { entries, active }] => {
+                assert_eq!(
+                    entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+                    vec![second, first, third],
+                    "entries must reflect the new order"
+                );
+                assert_eq!(
+                    *active,
+                    EntryKey {
+                        is_filter_stream: false,
+                        id: first,
+                    }
+                );
+            }
+            other => panic!("expected exactly one EntriesReloaded, got {other:?}",),
+        }
+    }
+
+    /// A non-adjacent pair (another front-end reordered in between) is refused: an
+    /// `ActionError` followed by an `EntriesReloaded` whose entries are unchanged — so a
+    /// front-end stuck on a stale view recovers on the very error that proves it's stale,
+    /// rather than retrying the same rejected swap forever.
+    #[tokio::test]
+    async fn reorder_and_reload_query_rejected_sends_error_then_unchanged_entries() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, third] = seed_three_queries(&pool).await;
+
+        // first/third were adjacent when some front-end last read the list, but `second`
+        // now sits between them.
+        let messages = reorder_and_reload(&pool, false, first, third, first).await;
+
+        match &messages[..] {
+            [
+                AppMessage::ActionError(e),
+                AppMessage::EntriesReloaded { entries, active },
+            ] => {
+                assert!(e.starts_with("reorder:"), "unexpected error text: {e}");
+                assert_eq!(
+                    entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+                    vec![first, second, third],
+                    "a rejected reorder must not change the order"
+                );
+                assert_eq!(
+                    *active,
+                    EntryKey {
+                        is_filter_stream: false,
+                        id: first,
+                    }
+                );
+            }
+            other => panic!("expected ActionError then EntriesReloaded, got {other:?}",),
+        }
+    }
+
+    /// The filter-stream path must set `is_filter_stream: true` on `active` — a flipped
+    /// `is_filter_stream` argument at either call site would compile and pass every
+    /// other test, since it only misroutes the cursor after the fact.
+    #[tokio::test]
+    async fn reorder_and_reload_filter_stream_marks_active_as_filter_stream() {
+        let (pool, _file) = test_pool().await;
+        let query_id = db::upsert_query(&pool, "repo:o/a is:pr", "pull_request", None)
+            .await
+            .expect("query");
+        let first = db::upsert_filter_stream(&pool, query_id, "mine", "author:@me")
+            .await
+            .expect("first stream");
+        let second = db::upsert_filter_stream(&pool, query_id, "others", "-author:@me")
+            .await
+            .expect("second stream");
+
+        let messages = reorder_and_reload(&pool, true, first, second, first).await;
+
+        match &messages[..] {
+            [AppMessage::EntriesReloaded { active, .. }] => {
+                assert_eq!(
+                    *active,
+                    EntryKey {
+                        is_filter_stream: true,
+                        id: first,
+                    }
+                );
+            }
+            other => panic!("expected exactly one EntriesReloaded, got {other:?}",),
+        }
+    }
+
+    /// Both the reorder and the read-back failing is the one row where the front-end gate
+    /// depends on `ActionError` alone with no follow-up `EntriesReloaded` — closing the
+    /// pool before the call makes both `db::reorder_query` and `load_left_pane_entries`
+    /// fail, so exactly one `ActionError` must be sent, and it must be the `"reorder: …"`
+    /// form (the reorder's own failure), not the "reorder applied…" form (which only
+    /// applies when the reorder itself succeeded).
+    #[tokio::test]
+    async fn reorder_and_reload_both_fail_sends_only_one_action_error() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, _third] = seed_three_queries(&pool).await;
+        pool.close().await;
+
+        let messages = reorder_and_reload(&pool, false, first, second, first).await;
+
+        match &messages[..] {
+            [AppMessage::ActionError(e)] => {
+                assert!(e.starts_with("reorder:"), "unexpected error text: {e}");
+            }
+            other => panic!("expected exactly one ActionError, got {other:?}",),
+        }
+    }
+
+    /// The regression guard for the interleaving bug: two reorders queued back-to-back
+    /// (as `command_loop` now does via `reorder_tx`, instead of spawning each on its own
+    /// task) must have their `EntriesReloaded` snapshots delivered in submission order,
+    /// with the later message matching what the DB actually ends up holding. Before the
+    /// dedicated worker, two independently spawned round trips could commit and read back
+    /// in either order and then *send* in either order too, so a front-end could end up
+    /// showing a snapshot the DB no longer held.
+    #[tokio::test]
+    async fn reorder_worker_task_delivers_snapshots_in_submission_order() {
+        let (pool, _file) = test_pool().await;
+        let a = db::upsert_query(&pool, "repo:o/a is:pr", "pull_request", None)
+            .await
+            .expect("a");
+        let b = db::upsert_query(&pool, "repo:o/b is:pr", "pull_request", None)
+            .await
+            .expect("b");
+        let c = db::upsert_query(&pool, "repo:o/c is:pr", "pull_request", None)
+            .await
+            .expect("c");
+        let d = db::upsert_query(&pool, "repo:o/d is:pr", "pull_request", None)
+            .await
+            .expect("d");
+
+        let (job_tx, job_rx) = mpsc::channel::<ReorderJob>(8);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<AppMessage>(8);
+        tokio::spawn(reorder_worker_task(pool.clone(), job_rx, msg_tx));
+
+        // Two independent swaps (disjoint pairs, so both succeed regardless of processing
+        // order) queued without waiting for either to finish — the shape of "move X down,
+        // then immediately move Y down".
+        job_tx
+            .send(ReorderJob {
+                is_filter_stream: false,
+                upper_id: a,
+                lower_id: b,
+                active_id: a,
+            })
+            .await
+            .expect("enqueue first reorder");
+        job_tx
+            .send(ReorderJob {
+                is_filter_stream: false,
+                upper_id: c,
+                lower_id: d,
+                active_id: c,
+            })
+            .await
+            .expect("enqueue second reorder");
+
+        let first_msg = msg_rx.recv().await.expect("first EntriesReloaded");
+        let AppMessage::EntriesReloaded {
+            entries: first_entries,
+            active: first_active,
+        } = first_msg
+        else {
+            panic!("expected EntriesReloaded for the first job");
+        };
+        assert_eq!(
+            first_entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+            vec![b, a, c, d],
+            "first message must reflect only the first swap"
+        );
+        assert_eq!(
+            first_active,
+            EntryKey {
+                is_filter_stream: false,
+                id: a
+            }
+        );
+
+        let second_msg = msg_rx.recv().await.expect("second EntriesReloaded");
+        let AppMessage::EntriesReloaded {
+            entries: second_entries,
+            active: second_active,
+        } = second_msg
+        else {
+            panic!("expected EntriesReloaded for the second job");
+        };
+        assert_eq!(
+            second_entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+            vec![b, a, d, c],
+            "second message must reflect both swaps, and must arrive after the first"
+        );
+        assert_eq!(
+            second_active,
+            EntryKey {
+                is_filter_stream: false,
+                id: c
+            }
+        );
+
+        // The last snapshot delivered must match what the DB actually holds — the
+        // property that broke when a late-delivered older snapshot could win the race.
+        let db_entries = load_left_pane_entries(&pool).await.expect("reload");
+        assert_eq!(
+            db_entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+            second_entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+            "final snapshot delivered must match the DB's final state"
+        );
+    }
+
+    /// If `reorder_worker_task` is gone (e.g. panicked), `send_reorder_job`'s enqueue fails.
+    /// Without a reply, every front-end's `reorder_pending` gate would latch shut forever;
+    /// this asserts the enqueue failure itself is turned into an `ActionError` so the user
+    /// sees it and the gate can clear.
+    #[tokio::test]
+    async fn send_reorder_job_reports_action_error_when_worker_is_gone() {
+        let (job_tx, job_rx) = mpsc::channel::<ReorderJob>(1);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<AppMessage>(1);
+        drop(job_rx); // simulate a dead/panicked reorder_worker_task
+
+        send_reorder_job(
+            &job_tx,
+            &msg_tx,
+            ReorderJob {
+                is_filter_stream: false,
+                upper_id: 1,
+                lower_id: 2,
+                active_id: 1,
+            },
+        )
+        .await;
+
+        match msg_rx.recv().await {
+            Some(AppMessage::ActionError(msg)) => {
+                assert!(
+                    msg.contains("reorder"),
+                    "expected the error to mention reorder, got: {msg}"
+                );
+            }
+            Some(_) => panic!("expected ActionError, got a different AppMessage variant"),
+            None => panic!("expected ActionError, but the channel closed with nothing sent"),
+        }
     }
 }

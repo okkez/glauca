@@ -76,11 +76,7 @@ impl GlaucaApp {
                 LeftPaneEntry::Query(q) => q.label.clone(),
                 LeftPaneEntry::FilterStream(fs) => fs.name.clone(),
             };
-            let unread = self
-                .unread_counts
-                .get(&entry.unread_key())
-                .copied()
-                .unwrap_or(0);
+            let unread = self.unread_counts.get(&entry.key()).copied().unwrap_or(0);
 
             let row = h_flex()
                 .id(("entry", i))

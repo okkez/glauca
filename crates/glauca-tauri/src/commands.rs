@@ -87,8 +87,8 @@ impl AppState {
     }
 }
 
-/// One left-pane entry's unread count: the `(is_filter_stream, entry_id) -> count` map
-/// from `compute_unread_counts`, in a shape the front-end can key on directly.
+/// One left-pane entry's unread count: the `EntryKey -> count` map from
+/// `compute_unread_counts`, flattened into a shape the front-end can key on directly.
 #[derive(Serialize)]
 pub struct UnreadCount {
     pub is_filter_stream: bool,
@@ -196,9 +196,9 @@ pub async fn unread_counts(
     Ok(
         compute_unread_counts(&entries, query_id, &items, login.as_deref())
             .into_iter()
-            .map(|((is_filter_stream, entry_id), count)| UnreadCount {
-                is_filter_stream,
-                entry_id,
+            .map(|(key, count)| UnreadCount {
+                is_filter_stream: key.is_filter_stream,
+                entry_id: key.id,
                 count,
             })
             .collect(),
@@ -475,7 +475,7 @@ pub async fn delete_filter_stream(state: State<'_, AppState>, id: i64) -> Result
 }
 
 #[tauri::command]
-pub async fn swap_query_positions(
+pub async fn reorder_query(
     state: State<'_, AppState>,
     upper_id: i64,
     lower_id: i64,
@@ -483,7 +483,7 @@ pub async fn swap_query_positions(
 ) -> Result<(), String> {
     dispatch(
         &state.tx,
-        EngineCommand::SwapQueryPositions {
+        EngineCommand::ReorderQuery {
             upper_id,
             lower_id,
             active_id,
@@ -493,7 +493,7 @@ pub async fn swap_query_positions(
 }
 
 #[tauri::command]
-pub async fn swap_filter_stream_positions(
+pub async fn reorder_filter_stream(
     state: State<'_, AppState>,
     upper_id: i64,
     lower_id: i64,
@@ -501,7 +501,7 @@ pub async fn swap_filter_stream_positions(
 ) -> Result<(), String> {
     dispatch(
         &state.tx,
-        EngineCommand::SwapFilterStreamPositions {
+        EngineCommand::ReorderFilterStream {
             upper_id,
             lower_id,
             active_id,

@@ -278,39 +278,36 @@ impl GlaucaApp {
             AppMessage::FilterStreamDeleted { id } => {
                 needs_refilter |= self.remove_entries_and_reselect(|e| e.id() != id);
             }
-            AppMessage::QueriesSwapped {
-                upper_id,
-                active_id,
-                ..
-            } => {
-                if let Some(idx) = self
-                    .entries
-                    .iter()
-                    .position(|e| matches!(e, LeftPaneEntry::Query(q) if q.id == upper_id))
-                {
-                    move_group_down(&mut self.entries, idx);
-                }
-                if let Some(pos) = self.entries.iter().position(|e| e.id() == active_id) {
-                    self.entry_cursor = pos;
-                }
-            }
-            AppMessage::FilterStreamsSwapped {
-                upper_id,
-                lower_id,
-                active_id,
-            } => {
-                let u = self.entries.iter().position(|e| e.id() == upper_id);
-                let l = self.entries.iter().position(|e| e.id() == lower_id);
-                if let (Some(u), Some(l)) = (u, l) {
-                    self.entries.swap(u, l);
-                }
-                if let Some(pos) = self.entries.iter().position(|e| e.id() == active_id) {
-                    self.entry_cursor = pos;
+            AppMessage::EntriesReloaded { entries, active } => {
+                self.reorder_pending = false;
+                let previous = self.entries.get(self.entry_cursor).map(|e| e.key());
+                let (cursor, changed) =
+                    resolve_reloaded_selection(&entries, active, previous, self.entry_cursor);
+                self.entries = entries;
+                if changed {
+                    // The reload lands on a different entry than was selected before this
+                    // message (deleted by a concurrent delete, a reorder whose `active`
+                    // names a row other than the previous selection — e.g. the right-click
+                    // menu reordering a row that isn't selected — or the cursor having
+                    // moved while this round trip was in flight). `items`/`stream_filter`
+                    // still belong to the old selection, so follow the cursor to the new
+                    // one rather than leaving the item pane showing it under a different
+                    // highlight. Use `preview_entry`, not `select_index`: this reload is a
+                    // purely local, offline-safe reorder, and `select_index` ends in an
+                    // unconditional `Sync` that would fire a network call on every cursor
+                    // drift, not just an actual deletion.
+                    self.preview_entry(cursor);
+                } else {
+                    self.entry_cursor = cursor;
                 }
             }
 
             AppMessage::ActionDone(s) => self.status = Some(s),
             AppMessage::ActionError(e) => {
+                // Also the failure path for a reorder round trip (both the reorder and the
+                // read-back failed, so no EntriesReloaded followed) — clear the gate here
+                // too, or a rejected reorder would leave reordering dead for the session.
+                self.reorder_pending = false;
                 self.status = Some(format!("Error: {e}"));
                 window.push_notification(Notification::error(e), cx);
             }

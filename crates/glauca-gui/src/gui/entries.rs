@@ -71,8 +71,8 @@ impl GlaucaApp {
         self.reorder(false);
     }
 
-    /// Move the selected entry up/down within its group. Sends a swap command; the entries
-    /// vec is reordered only when the *Swapped confirmation arrives.
+    /// Move the selected entry up/down within its group. Sends a reorder command; the
+    /// entries vec is replaced wholesale when the engine's EntriesReloaded arrives.
     pub(crate) fn reorder(&mut self, down: bool) {
         if self.focus != Focus::QueryList {
             return;
@@ -82,14 +82,22 @@ impl GlaucaApp {
 
     /// Move the entry at `cursor` up/down within its group (index-based; no focus
     /// guard so right-click can target any row).
+    ///
+    /// Dropped while a reorder round trip is outstanding (see `reorder_pending`): the pair
+    /// computed below comes from `self.entries`, which isn't updated until the engine
+    /// replies, so a second move before then would resend a pair the DB may have already
+    /// rejected as no longer adjacent.
     pub(crate) fn reorder_entry(&mut self, cursor: usize, down: bool) {
+        if self.reorder_pending {
+            return;
+        }
         let cmd = match self.entries.get(cursor) {
             Some(LeftPaneEntry::Query(q)) => {
                 let current_id = q.id;
                 if down {
                     let next_query_idx = group_range(&self.entries, cursor).end;
                     match self.entries.get(next_query_idx) {
-                        Some(LeftPaneEntry::Query(nq)) => Some(EngineCommand::SwapQueryPositions {
+                        Some(LeftPaneEntry::Query(nq)) => Some(EngineCommand::ReorderQuery {
                             upper_id: current_id,
                             lower_id: nq.id,
                             active_id: current_id,
@@ -101,7 +109,7 @@ impl GlaucaApp {
                         .iter()
                         .rposition(|e| matches!(e, LeftPaneEntry::Query(_)))
                         .and_then(|prev_idx| match &self.entries[prev_idx] {
-                            LeftPaneEntry::Query(pq) => Some(EngineCommand::SwapQueryPositions {
+                            LeftPaneEntry::Query(pq) => Some(EngineCommand::ReorderQuery {
                                 upper_id: pq.id,
                                 lower_id: current_id,
                                 active_id: current_id,
@@ -116,7 +124,7 @@ impl GlaucaApp {
                 if down {
                     match self.entries.get(cursor + 1) {
                         Some(LeftPaneEntry::FilterStream(next)) if next.parent_id == parent_id => {
-                            Some(EngineCommand::SwapFilterStreamPositions {
+                            Some(EngineCommand::ReorderFilterStream {
                                 upper_id: fs_id,
                                 lower_id: next.id,
                                 active_id: fs_id,
@@ -127,7 +135,7 @@ impl GlaucaApp {
                 } else if cursor > 0 {
                     match self.entries.get(cursor - 1) {
                         Some(LeftPaneEntry::FilterStream(prev)) if prev.parent_id == parent_id => {
-                            Some(EngineCommand::SwapFilterStreamPositions {
+                            Some(EngineCommand::ReorderFilterStream {
                                 upper_id: prev.id,
                                 lower_id: fs_id,
                                 active_id: fs_id,
@@ -142,7 +150,11 @@ impl GlaucaApp {
             None => None,
         };
         if let Some(cmd) = cmd {
-            self.send(cmd);
+            // Only latch the gate if the command was actually enqueued — a full or closed
+            // channel here would otherwise wedge `reorder_pending` for the session, since a
+            // dropped command never produces the `EntriesReloaded`/`ActionError` reply that
+            // clears it.
+            self.reorder_pending = self.try_send(cmd);
         }
     }
 

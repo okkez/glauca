@@ -1,7 +1,7 @@
 // Domain / display types shared by every frontend (TUI / GUI).
 // framework 非依存（ratatui にも db にも依存しない純粋型）。
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct QueryEntry {
     pub id: i64,
     /// Display label shown in the left pane (name if set, otherwise query_str).
@@ -11,7 +11,7 @@ pub struct QueryEntry {
     pub kind: String,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FilterStreamEntry {
     pub id: i64,
     pub parent_id: i64,
@@ -20,11 +20,19 @@ pub struct FilterStreamEntry {
     pub kind: String,
 }
 
+/// Identifies a left-pane row. Query and filter-stream ids come from separate tables and
+/// collide as raw i64, so the discriminant has to travel with the id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct EntryKey {
+    pub is_filter_stream: bool,
+    pub id: i64,
+}
+
 /// A single row in the left pane — either a root query or a filter stream.
 ///
 /// Serialized adjacently tagged (`{"type": "Query", "data": {…}}`) so glauca-tauri can
 /// branch on `entry.type` without colliding with the inner `kind` field.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum LeftPaneEntry {
     Query(QueryEntry),
@@ -39,10 +47,11 @@ impl LeftPaneEntry {
         }
     }
 
-    /// Key for the per-entry unread-count map. Query and filter-stream ids come from
-    /// separate tables and collide as raw i64, so the discriminant keeps them distinct.
-    pub fn unread_key(&self) -> (bool, i64) {
-        (self.is_filter_stream(), self.id())
+    pub fn key(&self) -> EntryKey {
+        EntryKey {
+            is_filter_stream: self.is_filter_stream(),
+            id: self.id(),
+        }
     }
 
     pub fn kind(&self) -> &str {
@@ -117,7 +126,7 @@ impl UserRef {
     }
 }
 
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ItemEntry {
     pub number: i64,
     pub title: String,
