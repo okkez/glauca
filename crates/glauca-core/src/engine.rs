@@ -1395,10 +1395,16 @@ pub async fn load_left_pane_entries(pool: &SqlitePool) -> anyhow::Result<Vec<Lef
 /// The two calls are independent failure points — a reorder that committed can still
 /// fail to read back — so the caller must not collapse them into one `Result` chain
 /// (that was the bug: it reported an applied reorder as a failed one whenever the
-/// read-back errored). `reorder_query`/`reorder_filter_stream` reject a pair that has
-/// drifted apart (see `db::exchanged`) rather than reporting an unearned success, and
-/// `active` stays valid on that path since it names the row the cursor was already on,
-/// not either end of the attempted swap.
+/// read-back errored).
+///
+/// The reload is sent on a rejected reorder too. `reorder_query`/`reorder_filter_stream`
+/// reject a pair that has drifted apart (see `db::exchanged`) rather than reporting an
+/// unearned success, and without the pane the front-end would keep retrying from the same
+/// stale view and failing the same way.
+///
+/// `active_id` is the moved row, so it is one end of the attempted pair. A rejection can
+/// mean that row was deleted, so `active` may name a row absent from `entries` — the
+/// front-ends clamp the cursor rather than assuming it is there.
 async fn reorder_and_reload(
     pool: &SqlitePool,
     is_filter_stream: bool,
