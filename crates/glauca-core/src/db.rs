@@ -258,8 +258,8 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
 /// Exchange the places of two sibling filter streams (they must share the same parent).
 ///
 /// Renumbers only `upper_id`'s parent, for the reasons on [`reorder_query`] — including
-/// why the transaction is `IMMEDIATE`. Either stream having been deleted meanwhile fails the
-/// call rather than reporting success; see [`exchanged`].
+/// why the transaction is `IMMEDIATE`. Either stream having been deleted, or the two having
+/// drifted apart, fails the call rather than reporting success; see [`exchanged`].
 pub async fn reorder_filter_stream(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let parent_id = sqlx::query_scalar!(
@@ -275,7 +275,7 @@ pub async fn reorder_filter_stream(pool: &SqlitePool, upper_id: i64, lower_id: i
         .map(|fs| fs.id)
         .collect();
     let ids = exchanged(ids, upper_id, lower_id).with_context(|| {
-        format!("filter streams {upper_id} and {lower_id} are no longer both under one query")
+        format!("filter streams {upper_id} and {lower_id} are no longer adjacent under one query")
     })?;
     for (position, id) in ids.iter().enumerate() {
         let position = position as i64;
@@ -380,7 +380,7 @@ pub async fn reorder_query(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> R
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let ids: Vec<i64> = list_queries(&mut *tx).await?.iter().map(|q| q.id).collect();
     let ids = exchanged(ids, upper_id, lower_id).with_context(|| {
-        format!("queries {upper_id} and {lower_id} are no longer both in the cache")
+        format!("queries {upper_id} and {lower_id} are no longer adjacent in the cache")
     })?;
     for (position, id) in ids.iter().enumerate() {
         let position = position as i64;
@@ -392,20 +392,20 @@ pub async fn reorder_query(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> R
     Ok(())
 }
 
-/// `ids` with the entries `a` and `b` in each other's place, or `None` if either is absent —
-/// another front-end deleted the row after the caller last read the list.
+/// `ids` with the adjacent pair `upper`/`lower` exchanged, or `None` if `upper` is not
+/// immediately followed by `lower` — either row was deleted, or another front-end reordered
+/// the list after the caller last read it.
 ///
-/// `None` must reach the caller as an error, never as a silent success: the TUI and the gpui GUI
-/// move the entry in their own `entries` vec on the engine's confirmation without re-reading the
-/// DB, so an unearned `Ok` shows an order that is gone on the next launch.
-///
-/// FIXME(no cross-process invalidation): adjacency is not checked, so another front-end
-/// reordering in that same gap leaves the two ids non-adjacent and this jumps whatever ended up
-/// between them. Closing it means telling the front-ends to re-read, as the Tauri one does.
-fn exchanged(mut ids: Vec<i64>, a: i64, b: i64) -> Option<Vec<i64>> {
-    let a_idx = ids.iter().position(|id| *id == a)?;
-    let b_idx = ids.iter().position(|id| *id == b)?;
-    ids.swap(a_idx, b_idx);
+/// `None` must reach the caller as an error, never as a silent success. Swapping a pair that
+/// drifted apart would jump whatever ended up between them, and the front-ends move the entry
+/// in their own `entries` vec on the engine's confirmation, so an unearned `Ok` shows an order
+/// that is gone on the next launch.
+fn exchanged(mut ids: Vec<i64>, upper: i64, lower: i64) -> Option<Vec<i64>> {
+    let upper_idx = ids.iter().position(|id| *id == upper)?;
+    if ids.get(upper_idx + 1) != Some(&lower) {
+        return None;
+    }
+    ids.swap(upper_idx, upper_idx + 1);
     Some(ids)
 }
 
@@ -1605,6 +1605,33 @@ mod tests {
         assert_eq!(query_ids_in_order(&pool).await, vec![second, first, third]);
     }
 
+    #[test]
+    fn exchanged_swaps_an_adjacent_pair() {
+        assert_eq!(exchanged(vec![1, 2, 3], 1, 2), Some(vec![2, 1, 3]));
+        assert_eq!(exchanged(vec![1, 2, 3], 2, 3), Some(vec![1, 3, 2]));
+    }
+
+    /// Another front-end reordered in the gap between the caller reading the list and this
+    /// running, so the pair it picked is no longer neighbouring. Swapping anyway would jump
+    /// the entry that ended up between them.
+    #[test]
+    fn exchanged_refuses_a_pair_that_is_no_longer_adjacent() {
+        assert_eq!(exchanged(vec![1, 2, 3], 1, 3), None);
+    }
+
+    /// Every caller passes the pair in list order. Reversed means the two moved apart and
+    /// back past each other, not that the caller meant "swap these two".
+    #[test]
+    fn exchanged_refuses_a_reversed_pair() {
+        assert_eq!(exchanged(vec![1, 2, 3], 2, 1), None);
+    }
+
+    #[test]
+    fn exchanged_refuses_a_pair_with_a_deleted_row() {
+        assert_eq!(exchanged(vec![1, 2, 3], 1, 9), None);
+        assert_eq!(exchanged(vec![1, 2, 3], 9, 2), None);
+    }
+
     /// A cache an older binary wrote has every position at the default, and reordering has to
     /// work from that too — not only from one the migration has tidied.
     #[tokio::test]
@@ -1642,6 +1669,39 @@ mod tests {
         assert!(reorder_query(&pool, second, first).await.is_err());
         assert_eq!(query_position(&pool, first).await, 5);
         assert_eq!(query_position(&pool, third).await, 9);
+    }
+
+    /// The pair the front-end picked was adjacent when it read the list; a concurrent
+    /// reorder can leave a third query between them. The DB has to refuse rather than jump
+    /// the intruder.
+    #[tokio::test]
+    async fn reorder_query_refuses_a_pair_that_is_no_longer_adjacent() {
+        let (pool, _file) = test_pool().await;
+        let first = upsert_query(&pool, "repo:owner/a is:pr", "pull_request", None)
+            .await
+            .expect("first");
+        let second = upsert_query(&pool, "repo:owner/b is:pr", "pull_request", None)
+            .await
+            .expect("second");
+        let third = upsert_query(&pool, "repo:owner/c is:pr", "pull_request", None)
+            .await
+            .expect("third");
+
+        reorder_query(&pool, first, third)
+            .await
+            .expect_err("first and third are not adjacent");
+
+        let ids: Vec<i64> = list_queries(&pool)
+            .await
+            .expect("list")
+            .iter()
+            .map(|q| q.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![first, second, third],
+            "the order must be untouched"
+        );
     }
 
     #[tokio::test]
@@ -1901,6 +1961,40 @@ mod tests {
         assert!(reorder_filter_stream(&pool, second, first).await.is_err());
         assert_eq!(filter_stream_position(&pool, first).await, 5);
         assert_eq!(filter_stream_position(&pool, third).await, 9);
+    }
+
+    /// Same guard, one level down: filter streams are numbered per parent.
+    #[tokio::test]
+    async fn reorder_filter_stream_refuses_a_pair_that_is_no_longer_adjacent() {
+        let (pool, _file) = test_pool().await;
+        let parent = upsert_query(&pool, "repo:owner/a is:pr", "pull_request", None)
+            .await
+            .expect("parent");
+        let first = upsert_filter_stream(&pool, parent, "one", "author:alice")
+            .await
+            .expect("first");
+        let second = upsert_filter_stream(&pool, parent, "two", "author:bob")
+            .await
+            .expect("second");
+        let third = upsert_filter_stream(&pool, parent, "three", "author:carol")
+            .await
+            .expect("third");
+
+        reorder_filter_stream(&pool, first, third)
+            .await
+            .expect_err("first and third are not adjacent");
+
+        let ids: Vec<i64> = list_filter_streams(&pool, parent)
+            .await
+            .expect("list")
+            .iter()
+            .map(|fs| fs.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![first, second, third],
+            "the order must be untouched"
+        );
     }
 
     #[tokio::test]
