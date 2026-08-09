@@ -1669,15 +1669,7 @@ mod tests {
     #[tokio::test]
     async fn reorder_query_refuses_a_pair_that_is_no_longer_adjacent() {
         let (pool, _file) = test_pool().await;
-        let first = upsert_query(&pool, "repo:owner/a is:pr", "pull_request", None)
-            .await
-            .expect("first");
-        let second = upsert_query(&pool, "repo:owner/b is:pr", "pull_request", None)
-            .await
-            .expect("second");
-        let third = upsert_query(&pool, "repo:owner/c is:pr", "pull_request", None)
-            .await
-            .expect("third");
+        let [first, second, third] = seed_three_queries(&pool).await;
 
         reorder_query(&pool, first, third)
             .await
@@ -1959,18 +1951,7 @@ mod tests {
     #[tokio::test]
     async fn reorder_filter_stream_refuses_a_pair_that_is_no_longer_adjacent() {
         let (pool, _file) = test_pool().await;
-        let parent = upsert_query(&pool, "repo:owner/a is:pr", "pull_request", None)
-            .await
-            .expect("parent");
-        let first = upsert_filter_stream(&pool, parent, "one", "author:alice")
-            .await
-            .expect("first");
-        let second = upsert_filter_stream(&pool, parent, "two", "author:bob")
-            .await
-            .expect("second");
-        let third = upsert_filter_stream(&pool, parent, "three", "author:carol")
-            .await
-            .expect("third");
+        let (parent, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
 
         reorder_filter_stream(&pool, first, third)
             .await

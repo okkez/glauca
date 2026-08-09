@@ -25,7 +25,7 @@ use tracing::{debug, info, instrument, warn};
 /// Serialized adjacently tagged (`{"type": "ItemsLoaded", "data": {…}}`) for glauca-tauri,
 /// which forwards each one to JavaScript over the Tauri event bus. The adjacent
 /// representation handles every variant shape uniformly. The TUI/GUI never serialize it.
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AppMessage {
     ItemsLoaded {
@@ -1425,30 +1425,31 @@ async fn reorder_and_reload(
     } else {
         db::reorder_query(pool, upper_id, lower_id).await
     };
+    let reload_result = load_left_pane_entries(pool).await;
 
-    let mut messages = Vec::new();
-    if let Err(e) = &reorder_result {
-        messages.push(AppMessage::ActionError(format!("reorder: {e}")));
-    }
-
-    match load_left_pane_entries(pool).await {
-        Ok(entries) => messages.push(AppMessage::EntriesReloaded {
-            entries,
-            active: EntryKey {
-                is_filter_stream,
-                id: active_id,
-            },
-        }),
+    let reloaded = |entries| AppMessage::EntriesReloaded {
+        entries,
+        active: EntryKey {
+            is_filter_stream,
+            id: active_id,
+        },
+    };
+    match (reorder_result, reload_result) {
+        (Ok(()), Ok(entries)) => vec![reloaded(entries)],
         // A reload failure after a successful reorder must not read as the reorder
         // having failed — that leaves the front-end stuck retrying an already-applied
-        // move forever. When the reorder itself failed, its ActionError above already
-        // covers this: nothing else changed, so a second message would be noise.
-        Err(e) if reorder_result.is_ok() => messages.push(AppMessage::ActionError(format!(
+        // move forever.
+        (Ok(()), Err(e)) => vec![AppMessage::ActionError(format!(
             "reorder applied, but the left pane could not be re-read: {e}"
-        ))),
-        Err(_) => {}
+        ))],
+        (Err(e), Ok(entries)) => vec![
+            AppMessage::ActionError(format!("reorder: {e}")),
+            reloaded(entries),
+        ],
+        // The reorder's ActionError already covers the failed reload: nothing else
+        // changed, so a second message would be noise.
+        (Err(e), Err(_)) => vec![AppMessage::ActionError(format!("reorder: {e}"))],
     }
-    messages
 }
 
 /// Enqueue a `ReorderJob` to the dedicated reorder worker, and — since that queue is the
@@ -2551,10 +2552,7 @@ mod tests {
                     }
                 );
             }
-            other => panic!(
-                "expected exactly one EntriesReloaded, got {} messages",
-                other.len()
-            ),
+            other => panic!("expected exactly one EntriesReloaded, got {other:?}",),
         }
     }
 
@@ -2590,10 +2588,7 @@ mod tests {
                     }
                 );
             }
-            other => panic!(
-                "expected ActionError then EntriesReloaded, got {} messages",
-                other.len()
-            ),
+            other => panic!("expected ActionError then EntriesReloaded, got {other:?}",),
         }
     }
 
@@ -2625,10 +2620,7 @@ mod tests {
                     }
                 );
             }
-            other => panic!(
-                "expected exactly one EntriesReloaded, got {} messages",
-                other.len()
-            ),
+            other => panic!("expected exactly one EntriesReloaded, got {other:?}",),
         }
     }
 
@@ -2650,10 +2642,7 @@ mod tests {
             [AppMessage::ActionError(e)] => {
                 assert!(e.starts_with("reorder:"), "unexpected error text: {e}");
             }
-            other => panic!(
-                "expected exactly one ActionError, got {} messages",
-                other.len()
-            ),
+            other => panic!("expected exactly one ActionError, got {other:?}",),
         }
     }
 

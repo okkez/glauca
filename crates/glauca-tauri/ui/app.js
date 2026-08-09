@@ -1353,6 +1353,17 @@ async function refreshEntries() {
   }
 }
 
+// Refresh the left pane, then open the reorder gate — in that order, because clearing
+// the gate before `state.entries` is back in sync would let the very next Shift+J/K
+// build a pair from stale entries and get rejected. Only the newest reorder generation
+// may clear the flag: a stale reply's finally must not reopen a newer reorder's gate.
+function refreshEntriesThenClearReorderGate() {
+  const seq = state.reorderSeq;
+  return refreshEntries().finally(() => {
+    if (seq === state.reorderSeq) state.reorderPending = false;
+  });
+}
+
 // Build the ReorderQuery/ReorderFilterStream args for moving entry `idx` up/down,
 // mirroring the TUI's reorder_command. Returns {cmd, args} or null at an edge.
 function reorderArgs(idx, down) {
@@ -1776,15 +1787,8 @@ function handleMessage(msg) {
     case "ActionError":
       // Also the failure path for a reorder round trip (both the reorder and the
       // read-back failed, so no EntriesReloaded followed) — clear the gate here too, or a
-      // rejected reorder would leave Shift+J/K dead for the rest of the session. Refresh
-      // entries first: clearing the gate before `state.entries` is back in sync would let
-      // the very next Shift+J/K build a pair from stale entries and get rejected too.
-      if (state.reorderPending) {
-        const seq = state.reorderSeq;
-        refreshEntries().finally(() => {
-          if (seq === state.reorderSeq) state.reorderPending = false;
-        });
-      }
+      // rejected reorder would leave Shift+J/K dead for the rest of the session.
+      if (state.reorderPending) refreshEntriesThenClearReorderGate();
       setStatus(d, true);
       break;
     case "SyncStarted":
@@ -1831,15 +1835,7 @@ function handleMessage(msg) {
       refreshEntries();
       break;
     case "EntriesReloaded":
-      // Keep the gate closed until the refresh lands: `refreshEntries` awaits an IPC round
-      // trip, and clearing the flag before it resolves would let a Shift+J/K in that window
-      // build a pair from the still-stale `state.entries` and get rejected.
-      {
-        const seq = state.reorderSeq;
-        refreshEntries().finally(() => {
-          if (seq === state.reorderSeq) state.reorderPending = false;
-        });
-      }
+      refreshEntriesThenClearReorderGate();
       break;
     default:
       break;

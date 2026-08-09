@@ -194,14 +194,13 @@ where
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
                     {
-                        if !app.reorder_pending {
-                            let down = key.code == KeyCode::Char('J');
-                            if let Some(cmd) =
-                                reorder_command(&app.entries, app.entry_cursor, down)
-                            {
-                                app.reorder_pending = true;
-                                engine.send(cmd).await;
-                            }
+                        if app.reorder_pending {
+                            continue;
+                        }
+                        let down = key.code == KeyCode::Char('J');
+                        if let Some(cmd) = reorder_command(&app.entries, app.entry_cursor, down) {
+                            app.reorder_pending = true;
+                            engine.send(cmd).await;
                         }
                         continue;
                     }

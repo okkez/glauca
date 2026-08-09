@@ -1,7 +1,7 @@
 // Domain / display types shared by every frontend (TUI / GUI).
 // framework 非依存（ratatui にも db にも依存しない純粋型）。
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct QueryEntry {
     pub id: i64,
     /// Display label shown in the left pane (name if set, otherwise query_str).
@@ -11,7 +11,7 @@ pub struct QueryEntry {
     pub kind: String,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FilterStreamEntry {
     pub id: i64,
     pub parent_id: i64,
@@ -32,7 +32,7 @@ pub struct EntryKey {
 ///
 /// Serialized adjacently tagged (`{"type": "Query", "data": {…}}`) so glauca-tauri can
 /// branch on `entry.type` without colliding with the inner `kind` field.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum LeftPaneEntry {
     Query(QueryEntry),
@@ -126,7 +126,7 @@ impl UserRef {
     }
 }
 
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ItemEntry {
     pub number: i64,
     pub title: String,
