@@ -71,8 +71,8 @@ impl GlaucaApp {
         self.reorder(false);
     }
 
-    /// Move the selected entry up/down within its group. Sends a swap command; the entries
-    /// vec is reordered only when the *Swapped confirmation arrives.
+    /// Move the selected entry up/down within its group. Sends a reorder command; the
+    /// entries vec is replaced wholesale when the engine's EntriesReloaded arrives.
     pub(crate) fn reorder(&mut self, down: bool) {
         if self.focus != Focus::QueryList {
             return;

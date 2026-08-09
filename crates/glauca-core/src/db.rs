@@ -403,9 +403,8 @@ pub async fn reorder_query(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> R
 /// the list after the caller last read it.
 ///
 /// `None` must reach the caller as an error, never as a silent success. Swapping a pair that
-/// drifted apart would jump whatever ended up between them, and the front-ends move the entry
-/// in their own `entries` vec on the engine's confirmation, so an unearned `Ok` shows an order
-/// that is gone on the next launch.
+/// drifted apart would jump whatever ended up between them and write that wrong order to the
+/// DB — the store every front-end re-reads its left pane from.
 fn exchanged(mut ids: Vec<i64>, upper: i64, lower: i64) -> Option<Vec<i64>> {
     let upper_idx = ids.iter().position(|id| *id == upper)?;
     if ids.get(upper_idx + 1) != Some(&lower) {

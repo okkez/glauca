@@ -185,7 +185,7 @@ where
                     }
 
                     // J/K: move the selected entry within its group. The entries vec is
-                    // reordered only on the engine's *Swapped confirmation.
+                    // replaced wholesale when the engine's EntriesReloaded arrives.
                     if (key.code == KeyCode::Char('J') || key.code == KeyCode::Char('K'))
                         && app.focus == Focus::QueryList
                         && app.input_mode == InputMode::Normal
