@@ -43,6 +43,10 @@ fn create_parent_dir(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Block on a locked DB rather than failing — chiefly so anything touching the file during
+/// the maintenance pass's VACUUM (which holds an exclusive lock) waits its turn.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// SQLite tuning for this cache: WAL, `synchronous = NORMAL`, and a busy timeout.
 fn connect_options(db_path: &Path) -> SqliteConnectOptions {
     SqliteConnectOptions::new()
@@ -61,9 +65,7 @@ fn connect_options(db_path: &Path) -> SqliteConnectOptions {
         // `cache.db-shm`) next to the DB.
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        // Block on a locked DB rather than failing: chiefly so a write during the
-        // maintenance pass's VACUUM (which needs exclusive access) waits its turn.
-        .busy_timeout(Duration::from_secs(30))
+        .busy_timeout(BUSY_TIMEOUT)
 }
 
 /// Require `db_path` to be a glauca cache, refusing to migrate a SQLite file that belongs
@@ -84,10 +86,8 @@ async fn ensure_glauca_cache(db_path: &Path) -> Result<()> {
         .create_if_missing(true)
         // Safe alongside the no-pragma property above: sqlx applies this through
         // `sqlite3_busy_timeout()`, not a PRAGMA, so it writes nothing to the file.
-        // Needed so a second glauca starting up during another instance's
-        // maintenance-pass VACUUM waits instead of failing with "database is locked".
         // Do not add `journal_mode`/`synchronous` here — those persist to the header.
-        .busy_timeout(Duration::from_secs(30))
+        .busy_timeout(BUSY_TIMEOUT)
         .connect()
         .await
         .with_context(|| format!("opening cache database {}", db_path.display()))?;
@@ -1091,7 +1091,9 @@ pub async fn is_full_fetch_due(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{foreign_database, make_item, raw_pool, test_pool};
+    use crate::test_support::{
+        foreign_database, make_item, raw_pool, seed_query, seed_three_queries, test_pool,
+    };
 
     /// Driving `resolve_db_path_with` directly keeps this off the process environment,
     /// which every other test in this binary shares.
@@ -1336,21 +1338,6 @@ mod tests {
         let [first, second, third] = seed_three_queries(&pool).await;
 
         assert_eq!(query_ids_in_order(&pool).await, vec![first, second, third]);
-    }
-
-    /// Three queries in a known order, so each reorder test opens with the state it is about.
-    async fn seed_three_queries(pool: &SqlitePool) -> [i64; 3] {
-        [
-            seed_query(pool, "query:first").await,
-            seed_query(pool, "query:second").await,
-            seed_query(pool, "query:third").await,
-        ]
-    }
-
-    async fn seed_query(pool: &SqlitePool, query: &str) -> i64 {
-        upsert_query(pool, query, "issue", None)
-            .await
-            .expect("seed query")
     }
 
     /// Three streams under one parent, returning the parent alongside them.

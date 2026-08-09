@@ -38,7 +38,7 @@ impl GlaucaApp {
     /// Send a command to the engine. Errors (channel closed/full) are ignored,
     /// matching the engine's own fire-and-forget semantics.
     pub(crate) fn send(&self, cmd: EngineCommand) {
-        let _ = self.cmd_tx.try_send(cmd);
+        self.try_send(cmd);
     }
 
     /// Like `send`, but reports whether the command was actually enqueued. Callers that

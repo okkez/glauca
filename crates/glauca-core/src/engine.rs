@@ -2094,7 +2094,7 @@ async fn mark_filtered_items_read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_pool;
+    use crate::test_support::{seed_three_queries, test_pool};
     use rstest::rstest;
 
     /// Cache one unread PR by `alice` under `query_id`.
@@ -2523,20 +2523,6 @@ mod tests {
         enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, 60, &gate, &pending).await;
         let second = sync_rx.recv().await.expect("re-enqueued job");
         assert_eq!(second.query_id, q1, "released slot allows re-enqueue");
-    }
-
-    /// Three root queries, in insertion order.
-    async fn seed_three_queries(pool: &SqlitePool) -> [i64; 3] {
-        let a = db::upsert_query(pool, "repo:o/a is:pr", "pull_request", None)
-            .await
-            .expect("a");
-        let b = db::upsert_query(pool, "repo:o/b is:pr", "pull_request", None)
-            .await
-            .expect("b");
-        let c = db::upsert_query(pool, "repo:o/c is:pr", "pull_request", None)
-            .await
-            .expect("c");
-        [a, b, c]
     }
 
     /// A successful adjacent swap sends exactly one `EntriesReloaded`, with the entries
