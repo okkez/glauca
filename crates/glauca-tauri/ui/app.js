@@ -1799,8 +1799,7 @@ function handleMessage(msg) {
     case "FilterStreamUpdated":
     case "QueryDeleted":
     case "FilterStreamDeleted":
-    case "QueriesSwapped":
-    case "FilterStreamsSwapped":
+    case "EntriesReloaded":
       refreshEntries();
       break;
     default:

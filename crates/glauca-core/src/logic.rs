@@ -406,27 +406,6 @@ pub fn group_range(entries: &[LeftPaneEntry], query_idx: usize) -> std::ops::Ran
     query_idx..end
 }
 
-/// Moves the query group at `query_idx` one position down, past the next query group.
-/// Returns the new index of the moved group, or `None` if it was already at the bottom.
-pub fn move_group_down(entries: &mut Vec<LeftPaneEntry>, query_idx: usize) -> Option<usize> {
-    let range_a = group_range(entries, query_idx);
-    let next_query_idx = range_a.end;
-    if next_query_idx >= entries.len() {
-        return None; // already at the bottom
-    }
-    let range_b = group_range(entries, next_query_idx);
-
-    // Drain higher indices first to keep lower indices valid.
-    let group_b: Vec<_> = entries.drain(range_b.clone()).collect();
-    let group_a: Vec<_> = entries.drain(range_a.clone()).collect();
-    let insert_at = range_a.start;
-    let b_len = group_b.len();
-    for (i, item) in group_b.into_iter().chain(group_a).enumerate() {
-        entries.insert(insert_at + i, item);
-    }
-    Some(insert_at + b_len) // new start index of the moved group
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -199,47 +199,13 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             app.stream_filter = None;
             select_current_entry(app, engine, true).await;
         }
-        AppMessage::QueriesSwapped {
-            upper_id,
-            active_id,
-            ..
-        } => {
-            // Move the upper group down past the next group, then follow the
-            // active query with the cursor.
-            if let Some(idx) = app
+        AppMessage::EntriesReloaded { entries, active } => {
+            app.entries = entries;
+            app.entry_cursor = app
                 .entries
                 .iter()
-                .position(|e| matches!(e, LeftPaneEntry::Query(q) if q.id == upper_id))
-            {
-                move_group_down(&mut app.entries, idx);
-                if let Some(new_cursor) = app
-                    .entries
-                    .iter()
-                    .position(|e| matches!(e, LeftPaneEntry::Query(q) if q.id == active_id))
-                {
-                    app.entry_cursor = new_cursor;
-                }
-            }
-        }
-        AppMessage::FilterStreamsSwapped {
-            upper_id,
-            lower_id,
-            active_id,
-        } => {
-            let upper_idx = app
-                .entries
-                .iter()
-                .position(|e| matches!(e, LeftPaneEntry::FilterStream(fs) if fs.id == upper_id));
-            let lower_idx = app
-                .entries
-                .iter()
-                .position(|e| matches!(e, LeftPaneEntry::FilterStream(fs) if fs.id == lower_id));
-            if let (Some(u), Some(l)) = (upper_idx, lower_idx) {
-                app.entries.swap(u, l);
-                if let Some(new_cursor) = app.entries.iter().position(|e| e.id() == active_id) {
-                    app.entry_cursor = new_cursor;
-                }
-            }
+                .position(|e| e.key() == active)
+                .unwrap_or_else(|| app.entry_cursor.min(app.entries.len().saturating_sub(1)));
         }
         AppMessage::CurrentUserResolved { login, .. } => app.adopt_current_user(login),
     }

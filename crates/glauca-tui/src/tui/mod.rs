@@ -48,7 +48,7 @@ pub(crate) use terminal::{enter_tui, leave_tui, reenter_tui};
 use glauca_core::actions::{CustomAction, CustomActions};
 use glauca_core::engine::{AppMessage, Engine, EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
-use glauca_core::logic::{ChangeCounts, group_range, is_item_unread, move_group_down, query_label};
+use glauca_core::logic::{ChangeCounts, group_range, is_item_unread, query_label};
 use glauca_core::notify::ItemTracker;
 use settings::TuiSettings;
 

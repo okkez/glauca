@@ -9,8 +9,8 @@ use super::*;
 /// Position-swap command for moving the entry at `cursor` up (`down=false`) or
 /// down within its group: a query swaps with the adjacent query group, a filter
 /// stream with an adjacent sibling under the same parent. `None` if there is no
-/// neighbor to swap with. The entries vec is reordered later, when the engine
-/// confirms with QueriesSwapped / FilterStreamsSwapped.
+/// neighbor to swap with. The entries vec is replaced later, when the engine
+/// confirms with `AppMessage::EntriesReloaded`.
 pub(crate) fn reorder_command(
     entries: &[LeftPaneEntry],
     cursor: usize,

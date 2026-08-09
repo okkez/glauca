@@ -7,7 +7,7 @@ use crate::logic::{
     ME_UNEXPANDED_WARNING, cached_item_to_item_entry, has_me_token, is_item_unread,
 };
 use crate::types::{
-    CommentEntry, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
+    CommentEntry, EntryKey, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
 use crate::{db, github};
 use chrono::Utc;
@@ -83,19 +83,13 @@ pub enum AppMessage {
     FilterStreamDeleted {
         id: i64,
     },
-    /// Two query groups swapped position in the DB; `active_id` is the query the
-    /// cursor should follow after the front-end reorders its entries.
-    QueriesSwapped {
-        upper_id: i64,
-        lower_id: i64,
-        active_id: i64,
-    },
-    /// Two sibling filter streams swapped position in the DB; `active_id` is the
-    /// filter stream the cursor should follow.
-    FilterStreamsSwapped {
-        upper_id: i64,
-        lower_id: i64,
-        active_id: i64,
+    /// The left pane's authoritative contents, re-read from the DB after a change that can
+    /// reorder it. Front-ends replace their entry list wholesale and move the cursor to
+    /// `active`, rather than reproducing the move locally — the DB is the only place that
+    /// knows what another front-end did in between.
+    EntriesReloaded {
+        entries: Vec<LeftPaneEntry>,
+        active: EntryKey,
     },
     /// The authenticated user, resolved by a retry after the lookup at startup
     /// failed (see [`current_user_retry_task`]). Front-ends adopt it so `@me` starts
@@ -1801,22 +1795,21 @@ async fn command_loop(
                 tokio::spawn(async move {
                     // Confirm only what the DB took — see `db::exchanged` for why an unearned
                     // confirmation is the bug itself.
-                    match db::reorder_query(&pool2, upper_id, lower_id).await {
-                        Ok(()) => {
-                            let _ = tx2
-                                .send(AppMessage::QueriesSwapped {
-                                    upper_id,
-                                    lower_id,
-                                    active_id,
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx2
-                                .send(AppMessage::ActionError(format!("reorder: {e}")))
-                                .await;
-                        }
-                    }
+                    let reloaded = match db::reorder_query(&pool2, upper_id, lower_id).await {
+                        Ok(()) => load_left_pane_entries(&pool2).await,
+                        Err(e) => Err(e),
+                    };
+                    let msg = match reloaded {
+                        Ok(entries) => AppMessage::EntriesReloaded {
+                            entries,
+                            active: EntryKey {
+                                is_filter_stream: false,
+                                id: active_id,
+                            },
+                        },
+                        Err(e) => AppMessage::ActionError(format!("reorder: {e}")),
+                    };
+                    let _ = tx2.send(msg).await;
                 });
             }
             EngineCommand::ReorderFilterStream {
@@ -1827,22 +1820,22 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    match db::reorder_filter_stream(&pool2, upper_id, lower_id).await {
-                        Ok(()) => {
-                            let _ = tx2
-                                .send(AppMessage::FilterStreamsSwapped {
-                                    upper_id,
-                                    lower_id,
-                                    active_id,
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx2
-                                .send(AppMessage::ActionError(format!("reorder: {e}")))
-                                .await;
-                        }
-                    }
+                    let reloaded = match db::reorder_filter_stream(&pool2, upper_id, lower_id).await
+                    {
+                        Ok(()) => load_left_pane_entries(&pool2).await,
+                        Err(e) => Err(e),
+                    };
+                    let msg = match reloaded {
+                        Ok(entries) => AppMessage::EntriesReloaded {
+                            entries,
+                            active: EntryKey {
+                                is_filter_stream: true,
+                                id: active_id,
+                            },
+                        },
+                        Err(e) => AppMessage::ActionError(format!("reorder: {e}")),
+                    };
+                    let _ = tx2.send(msg).await;
                 });
             }
             EngineCommand::LoadComments {

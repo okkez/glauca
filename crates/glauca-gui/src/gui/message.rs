@@ -278,35 +278,13 @@ impl GlaucaApp {
             AppMessage::FilterStreamDeleted { id } => {
                 needs_refilter |= self.remove_entries_and_reselect(|e| e.id() != id);
             }
-            AppMessage::QueriesSwapped {
-                upper_id,
-                active_id,
-                ..
-            } => {
-                if let Some(idx) = self
+            AppMessage::EntriesReloaded { entries, active } => {
+                self.entries = entries;
+                self.entry_cursor = self
                     .entries
                     .iter()
-                    .position(|e| matches!(e, LeftPaneEntry::Query(q) if q.id == upper_id))
-                {
-                    move_group_down(&mut self.entries, idx);
-                }
-                if let Some(pos) = self.entries.iter().position(|e| e.id() == active_id) {
-                    self.entry_cursor = pos;
-                }
-            }
-            AppMessage::FilterStreamsSwapped {
-                upper_id,
-                lower_id,
-                active_id,
-            } => {
-                let u = self.entries.iter().position(|e| e.id() == upper_id);
-                let l = self.entries.iter().position(|e| e.id() == lower_id);
-                if let (Some(u), Some(l)) = (u, l) {
-                    self.entries.swap(u, l);
-                }
-                if let Some(pos) = self.entries.iter().position(|e| e.id() == active_id) {
-                    self.entry_cursor = pos;
-                }
+                    .position(|e| e.key() == active)
+                    .unwrap_or_else(|| self.entry_cursor.min(self.entries.len().saturating_sub(1)));
             }
 
             AppMessage::ActionDone(s) => self.status = Some(s),
