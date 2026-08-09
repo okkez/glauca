@@ -20,6 +20,14 @@ pub struct FilterStreamEntry {
     pub kind: String,
 }
 
+/// Identifies a left-pane row. Query and filter-stream ids come from separate tables and
+/// collide as raw i64, so the discriminant has to travel with the id.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct EntryKey {
+    pub is_filter_stream: bool,
+    pub id: i64,
+}
+
 /// A single row in the left pane — either a root query or a filter stream.
 ///
 /// Serialized adjacently tagged (`{"type": "Query", "data": {…}}`) so glauca-tauri can
@@ -39,10 +47,11 @@ impl LeftPaneEntry {
         }
     }
 
-    /// Key for the per-entry unread-count map. Query and filter-stream ids come from
-    /// separate tables and collide as raw i64, so the discriminant keeps them distinct.
-    pub fn unread_key(&self) -> (bool, i64) {
-        (self.is_filter_stream(), self.id())
+    pub fn key(&self) -> EntryKey {
+        EntryKey {
+            is_filter_stream: self.is_filter_stream(),
+            id: self.id(),
+        }
     }
 
     pub fn kind(&self) -> &str {

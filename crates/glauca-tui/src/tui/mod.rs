@@ -54,7 +54,7 @@ use settings::TuiSettings;
 
 // glauca-core::types を従来名で使えるよう re-export。
 pub use glauca_core::types::{
-    CommentEntry, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
+    CommentEntry, EntryKey, ItemAction, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -115,7 +115,7 @@ pub struct App {
     /// Memoized `filter_items` indices; see [`FilteredCache`].
     filtered_cache: RefCell<FilteredCache>,
     pub item_cursor: usize,
-    pub unread_counts: HashMap<(bool, i64), usize>,
+    pub unread_counts: HashMap<EntryKey, usize>,
     /// Freshly-synced items for the currently-viewed query, held back because
     /// they came from a background sync. Applied on explicit action (`u`).
     pub pending_items: Option<Vec<ItemEntry>>,

@@ -13,7 +13,7 @@ use glauca_core::engine::{EngineCommand, ReviewEvent};
 use glauca_core::filter::FilterQuery;
 use glauca_core::logic::{ChangeCounts, reviewer_overlays};
 use glauca_core::notify::ItemTracker;
-use glauca_core::types::{CommentEntry, ItemAction, ItemEntry, LeftPaneEntry};
+use glauca_core::types::{CommentEntry, EntryKey, ItemAction, ItemEntry, LeftPaneEntry};
 use gpui::*;
 use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants};
@@ -178,7 +178,7 @@ pub(crate) struct GlaucaApp {
     item_cursor: usize,
     /// Inline filter text (mirrors the `filter_input` value; drives `recompute_filtered`).
     filter: String,
-    unread_counts: HashMap<(bool, i64), usize>,
+    unread_counts: HashMap<EntryKey, usize>,
     /// Filter stream filter applied to the item list (None for root queries).
     stream_filter: Option<String>,
     /// Item keys whose body re-fetch was already requested this session. Maintenance

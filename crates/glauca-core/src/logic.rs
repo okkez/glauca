@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use crate::db::CachedItem;
 use crate::filter::{FilterQuery, StreamFilter};
-use crate::types::{ActorKind, ItemEntry, LeftPaneEntry, UserRef};
+use crate::types::{ActorKind, EntryKey, ItemEntry, LeftPaneEntry, UserRef};
 
 /// An item is unread iff its current `updated_at` is newer than the `updated_at` the user
 /// had seen when they last read it. Never-read items (`None`) are always unread.
@@ -353,13 +353,13 @@ pub fn filter_item_indices(
 }
 
 /// Compute unread counts for every left-pane entry belonging to `query_id`.
-/// Returns `(entry_id, unread_count)` pairs for the caller to store.
+/// Returns `(key, unread_count)` pairs for the caller to store.
 pub fn compute_unread_counts(
     entries: &[LeftPaneEntry],
     query_id: i64,
     items: &[ItemEntry],
     current_user: Option<&str>,
-) -> Vec<((bool, i64), usize)> {
+) -> Vec<(EntryKey, usize)> {
     let mut out = Vec::new();
     for entry in entries
         .iter()
@@ -383,7 +383,7 @@ pub fn compute_unread_counts(
                     .count()
             }
         };
-        out.push((entry.unread_key(), unread));
+        out.push((entry.key(), unread));
     }
     out
 }
