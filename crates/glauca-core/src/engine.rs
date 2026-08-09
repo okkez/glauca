@@ -108,6 +108,14 @@ pub struct SyncJob {
     pub query_str: String,
 }
 
+/// A job request sent to the dedicated reorder worker (see `reorder_worker_task`).
+pub struct ReorderJob {
+    pub is_filter_stream: bool,
+    pub upper_id: i64,
+    pub lower_id: i64,
+    pub active_id: i64,
+}
+
 /// Coalesces background sync jobs: tracks which queries already have a queued or
 /// in-flight job so a long offline stretch can't pile up duplicate jobs.
 #[derive(Clone, Default)]
@@ -1443,6 +1451,36 @@ async fn reorder_and_reload(
     messages
 }
 
+/// Processes `ReorderJob`s one at a time, forwarding `reorder_and_reload`'s messages
+/// to the front-end in order.
+///
+/// This single consumer draining one queue is what makes reorder ordering structural
+/// rather than incidental: each job's commit-then-reread-then-send finishes before the
+/// next one starts, so the last `EntriesReloaded` delivered is always the last reorder
+/// submitted. `command_loop` spawns an independent task per command for every other
+/// DB-touching arm, but must not do that here — two spawned reorders can commit and
+/// read back in submission order yet still *send* out of order if the first is
+/// descheduled before its `send`, which is the exact bug this worker exists to rule out.
+pub async fn reorder_worker_task(
+    pool: SqlitePool,
+    mut rx: mpsc::Receiver<ReorderJob>,
+    tx: mpsc::Sender<AppMessage>,
+) {
+    while let Some(job) = rx.recv().await {
+        for msg in reorder_and_reload(
+            &pool,
+            job.is_filter_stream,
+            job.upper_id,
+            job.lower_id,
+            job.active_id,
+        )
+        .await
+        {
+            let _ = tx.send(msg).await;
+        }
+    }
+}
+
 /// Async engine shared by the TUI and GUI front-ends. Owns the background worker,
 /// refresh timer, and command-handling loop; exposes a command channel in and an
 /// `AppMessage` channel out.
@@ -1475,6 +1513,11 @@ impl Engine {
         let (msg_tx, msg_rx) = mpsc::channel::<AppMessage>(32);
         let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(64);
+        // Capacity matches `cmd_tx`: a `ReorderJob` is only ever produced one-for-one from a
+        // `ReorderQuery`/`ReorderFilterStream` command as `command_loop` drains `cmd_rx`, so
+        // the command channel's own capacity already bounds how many can be in flight before
+        // this one's consumer (normally sub-millisecond) catches up.
+        let (reorder_job_tx, reorder_job_rx) = mpsc::channel::<ReorderJob>(64);
 
         let interval = sync.interval_secs;
         info!(
@@ -1504,6 +1547,13 @@ impl Engine {
         ));
         // Purely local, so the maintenance sweep ignores the rate-limit gate.
         tokio::spawn(maintenance_task(pool.clone(), maintenance));
+        // Dedicated single consumer — see `reorder_worker_task` for why reorders must not
+        // be spawned per-command like the other DB-touching arms below.
+        tokio::spawn(reorder_worker_task(
+            pool.clone(),
+            reorder_job_rx,
+            msg_tx.clone(),
+        ));
         // Chase the login in the background when the startup lookup couldn't reach
         // GitHub, so `@me` starts working mid-session instead of after a restart.
         if should_retry_current_user {
@@ -1520,6 +1570,7 @@ impl Engine {
             cmd_rx,
             msg_tx,
             sync_job_tx,
+            reorder_job_tx,
             sync,
             gate,
             pending,
@@ -1569,6 +1620,7 @@ async fn command_loop(
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
     msg_tx: mpsc::Sender<AppMessage>,
     sync_tx: mpsc::Sender<SyncJob>,
+    reorder_tx: mpsc::Sender<ReorderJob>,
     sync: SyncConfig,
     gate: RateLimitGate,
     pending: SyncCoalescer,
@@ -1844,29 +1896,30 @@ async fn command_loop(
                 lower_id,
                 active_id,
             } => {
-                let pool2 = pool.clone();
-                let tx2 = msg_tx.clone();
-                tokio::spawn(async move {
-                    for msg in
-                        reorder_and_reload(&pool2, false, upper_id, lower_id, active_id).await
-                    {
-                        let _ = tx2.send(msg).await;
-                    }
-                });
+                // Enqueued to the dedicated reorder worker rather than spawned here — see
+                // `reorder_worker_task` for why a per-command spawn would race.
+                let _ = reorder_tx
+                    .send(ReorderJob {
+                        is_filter_stream: false,
+                        upper_id,
+                        lower_id,
+                        active_id,
+                    })
+                    .await;
             }
             EngineCommand::ReorderFilterStream {
                 upper_id,
                 lower_id,
                 active_id,
             } => {
-                let pool2 = pool.clone();
-                let tx2 = msg_tx.clone();
-                tokio::spawn(async move {
-                    for msg in reorder_and_reload(&pool2, true, upper_id, lower_id, active_id).await
-                    {
-                        let _ = tx2.send(msg).await;
-                    }
-                });
+                let _ = reorder_tx
+                    .send(ReorderJob {
+                        is_filter_stream: true,
+                        upper_id,
+                        lower_id,
+                        active_id,
+                    })
+                    .await;
             }
             EngineCommand::LoadComments {
                 owner,
@@ -2562,5 +2615,106 @@ mod tests {
                 other.len()
             ),
         }
+    }
+
+    /// The regression guard for the interleaving bug: two reorders queued back-to-back
+    /// (as `command_loop` now does via `reorder_tx`, instead of spawning each on its own
+    /// task) must have their `EntriesReloaded` snapshots delivered in submission order,
+    /// with the later message matching what the DB actually ends up holding. Before the
+    /// dedicated worker, two independently spawned round trips could commit and read back
+    /// in either order and then *send* in either order too, so a front-end could end up
+    /// showing a snapshot the DB no longer held.
+    #[tokio::test]
+    async fn reorder_worker_task_delivers_snapshots_in_submission_order() {
+        let (pool, _file) = test_pool().await;
+        let a = db::upsert_query(&pool, "repo:o/a is:pr", "pull_request", None)
+            .await
+            .expect("a");
+        let b = db::upsert_query(&pool, "repo:o/b is:pr", "pull_request", None)
+            .await
+            .expect("b");
+        let c = db::upsert_query(&pool, "repo:o/c is:pr", "pull_request", None)
+            .await
+            .expect("c");
+        let d = db::upsert_query(&pool, "repo:o/d is:pr", "pull_request", None)
+            .await
+            .expect("d");
+
+        let (job_tx, job_rx) = mpsc::channel::<ReorderJob>(8);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<AppMessage>(8);
+        tokio::spawn(reorder_worker_task(pool.clone(), job_rx, msg_tx));
+
+        // Two independent swaps (disjoint pairs, so both succeed regardless of processing
+        // order) queued without waiting for either to finish — the shape of "move X down,
+        // then immediately move Y down".
+        job_tx
+            .send(ReorderJob {
+                is_filter_stream: false,
+                upper_id: a,
+                lower_id: b,
+                active_id: a,
+            })
+            .await
+            .expect("enqueue first reorder");
+        job_tx
+            .send(ReorderJob {
+                is_filter_stream: false,
+                upper_id: c,
+                lower_id: d,
+                active_id: c,
+            })
+            .await
+            .expect("enqueue second reorder");
+
+        let first_msg = msg_rx.recv().await.expect("first EntriesReloaded");
+        let AppMessage::EntriesReloaded {
+            entries: first_entries,
+            active: first_active,
+        } = first_msg
+        else {
+            panic!("expected EntriesReloaded for the first job");
+        };
+        assert_eq!(
+            first_entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+            vec![b, a, c, d],
+            "first message must reflect only the first swap"
+        );
+        assert_eq!(
+            first_active,
+            EntryKey {
+                is_filter_stream: false,
+                id: a
+            }
+        );
+
+        let second_msg = msg_rx.recv().await.expect("second EntriesReloaded");
+        let AppMessage::EntriesReloaded {
+            entries: second_entries,
+            active: second_active,
+        } = second_msg
+        else {
+            panic!("expected EntriesReloaded for the second job");
+        };
+        assert_eq!(
+            second_entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+            vec![b, a, d, c],
+            "second message must reflect both swaps, and must arrive after the first"
+        );
+        assert_eq!(
+            second_active,
+            EntryKey {
+                is_filter_stream: false,
+                id: c
+            }
+        );
+
+        // The last snapshot delivered must match what the DB actually holds — the
+        // property that broke when a late-delivered older snapshot could win the race.
+        let db_entries = load_left_pane_entries(&pool).await.expect("reload");
+        assert_eq!(
+            db_entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+            second_entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+            "final snapshot delivered must match the DB's final state"
+        );
     }
 }
