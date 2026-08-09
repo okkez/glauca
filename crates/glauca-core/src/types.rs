@@ -22,7 +22,7 @@ pub struct FilterStreamEntry {
 
 /// Identifies a left-pane row. Query and filter-stream ids come from separate tables and
 /// collide as raw i64, so the discriminant has to travel with the id.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct EntryKey {
     pub is_filter_stream: bool,
     pub id: i64,

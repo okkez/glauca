@@ -1389,6 +1389,54 @@ pub async fn load_left_pane_entries(pool: &SqlitePool) -> anyhow::Result<Vec<Lef
     Ok(entries)
 }
 
+/// Apply a left-pane reorder and re-read the pane, returning the messages to send
+/// (in order) for every combination of reorder/reload outcome.
+///
+/// The two calls are independent failure points — a reorder that committed can still
+/// fail to read back — so the caller must not collapse them into one `Result` chain
+/// (that was the bug: it reported an applied reorder as a failed one whenever the
+/// read-back errored). `reorder_query`/`reorder_filter_stream` reject a pair that has
+/// drifted apart (see `db::exchanged`) rather than reporting an unearned success, and
+/// `active` stays valid on that path since it names the row the cursor was already on,
+/// not either end of the attempted swap.
+async fn reorder_and_reload(
+    pool: &SqlitePool,
+    is_filter_stream: bool,
+    upper_id: i64,
+    lower_id: i64,
+    active_id: i64,
+) -> Vec<AppMessage> {
+    let reorder_result = if is_filter_stream {
+        db::reorder_filter_stream(pool, upper_id, lower_id).await
+    } else {
+        db::reorder_query(pool, upper_id, lower_id).await
+    };
+
+    let mut messages = Vec::new();
+    if let Err(e) = &reorder_result {
+        messages.push(AppMessage::ActionError(format!("reorder: {e}")));
+    }
+
+    match load_left_pane_entries(pool).await {
+        Ok(entries) => messages.push(AppMessage::EntriesReloaded {
+            entries,
+            active: EntryKey {
+                is_filter_stream,
+                id: active_id,
+            },
+        }),
+        // A reload failure after a successful reorder must not read as the reorder
+        // having failed — that leaves the front-end stuck retrying an already-applied
+        // move forever. When the reorder itself failed, its ActionError above already
+        // covers this: nothing else changed, so a second message would be noise.
+        Err(e) if reorder_result.is_ok() => messages.push(AppMessage::ActionError(format!(
+            "reorder applied, but the left pane could not be re-read: {e}"
+        ))),
+        Err(_) => {}
+    }
+    messages
+}
+
 /// Async engine shared by the TUI and GUI front-ends. Owns the background worker,
 /// refresh timer, and command-handling loop; exposes a command channel in and an
 /// `AppMessage` channel out.
@@ -1793,23 +1841,11 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    // Confirm only what the DB took — see `db::exchanged` for why an unearned
-                    // confirmation is the bug itself.
-                    let reloaded = match db::reorder_query(&pool2, upper_id, lower_id).await {
-                        Ok(()) => load_left_pane_entries(&pool2).await,
-                        Err(e) => Err(e),
-                    };
-                    let msg = match reloaded {
-                        Ok(entries) => AppMessage::EntriesReloaded {
-                            entries,
-                            active: EntryKey {
-                                is_filter_stream: false,
-                                id: active_id,
-                            },
-                        },
-                        Err(e) => AppMessage::ActionError(format!("reorder: {e}")),
-                    };
-                    let _ = tx2.send(msg).await;
+                    for msg in
+                        reorder_and_reload(&pool2, false, upper_id, lower_id, active_id).await
+                    {
+                        let _ = tx2.send(msg).await;
+                    }
                 });
             }
             EngineCommand::ReorderFilterStream {
@@ -1820,22 +1856,10 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    let reloaded = match db::reorder_filter_stream(&pool2, upper_id, lower_id).await
+                    for msg in reorder_and_reload(&pool2, true, upper_id, lower_id, active_id).await
                     {
-                        Ok(()) => load_left_pane_entries(&pool2).await,
-                        Err(e) => Err(e),
-                    };
-                    let msg = match reloaded {
-                        Ok(entries) => AppMessage::EntriesReloaded {
-                            entries,
-                            active: EntryKey {
-                                is_filter_stream: true,
-                                id: active_id,
-                            },
-                        },
-                        Err(e) => AppMessage::ActionError(format!("reorder: {e}")),
-                    };
-                    let _ = tx2.send(msg).await;
+                        let _ = tx2.send(msg).await;
+                    }
                 });
             }
             EngineCommand::LoadComments {
@@ -2411,5 +2435,126 @@ mod tests {
         enqueue_stale_queries(&pool, &sync_tx, &app_tx, None, 60, &gate, &pending).await;
         let second = sync_rx.recv().await.expect("re-enqueued job");
         assert_eq!(second.query_id, q1, "released slot allows re-enqueue");
+    }
+
+    /// Three root queries, in insertion order.
+    async fn seed_three_queries(pool: &SqlitePool) -> [i64; 3] {
+        let a = db::upsert_query(pool, "repo:o/a is:pr", "pull_request", None)
+            .await
+            .expect("a");
+        let b = db::upsert_query(pool, "repo:o/b is:pr", "pull_request", None)
+            .await
+            .expect("b");
+        let c = db::upsert_query(pool, "repo:o/c is:pr", "pull_request", None)
+            .await
+            .expect("c");
+        [a, b, c]
+    }
+
+    /// A successful adjacent swap sends exactly one `EntriesReloaded`, with the entries
+    /// in the new order and `active` naming the query the cursor was on — this is the
+    /// case Finding 1 broke: folding the reload into the reorder's `Result` reported an
+    /// applied move as a failure whenever the read-back itself errored.
+    #[tokio::test]
+    async fn reorder_and_reload_query_success_sends_one_entries_reloaded() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, third] = seed_three_queries(&pool).await;
+
+        let messages = reorder_and_reload(&pool, false, first, second, first).await;
+
+        match &messages[..] {
+            [AppMessage::EntriesReloaded { entries, active }] => {
+                assert_eq!(
+                    entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+                    vec![second, first, third],
+                    "entries must reflect the new order"
+                );
+                assert_eq!(
+                    *active,
+                    EntryKey {
+                        is_filter_stream: false,
+                        id: first,
+                    }
+                );
+            }
+            other => panic!(
+                "expected exactly one EntriesReloaded, got {} messages",
+                other.len()
+            ),
+        }
+    }
+
+    /// A non-adjacent pair (another front-end reordered in between) is refused: an
+    /// `ActionError` followed by an `EntriesReloaded` whose entries are unchanged — so a
+    /// front-end stuck on a stale view recovers on the very error that proves it's stale,
+    /// rather than retrying the same rejected swap forever.
+    #[tokio::test]
+    async fn reorder_and_reload_query_rejected_sends_error_then_unchanged_entries() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, third] = seed_three_queries(&pool).await;
+
+        // first/third were adjacent when some front-end last read the list, but `second`
+        // now sits between them.
+        let messages = reorder_and_reload(&pool, false, first, third, first).await;
+
+        match &messages[..] {
+            [
+                AppMessage::ActionError(e),
+                AppMessage::EntriesReloaded { entries, active },
+            ] => {
+                assert!(e.starts_with("reorder:"), "unexpected error text: {e}");
+                assert_eq!(
+                    entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
+                    vec![first, second, third],
+                    "a rejected reorder must not change the order"
+                );
+                assert_eq!(
+                    *active,
+                    EntryKey {
+                        is_filter_stream: false,
+                        id: first,
+                    }
+                );
+            }
+            other => panic!(
+                "expected ActionError then EntriesReloaded, got {} messages",
+                other.len()
+            ),
+        }
+    }
+
+    /// The filter-stream path must set `is_filter_stream: true` on `active` — a flipped
+    /// `is_filter_stream` argument at either call site would compile and pass every
+    /// other test, since it only misroutes the cursor after the fact.
+    #[tokio::test]
+    async fn reorder_and_reload_filter_stream_marks_active_as_filter_stream() {
+        let (pool, _file) = test_pool().await;
+        let query_id = db::upsert_query(&pool, "repo:o/a is:pr", "pull_request", None)
+            .await
+            .expect("query");
+        let first = db::upsert_filter_stream(&pool, query_id, "mine", "author:@me")
+            .await
+            .expect("first stream");
+        let second = db::upsert_filter_stream(&pool, query_id, "others", "-author:@me")
+            .await
+            .expect("second stream");
+
+        let messages = reorder_and_reload(&pool, true, first, second, first).await;
+
+        match &messages[..] {
+            [AppMessage::EntriesReloaded { active, .. }] => {
+                assert_eq!(
+                    *active,
+                    EntryKey {
+                        is_filter_stream: true,
+                        id: first,
+                    }
+                );
+            }
+            other => panic!(
+                "expected exactly one EntriesReloaded, got {} messages",
+                other.len()
+            ),
+        }
     }
 }

@@ -82,6 +82,12 @@ async fn ensure_glauca_cache(db_path: &Path) -> Result<()> {
     let mut conn = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
+        // Safe alongside the no-pragma property above: sqlx applies this through
+        // `sqlite3_busy_timeout()`, not a PRAGMA, so it writes nothing to the file.
+        // Needed so a second glauca starting up during another instance's
+        // maintenance-pass VACUUM waits instead of failing with "database is locked".
+        // Do not add `journal_mode`/`synchronous` here — those persist to the header.
+        .busy_timeout(Duration::from_secs(30))
         .connect()
         .await
         .with_context(|| format!("opening cache database {}", db_path.display()))?;
