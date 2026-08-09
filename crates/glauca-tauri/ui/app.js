@@ -1424,7 +1424,13 @@ function moveEntry(idx, down) {
   const r = reorderArgs(idx, down);
   if (r) {
     state.reorderPending = true;
-    call(r.cmd, r.args);
+    // Not `call()`: its .catch swallows the rejection, so this handler is the only place
+    // that can see an invoke failure and undo the gate — a rejected invoke means neither
+    // ActionError nor EntriesReloaded is coming to clear it.
+    invoke(r.cmd, r.args).catch((e) => {
+      state.reorderPending = false;
+      setStatus(`${r.cmd}: ${e}`, true);
+    });
   }
 }
 
@@ -1767,8 +1773,14 @@ function handleMessage(msg) {
     case "ActionError":
       // Also the failure path for a reorder round trip (both the reorder and the
       // read-back failed, so no EntriesReloaded followed) — clear the gate here too, or a
-      // rejected reorder would leave Shift+J/K dead for the rest of the session.
-      state.reorderPending = false;
+      // rejected reorder would leave Shift+J/K dead for the rest of the session. Refresh
+      // entries first: clearing the gate before `state.entries` is back in sync would let
+      // the very next Shift+J/K build a pair from stale entries and get rejected too.
+      if (state.reorderPending) {
+        refreshEntries().finally(() => {
+          state.reorderPending = false;
+        });
+      }
       setStatus(d, true);
       break;
     case "SyncStarted":
@@ -1815,8 +1827,12 @@ function handleMessage(msg) {
       refreshEntries();
       break;
     case "EntriesReloaded":
-      state.reorderPending = false;
-      refreshEntries();
+      // Keep the gate closed until the refresh lands: `refreshEntries` awaits an IPC round
+      // trip, and clearing the flag before it resolves would let a Shift+J/K in that window
+      // build a pair from the still-stale `state.entries` and get rejected.
+      refreshEntries().finally(() => {
+        state.reorderPending = false;
+      });
       break;
     default:
       break;

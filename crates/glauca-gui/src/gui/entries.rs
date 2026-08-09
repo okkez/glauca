@@ -150,8 +150,11 @@ impl GlaucaApp {
             None => None,
         };
         if let Some(cmd) = cmd {
-            self.reorder_pending = true;
-            self.send(cmd);
+            // Only latch the gate if the command was actually enqueued — a full or closed
+            // channel here would otherwise wedge `reorder_pending` for the session, since a
+            // dropped command never produces the `EntriesReloaded`/`ActionError` reply that
+            // clears it.
+            self.reorder_pending = self.try_send(cmd);
         }
     }
 

@@ -1451,6 +1451,26 @@ async fn reorder_and_reload(
     messages
 }
 
+/// Enqueue a `ReorderJob` to the dedicated reorder worker, and — since that queue is the
+/// only path to an `EntriesReloaded`/`ActionError` reply — surface an `ActionError` when
+/// the enqueue itself fails. Without this, a dead `reorder_worker_task` (e.g. panicked)
+/// makes every subsequent reorder a silent no-op: no reply ever arrives, so every
+/// front-end's input gate (`reorder_pending`) latches shut for the rest of the session.
+async fn send_reorder_job(
+    reorder_tx: &mpsc::Sender<ReorderJob>,
+    msg_tx: &mpsc::Sender<AppMessage>,
+    job: ReorderJob,
+) {
+    if reorder_tx.send(job).await.is_err() {
+        warn!("reorder worker is gone; dropping reorder job");
+        let _ = msg_tx
+            .send(AppMessage::ActionError(
+                "reorder: the reorder worker is gone; restart glauca".to_string(),
+            ))
+            .await;
+    }
+}
+
 /// Processes `ReorderJob`s one at a time, forwarding `reorder_and_reload`'s messages
 /// to the front-end in order.
 ///
@@ -1898,28 +1918,34 @@ async fn command_loop(
             } => {
                 // Enqueued to the dedicated reorder worker rather than spawned here — see
                 // `reorder_worker_task` for why a per-command spawn would race.
-                let _ = reorder_tx
-                    .send(ReorderJob {
+                send_reorder_job(
+                    &reorder_tx,
+                    &msg_tx,
+                    ReorderJob {
                         is_filter_stream: false,
                         upper_id,
                         lower_id,
                         active_id,
-                    })
-                    .await;
+                    },
+                )
+                .await;
             }
             EngineCommand::ReorderFilterStream {
                 upper_id,
                 lower_id,
                 active_id,
             } => {
-                let _ = reorder_tx
-                    .send(ReorderJob {
+                send_reorder_job(
+                    &reorder_tx,
+                    &msg_tx,
+                    ReorderJob {
                         is_filter_stream: true,
                         upper_id,
                         lower_id,
                         active_id,
-                    })
-                    .await;
+                    },
+                )
+                .await;
             }
             EngineCommand::LoadComments {
                 owner,
@@ -2716,5 +2742,39 @@ mod tests {
             second_entries.iter().map(|e| e.id()).collect::<Vec<_>>(),
             "final snapshot delivered must match the DB's final state"
         );
+    }
+
+    /// If `reorder_worker_task` is gone (e.g. panicked), `send_reorder_job`'s enqueue fails.
+    /// Without a reply, every front-end's `reorder_pending` gate would latch shut forever;
+    /// this asserts the enqueue failure itself is turned into an `ActionError` so the user
+    /// sees it and the gate can clear.
+    #[tokio::test]
+    async fn send_reorder_job_reports_action_error_when_worker_is_gone() {
+        let (job_tx, job_rx) = mpsc::channel::<ReorderJob>(1);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<AppMessage>(1);
+        drop(job_rx); // simulate a dead/panicked reorder_worker_task
+
+        send_reorder_job(
+            &job_tx,
+            &msg_tx,
+            ReorderJob {
+                is_filter_stream: false,
+                upper_id: 1,
+                lower_id: 2,
+                active_id: 1,
+            },
+        )
+        .await;
+
+        match msg_rx.recv().await {
+            Some(AppMessage::ActionError(msg)) => {
+                assert!(
+                    msg.contains("reorder"),
+                    "expected the error to mention reorder, got: {msg}"
+                );
+            }
+            Some(_) => panic!("expected ActionError, got a different AppMessage variant"),
+            None => panic!("expected ActionError, but the channel closed with nothing sent"),
+        }
     }
 }
