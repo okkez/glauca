@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use sqlx::{
-    SqlitePool,
+    ConnectOptions, Connection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
 };
 use std::path::{Path, PathBuf};
@@ -19,10 +19,10 @@ pub async fn open_pool(db_path: &Path) -> Result<SqlitePool> {
     info!(path = %db_path.display(), "opening cache");
 
     create_parent_dir(db_path)?;
+    ensure_glauca_cache(db_path).await?;
     let pool = SqlitePool::connect_with(connect_options(db_path))
         .await
         .with_context(|| format!("opening cache database {}", db_path.display()))?;
-    ensure_glauca_cache(&pool, db_path).await?;
 
     // sqlx's migration error names the offending version but not the database file.
     sqlx::migrate!("./migrations")
@@ -75,16 +75,27 @@ fn connect_options(db_path: &Path) -> SqliteConnectOptions {
 /// A glauca cache always carries `_sqlx_migrations`, so its absence beside other tables
 /// means this database is someone else's.
 ///
-/// FIXME: the protection covers schema and rows only. `journal_mode = WAL` is already
-/// applied by the time this runs and is a persistent header flag, so a database we refuse
-/// can still be left in WAL mode. Inspecting the schema over a connection that sets no
-/// pragmas would remove the side effect.
-async fn ensure_glauca_cache(pool: &SqlitePool, db_path: &Path) -> Result<()> {
-    let mut tables: Vec<String> =
+/// The connection sets no pragmas of its own: `connect_options`' `journal_mode = WAL` is a
+/// persistent header flag, so applying it before this check would convert a database we
+/// then refuse.
+async fn ensure_glauca_cache(db_path: &Path) -> Result<()> {
+    let mut conn = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        .connect()
+        .await
+        .with_context(|| format!("opening cache database {}", db_path.display()))?;
+
+    let tables: Result<Vec<String>, _> =
         sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
-            .fetch_all(pool)
-            .await
-            .with_context(|| format!("reading the schema of {}", db_path.display()))?;
+            .fetch_all(&mut conn)
+            .await;
+    // Closed before the verdict so a refusal doesn't leave a connection on someone
+    // else's database.
+    conn.close().await.ok();
+
+    let mut tables =
+        tables.with_context(|| format!("reading the schema of {}", db_path.display()))?;
 
     let is_fresh_file = tables.is_empty();
     let is_glauca_cache = tables.iter().any(|t| t == "_sqlx_migrations");
@@ -1187,6 +1198,25 @@ mod tests {
             schema,
             vec![("queries".to_string(), FOREIGN_SCHEMA.to_string())]
         );
+    }
+
+    /// Refusing has to leave no trace at all, not merely no schema change. `journal_mode`
+    /// is a persistent header flag, so applying it before the check would convert a
+    /// database we then refuse.
+    #[tokio::test]
+    async fn open_pool_leaves_a_refused_database_in_its_original_journal_mode() {
+        let file = foreign_database(FOREIGN_SCHEMA).await;
+
+        open_pool(file.path())
+            .await
+            .expect_err("a foreign database must not be migrated");
+
+        let pool = raw_pool(file.path()).await;
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .expect("journal_mode");
+        assert_eq!(journal_mode, "delete");
     }
 
     /// A cache written by a newer glauca must not be mistaken for a fresh file. sqlx
