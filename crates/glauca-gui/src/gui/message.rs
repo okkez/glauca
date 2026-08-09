@@ -285,10 +285,12 @@ impl GlaucaApp {
                     resolve_reloaded_selection(&entries, active, previous, self.entry_cursor);
                 self.entries = entries;
                 if changed {
-                    // The previously selected entry is gone from the reload — it was
-                    // deleted by another instance between the keypress and this read-back,
-                    // one of the two ways a reorder can be rejected. `items`/`stream_filter`
-                    // still belong to that entry, so follow the cursor to the new selection
+                    // The reload lands on a different entry than was selected before this
+                    // message (deleted by another instance, a reorder whose `active` names
+                    // a row other than the previous selection — e.g. the right-click menu
+                    // reordering a row that isn't selected — or the cursor having moved
+                    // while this round trip was in flight). `items`/`stream_filter` still
+                    // belong to the old selection, so follow the cursor to the new one
                     // rather than leaving the item pane showing it under a different
                     // highlight.
                     self.select_index(cursor);

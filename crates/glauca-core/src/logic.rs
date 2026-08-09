@@ -412,9 +412,12 @@ pub fn group_range(entries: &[LeftPaneEntry], query_idx: usize) -> std::ops::Ran
 /// between the keypress and this reload — one of the two ways a reorder can be rejected.
 ///
 /// Also reports whether the resolved position holds a *different* entry than `previous`,
-/// compared by identity (`EntryKey`) rather than index. This is true only in that deletion
-/// case: a successful reorder's `active` is the row that was already selected, so its
-/// identity is unchanged and the front-end has no reason to touch the item pane.
+/// compared by identity (`EntryKey`) rather than index — true whenever the reload changes
+/// which entry is selected, for any reason (the active row was deleted, `active` names a
+/// row other than the previously selected one, or the selection moved out from under this
+/// reload). The one case this is guaranteed `false` for is the one that matters for
+/// avoiding needless work: a successful reorder of the row that was already selected keeps
+/// `active` equal to `previous`, so the front-end can skip reloading the item pane.
 pub fn resolve_reloaded_selection(
     entries: &[LeftPaneEntry],
     active: EntryKey,

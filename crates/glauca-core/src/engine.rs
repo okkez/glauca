@@ -1533,10 +1533,13 @@ impl Engine {
         let (msg_tx, msg_rx) = mpsc::channel::<AppMessage>(32);
         let (sync_job_tx, sync_job_rx) = mpsc::channel::<SyncJob>(256);
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(64);
-        // Capacity matches `cmd_tx`: a `ReorderJob` is only ever produced one-for-one from a
-        // `ReorderQuery`/`ReorderFilterStream` command as `command_loop` drains `cmd_rx`, so
-        // the command channel's own capacity already bounds how many can be in flight before
-        // this one's consumer (normally sub-millisecond) catches up.
+        // `command_loop` drains `cmd_rx` continuously, so nothing here structurally bounds
+        // how many `ReorderJob`s can be produced over time — what keeps this queue
+        // effectively empty is that every front-end allows at most one outstanding reorder
+        // (its `reorder_pending` gate) before the previous one's reply arrives. A front-end
+        // without that gate could fill this queue, and then `command_loop`'s `send().await`
+        // on the ReorderQuery/ReorderFilterStream arms would block on DB-paced work (up to
+        // the 30s busy timeout under VACUUM), stalling every other command behind it.
         let (reorder_job_tx, reorder_job_rx) = mpsc::channel::<ReorderJob>(64);
 
         let interval = sync.interval_secs;

@@ -215,11 +215,12 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             app.entries = entries;
             app.entry_cursor = cursor;
             if changed {
-                // The previously selected entry is gone from the reload — it was deleted by
-                // another instance between the keypress and this read-back, one of the two
-                // ways a reorder can be rejected. `items`/`stream_filter` still belong to
-                // that entry, so follow the cursor to the new selection rather than leaving
-                // the item pane showing it under a different highlight.
+                // The reload lands on a different entry than was selected before this
+                // message (deleted by another instance, a reorder whose `active` names a
+                // row other than the previous selection, or the cursor having moved while
+                // this round trip was in flight). `items`/`stream_filter` still belong to
+                // the old selection, so follow the cursor to the new one rather than
+                // leaving the item pane showing it under a different highlight.
                 app.clear_items();
                 app.item_cursor = 0;
                 app.detail_scroll = 0;
