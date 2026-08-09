@@ -35,8 +35,9 @@ const state = {
   bgSyncPending: 0,        // queued background-sync jobs (BgSyncQueued − BgSyncJobDone)
   bodyRefreshRequested: new Set(), // itemKey()s whose cleared body we've already
                           // asked to re-fetch this session (dedup for selectItem)
-  reorderPending: false,  // true from the reorder_query/reorder_filter_stream call until
-                          // EntriesReloaded/ActionError replies; see moveEntry
+  reorderPending: false,  // true until the reply's entries refresh completes; see moveEntry
+  reorderSeq: 0,          // bumped per reorder attempt; only the newest generation's
+                          // refresh is allowed to clear reorderPending
 };
 
 
@@ -1423,12 +1424,14 @@ function moveEntry(idx, down) {
   if (state.reorderPending) return;
   const r = reorderArgs(idx, down);
   if (r) {
+    state.reorderSeq++;
     state.reorderPending = true;
+    const seq = state.reorderSeq;
     // Not `call()`: its .catch swallows the rejection, so this handler is the only place
     // that can see an invoke failure and undo the gate — a rejected invoke means neither
     // ActionError nor EntriesReloaded is coming to clear it.
     invoke(r.cmd, r.args).catch((e) => {
-      state.reorderPending = false;
+      if (seq === state.reorderSeq) state.reorderPending = false;
       setStatus(`${r.cmd}: ${e}`, true);
     });
   }
@@ -1777,8 +1780,9 @@ function handleMessage(msg) {
       // entries first: clearing the gate before `state.entries` is back in sync would let
       // the very next Shift+J/K build a pair from stale entries and get rejected too.
       if (state.reorderPending) {
+        const seq = state.reorderSeq;
         refreshEntries().finally(() => {
-          state.reorderPending = false;
+          if (seq === state.reorderSeq) state.reorderPending = false;
         });
       }
       setStatus(d, true);
@@ -1830,9 +1834,12 @@ function handleMessage(msg) {
       // Keep the gate closed until the refresh lands: `refreshEntries` awaits an IPC round
       // trip, and clearing the flag before it resolves would let a Shift+J/K in that window
       // build a pair from the still-stale `state.entries` and get rejected.
-      refreshEntries().finally(() => {
-        state.reorderPending = false;
-      });
+      {
+        const seq = state.reorderSeq;
+        refreshEntries().finally(() => {
+          if (seq === state.reorderSeq) state.reorderPending = false;
+        });
+      }
       break;
     default:
       break;
