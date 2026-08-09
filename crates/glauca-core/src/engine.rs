@@ -2646,6 +2646,31 @@ mod tests {
         }
     }
 
+    /// Both the reorder and the read-back failing is the one row where the front-end gate
+    /// depends on `ActionError` alone with no follow-up `EntriesReloaded` — closing the
+    /// pool before the call makes both `db::reorder_query` and `load_left_pane_entries`
+    /// fail, so exactly one `ActionError` must be sent, and it must be the `"reorder: …"`
+    /// form (the reorder's own failure), not the "reorder applied…" form (which only
+    /// applies when the reorder itself succeeded).
+    #[tokio::test]
+    async fn reorder_and_reload_both_fail_sends_only_one_action_error() {
+        let (pool, _file) = test_pool().await;
+        let [first, second, _third] = seed_three_queries(&pool).await;
+        pool.close().await;
+
+        let messages = reorder_and_reload(&pool, false, first, second, first).await;
+
+        match &messages[..] {
+            [AppMessage::ActionError(e)] => {
+                assert!(e.starts_with("reorder:"), "unexpected error text: {e}");
+            }
+            other => panic!(
+                "expected exactly one ActionError, got {} messages",
+                other.len()
+            ),
+        }
+    }
+
     /// The regression guard for the interleaving bug: two reorders queued back-to-back
     /// (as `command_loop` now does via `reorder_tx`, instead of spawning each on its own
     /// task) must have their `EntriesReloaded` snapshots delivered in submission order,

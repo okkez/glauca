@@ -408,8 +408,9 @@ pub fn group_range(entries: &[LeftPaneEntry], query_idx: usize) -> std::ops::Ran
 
 /// Resolve the left-pane cursor after `AppMessage::EntriesReloaded`: the position of
 /// `active` in the freshly-loaded `entries`, or `fallback_cursor` (clamped) when `active`
-/// is no longer present. That absence means the moved row was deleted by another instance
-/// between the keypress and this reload — one of the two ways a reorder can be rejected.
+/// is no longer present. That absence means the moved row was deleted by a concurrent
+/// delete between the keypress and this reload — one of the two ways a reorder can be
+/// rejected.
 ///
 /// Also reports whether the resolved position holds a *different* entry than `previous`,
 /// compared by identity (`EntryKey`) rather than index — true whenever the reload changes

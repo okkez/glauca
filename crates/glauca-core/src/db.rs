@@ -75,9 +75,9 @@ fn connect_options(db_path: &Path) -> SqliteConnectOptions {
 /// A glauca cache always carries `_sqlx_migrations`, so its absence beside other tables
 /// means this database is someone else's.
 ///
-/// The connection sets no pragmas of its own: `connect_options`' `journal_mode = WAL` is a
-/// persistent header flag, so applying it before this check would convert a database we
-/// then refuse.
+/// The connection sets no pragma that persists to the file: `connect_options`'
+/// `journal_mode = WAL` is a persistent header flag, so applying it before this check would
+/// convert a database we then refuse.
 async fn ensure_glauca_cache(db_path: &Path) -> Result<()> {
     let mut conn = SqliteConnectOptions::new()
         .filename(db_path)
