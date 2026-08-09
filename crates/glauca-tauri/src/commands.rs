@@ -475,7 +475,7 @@ pub async fn delete_filter_stream(state: State<'_, AppState>, id: i64) -> Result
 }
 
 #[tauri::command]
-pub async fn swap_query_positions(
+pub async fn reorder_query(
     state: State<'_, AppState>,
     upper_id: i64,
     lower_id: i64,
@@ -483,7 +483,7 @@ pub async fn swap_query_positions(
 ) -> Result<(), String> {
     dispatch(
         &state.tx,
-        EngineCommand::SwapQueryPositions {
+        EngineCommand::ReorderQuery {
             upper_id,
             lower_id,
             active_id,
@@ -493,7 +493,7 @@ pub async fn swap_query_positions(
 }
 
 #[tauri::command]
-pub async fn swap_filter_stream_positions(
+pub async fn reorder_filter_stream(
     state: State<'_, AppState>,
     upper_id: i64,
     lower_id: i64,
@@ -501,7 +501,7 @@ pub async fn swap_filter_stream_positions(
 ) -> Result<(), String> {
     dispatch(
         &state.tx,
-        EngineCommand::SwapFilterStreamPositions {
+        EngineCommand::ReorderFilterStream {
             upper_id,
             lower_id,
             active_id,

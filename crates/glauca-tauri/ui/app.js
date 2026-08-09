@@ -1350,7 +1350,7 @@ async function refreshEntries() {
   }
 }
 
-// Build the SwapQuery/SwapFilterStream args for moving entry `idx` up/down,
+// Build the ReorderQuery/ReorderFilterStream args for moving entry `idx` up/down,
 // mirroring the TUI's reorder_command. Returns {cmd, args} or null at an edge.
 function reorderArgs(idx, down) {
   const e = state.entries[idx];
@@ -1361,22 +1361,22 @@ function reorderArgs(idx, down) {
       while (j < state.entries.length && state.entries[j].isFilterStream) j++;
       const next = state.entries[j];
       if (next && !next.isFilterStream)
-        return { cmd: "swap_query_positions", args: { upperId: e.id, lowerId: next.id, activeId: e.id } };
+        return { cmd: "reorder_query", args: { upperId: e.id, lowerId: next.id, activeId: e.id } };
     } else {
       let j = idx - 1;
       while (j >= 0 && state.entries[j].isFilterStream) j--;
       const prev = state.entries[j];
       if (prev && !prev.isFilterStream)
-        return { cmd: "swap_query_positions", args: { upperId: prev.id, lowerId: e.id, activeId: e.id } };
+        return { cmd: "reorder_query", args: { upperId: prev.id, lowerId: e.id, activeId: e.id } };
     }
   } else if (down) {
     const next = state.entries[idx + 1];
     if (next && next.isFilterStream && next.rootQueryId === e.rootQueryId)
-      return { cmd: "swap_filter_stream_positions", args: { upperId: e.id, lowerId: next.id, activeId: e.id } };
+      return { cmd: "reorder_filter_stream", args: { upperId: e.id, lowerId: next.id, activeId: e.id } };
   } else {
     const prev = state.entries[idx - 1];
     if (prev && prev.isFilterStream && prev.rootQueryId === e.rootQueryId)
-      return { cmd: "swap_filter_stream_positions", args: { upperId: prev.id, lowerId: e.id, activeId: e.id } };
+      return { cmd: "reorder_filter_stream", args: { upperId: prev.id, lowerId: e.id, activeId: e.id } };
   }
   return null;
 }

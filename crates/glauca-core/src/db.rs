@@ -160,7 +160,7 @@ pub struct QueryRecord {
 /// `id` closes the ordering: `created_at` has second granularity, so rows added in the same
 /// second tie on both other keys and SQLite may then return them in any order.
 ///
-/// Generic over the executor so [`swap_query_positions`] can read this ordering from inside its
+/// Generic over the executor so [`reorder_query`] can read this ordering from inside its
 /// transaction — it numbers rows in the order it reads, so a second hand-copied `ORDER BY`
 /// could drift from this one.
 pub async fn list_queries<'e, E>(exec: E) -> Result<Vec<QueryRecord>>
@@ -257,14 +257,10 @@ pub async fn delete_filter_stream(pool: &SqlitePool, id: i64) -> Result<()> {
 
 /// Exchange the places of two sibling filter streams (they must share the same parent).
 ///
-/// Renumbers only `upper_id`'s parent, for the reasons on [`swap_query_positions`] — including
+/// Renumbers only `upper_id`'s parent, for the reasons on [`reorder_query`] — including
 /// why the transaction is `IMMEDIATE`. Either stream having been deleted meanwhile fails the
 /// call rather than reporting success; see [`exchanged`].
-pub async fn swap_filter_stream_positions(
-    pool: &SqlitePool,
-    upper_id: i64,
-    lower_id: i64,
-) -> Result<()> {
+pub async fn reorder_filter_stream(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let parent_id = sqlx::query_scalar!(
         "SELECT parent_id FROM filter_streams WHERE id = ?",
@@ -380,7 +376,7 @@ pub async fn delete_query(pool: &SqlitePool, query_id: i64) -> Result<()> {
 /// `BEGIN IMMEDIATE` because this reads before it writes — see `prune_missing_items`.
 /// `position` cannot carry `UNIQUE`: renumbering writes transient duplicates and SQLite cannot
 /// defer the check to commit.
-pub async fn swap_query_positions(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
+pub async fn reorder_query(pool: &SqlitePool, upper_id: i64, lower_id: i64) -> Result<()> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let ids: Vec<i64> = list_queries(&mut *tx).await?.iter().map(|q| q.id).collect();
     let ids = exchanged(ids, upper_id, lower_id).with_context(|| {
@@ -1600,13 +1596,11 @@ mod tests {
     /// An in-session reorder looks right whether or not the DB changed, so what is asserted is
     /// the part the user only sees on the next launch.
     #[tokio::test]
-    async fn swap_query_positions_persists_the_new_order() {
+    async fn reorder_query_persists_the_new_order() {
         let (pool, _file) = test_pool().await;
         let [first, second, third] = seed_three_queries(&pool).await;
 
-        swap_query_positions(&pool, first, second)
-            .await
-            .expect("swap");
+        reorder_query(&pool, first, second).await.expect("swap");
 
         assert_eq!(query_ids_in_order(&pool).await, vec![second, first, third]);
     }
@@ -1614,7 +1608,7 @@ mod tests {
     /// A cache an older binary wrote has every position at the default, and reordering has to
     /// work from that too — not only from one the migration has tidied.
     #[tokio::test]
-    async fn swap_query_positions_persists_the_new_order_when_positions_are_all_equal() {
+    async fn reorder_query_persists_the_new_order_when_positions_are_all_equal() {
         let (pool, _file) = test_pool().await;
         let [first, second, third] = seed_three_queries(&pool).await;
         sqlx::query!("UPDATE queries SET position = 0")
@@ -1622,9 +1616,7 @@ mod tests {
             .await
             .expect("flatten positions");
 
-        swap_query_positions(&pool, second, third)
-            .await
-            .expect("swap");
+        reorder_query(&pool, second, third).await.expect("swap");
 
         assert_eq!(query_ids_in_order(&pool).await, vec![first, third, second]);
     }
@@ -1632,7 +1624,7 @@ mod tests {
     /// A front-end can be showing a query another has deleted; see `exchanged` for why naming a
     /// row that is gone has to fail rather than report a move the DB never made.
     #[tokio::test]
-    async fn swap_query_positions_fails_when_a_query_is_gone() {
+    async fn reorder_query_fails_when_a_query_is_gone() {
         let (pool, _file) = test_pool().await;
         let [first, second, third] = seed_three_queries(&pool).await;
         // Sparse, so that "nothing was written" is distinguishable from "renumbered".
@@ -1646,8 +1638,8 @@ mod tests {
             .expect("spread positions");
         delete_query(&pool, second).await.expect("delete");
 
-        assert!(swap_query_positions(&pool, first, second).await.is_err());
-        assert!(swap_query_positions(&pool, second, first).await.is_err());
+        assert!(reorder_query(&pool, first, second).await.is_err());
+        assert!(reorder_query(&pool, second, first).await.is_err());
         assert_eq!(query_position(&pool, first).await, 5);
         assert_eq!(query_position(&pool, third).await, 9);
     }
@@ -1840,11 +1832,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swap_filter_stream_positions_persists_the_new_order() {
+    async fn reorder_filter_stream_persists_the_new_order() {
         let (pool, _file) = test_pool().await;
         let (parent, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
 
-        swap_filter_stream_positions(&pool, first, second)
+        reorder_filter_stream(&pool, first, second)
             .await
             .expect("swap");
 
@@ -1855,7 +1847,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swap_filter_stream_positions_persists_the_new_order_when_positions_are_all_equal() {
+    async fn reorder_filter_stream_persists_the_new_order_when_positions_are_all_equal() {
         let (pool, _file) = test_pool().await;
         let (parent, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
         sqlx::query!("UPDATE filter_streams SET position = 0")
@@ -1863,7 +1855,7 @@ mod tests {
             .await
             .expect("flatten positions");
 
-        swap_filter_stream_positions(&pool, second, third)
+        reorder_filter_stream(&pool, second, third)
             .await
             .expect("swap");
 
@@ -1875,13 +1867,13 @@ mod tests {
 
     /// A reorder renumbers one parent's group and must leave every other group's numbering alone.
     #[tokio::test]
-    async fn swap_filter_stream_positions_leaves_other_parents_alone() {
+    async fn reorder_filter_stream_leaves_other_parents_alone() {
         let (pool, _file) = test_pool().await;
         let (_, [first, second, _]) = seed_parent_with_three_streams(&pool).await;
         let other_parent = seed_query(&pool, "query:other").await;
         let untouched = seed_filter_stream(&pool, other_parent, "elsewhere", "state:open").await;
 
-        swap_filter_stream_positions(&pool, first, second)
+        reorder_filter_stream(&pool, first, second)
             .await
             .expect("swap");
 
@@ -1891,7 +1883,7 @@ mod tests {
     /// Both arguments are covered because the ids reach the DB by different routes here: the
     /// upper one through the parent lookup, the lower one through `exchanged`.
     #[tokio::test]
-    async fn swap_filter_stream_positions_fails_when_a_stream_is_gone() {
+    async fn reorder_filter_stream_fails_when_a_stream_is_gone() {
         let (pool, _file) = test_pool().await;
         let (_, [first, second, third]) = seed_parent_with_three_streams(&pool).await;
         // Sparse for the reason given in the query counterpart above.
@@ -1905,16 +1897,8 @@ mod tests {
             .expect("spread positions");
         delete_filter_stream(&pool, second).await.expect("delete");
 
-        assert!(
-            swap_filter_stream_positions(&pool, first, second)
-                .await
-                .is_err()
-        );
-        assert!(
-            swap_filter_stream_positions(&pool, second, first)
-                .await
-                .is_err()
-        );
+        assert!(reorder_filter_stream(&pool, first, second).await.is_err());
+        assert!(reorder_filter_stream(&pool, second, first).await.is_err());
         assert_eq!(filter_stream_position(&pool, first).await, 5);
         assert_eq!(filter_stream_position(&pool, third).await, 9);
     }

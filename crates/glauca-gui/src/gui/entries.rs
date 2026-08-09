@@ -89,7 +89,7 @@ impl GlaucaApp {
                 if down {
                     let next_query_idx = group_range(&self.entries, cursor).end;
                     match self.entries.get(next_query_idx) {
-                        Some(LeftPaneEntry::Query(nq)) => Some(EngineCommand::SwapQueryPositions {
+                        Some(LeftPaneEntry::Query(nq)) => Some(EngineCommand::ReorderQuery {
                             upper_id: current_id,
                             lower_id: nq.id,
                             active_id: current_id,
@@ -101,7 +101,7 @@ impl GlaucaApp {
                         .iter()
                         .rposition(|e| matches!(e, LeftPaneEntry::Query(_)))
                         .and_then(|prev_idx| match &self.entries[prev_idx] {
-                            LeftPaneEntry::Query(pq) => Some(EngineCommand::SwapQueryPositions {
+                            LeftPaneEntry::Query(pq) => Some(EngineCommand::ReorderQuery {
                                 upper_id: pq.id,
                                 lower_id: current_id,
                                 active_id: current_id,
@@ -116,7 +116,7 @@ impl GlaucaApp {
                 if down {
                     match self.entries.get(cursor + 1) {
                         Some(LeftPaneEntry::FilterStream(next)) if next.parent_id == parent_id => {
-                            Some(EngineCommand::SwapFilterStreamPositions {
+                            Some(EngineCommand::ReorderFilterStream {
                                 upper_id: fs_id,
                                 lower_id: next.id,
                                 active_id: fs_id,
@@ -127,7 +127,7 @@ impl GlaucaApp {
                 } else if cursor > 0 {
                     match self.entries.get(cursor - 1) {
                         Some(LeftPaneEntry::FilterStream(prev)) if prev.parent_id == parent_id => {
-                            Some(EngineCommand::SwapFilterStreamPositions {
+                            Some(EngineCommand::ReorderFilterStream {
                                 upper_id: prev.id,
                                 lower_id: fs_id,
                                 active_id: fs_id,

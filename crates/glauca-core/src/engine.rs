@@ -1305,12 +1305,12 @@ pub enum EngineCommand {
     DeleteFilterStream {
         id: i64,
     },
-    SwapQueryPositions {
+    ReorderQuery {
         upper_id: i64,
         lower_id: i64,
         active_id: i64,
     },
-    SwapFilterStreamPositions {
+    ReorderFilterStream {
         upper_id: i64,
         lower_id: i64,
         active_id: i64,
@@ -1791,7 +1791,7 @@ async fn command_loop(
                     }
                 });
             }
-            EngineCommand::SwapQueryPositions {
+            EngineCommand::ReorderQuery {
                 upper_id,
                 lower_id,
                 active_id,
@@ -1801,7 +1801,7 @@ async fn command_loop(
                 tokio::spawn(async move {
                     // Confirm only what the DB took — see `db::exchanged` for why an unearned
                     // confirmation is the bug itself.
-                    match db::swap_query_positions(&pool2, upper_id, lower_id).await {
+                    match db::reorder_query(&pool2, upper_id, lower_id).await {
                         Ok(()) => {
                             let _ = tx2
                                 .send(AppMessage::QueriesSwapped {
@@ -1819,7 +1819,7 @@ async fn command_loop(
                     }
                 });
             }
-            EngineCommand::SwapFilterStreamPositions {
+            EngineCommand::ReorderFilterStream {
                 upper_id,
                 lower_id,
                 active_id,
@@ -1827,7 +1827,7 @@ async fn command_loop(
                 let pool2 = pool.clone();
                 let tx2 = msg_tx.clone();
                 tokio::spawn(async move {
-                    match db::swap_filter_stream_positions(&pool2, upper_id, lower_id).await {
+                    match db::reorder_filter_stream(&pool2, upper_id, lower_id).await {
                         Ok(()) => {
                             let _ = tx2
                                 .send(AppMessage::FilterStreamsSwapped {

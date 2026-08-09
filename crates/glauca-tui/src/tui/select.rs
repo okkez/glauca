@@ -22,7 +22,7 @@ pub(crate) fn reorder_command(
             if down {
                 let next_query_idx = group_range(entries, cursor).end;
                 match entries.get(next_query_idx)? {
-                    LeftPaneEntry::Query(nq) => Some(EngineCommand::SwapQueryPositions {
+                    LeftPaneEntry::Query(nq) => Some(EngineCommand::ReorderQuery {
                         upper_id: current_id,
                         lower_id: nq.id,
                         active_id: current_id,
@@ -34,7 +34,7 @@ pub(crate) fn reorder_command(
                     .iter()
                     .rposition(|e| matches!(e, LeftPaneEntry::Query(_)))?;
                 match &entries[prev_idx] {
-                    LeftPaneEntry::Query(pq) => Some(EngineCommand::SwapQueryPositions {
+                    LeftPaneEntry::Query(pq) => Some(EngineCommand::ReorderQuery {
                         upper_id: pq.id,
                         lower_id: current_id,
                         active_id: current_id,
@@ -50,7 +50,7 @@ pub(crate) fn reorder_command(
                 // Swap with next sibling (same parent, immediately after).
                 match entries.get(cursor + 1) {
                     Some(LeftPaneEntry::FilterStream(next)) if next.parent_id == parent_id => {
-                        Some(EngineCommand::SwapFilterStreamPositions {
+                        Some(EngineCommand::ReorderFilterStream {
                             upper_id: fs_id,
                             lower_id: next.id,
                             active_id: fs_id,
@@ -62,7 +62,7 @@ pub(crate) fn reorder_command(
                 // Swap with previous sibling (same parent, immediately before).
                 match entries.get(cursor - 1) {
                     Some(LeftPaneEntry::FilterStream(prev)) if prev.parent_id == parent_id => {
-                        Some(EngineCommand::SwapFilterStreamPositions {
+                        Some(EngineCommand::ReorderFilterStream {
                             upper_id: prev.id,
                             lower_id: fs_id,
                             active_id: fs_id,
