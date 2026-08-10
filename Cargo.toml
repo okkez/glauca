@@ -29,7 +29,7 @@ ratatui = { version = "0.30", features = ["crossterm_0_29"] }
 ratatui-textarea = "0.9"
 crossterm = { version = "0.29", features = ["event-stream"] }
 unicode-width = "0.2"
-frizbee = "0.9"
+frizbee = "0.12"
 futures = "0.3"
 chrono = { version = "0.4.44", features = ["clock"] }
 # 0.3.9 is the floor, not a preference: earlier versions panic on a task list item

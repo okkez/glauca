@@ -1,19 +1,21 @@
 #[cfg(test)]
 use crate::types::UserRef;
 use crate::types::{ActorKind, ItemEntry};
-use frizbee::{Config, Matcher};
+use frizbee::{Config, Matcher, SortStrategy};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// Shared frizbee config for plain-text token matching.
 ///
-/// `max_typos: 0` keeps matching to a strict subsequence (fzf-style). frizbee matches
-/// case-insensitively by default — case only influences scoring, which we ignore.
-/// `sort: false` because we test single items, so result order is unused.
+/// `max_typos: 0` keeps matching to a strict subsequence (fzf-style, no typo
+/// tolerance). frizbee matches case-insensitively by default (case only
+/// influences scoring, which we ignore). `SortStrategy::IndexAsc` keeps the
+/// input order and skips the score sort — we match one item at a time, so
+/// result order is unused.
 fn fuzzy_config() -> Config {
     Config {
         max_typos: Some(0),
-        sort: false,
+        sort: SortStrategy::IndexAsc,
         ..Config::default()
     }
 }
@@ -333,16 +335,18 @@ impl FilterQuery {
             return Vec::new();
         }
 
-        // frizbee 0.9.x reports matched *byte* offsets (in reverse order); gather
-        // them across every token. NOTE: frizbee's upstream `main` switched
-        // `MatchIndices.indices` to *char* indices — the type stays `Vec<usize>`,
-        // so a version bump would compile cleanly but silently corrupt multibyte
-        // highlights. `frizbee_reports_byte_offsets` guards this contract; if it
-        // fails after upgrading frizbee, revisit the byte→char handling here.
+        // frizbee reports matched *byte* offsets (in reverse order); gather them
+        // across every token. NOTE: frizbee's own docs call these "the indices of
+        // the chars in the haystack", and it has an ASCII and a unicode matching
+        // path (`UnicodeMatching::Smart` picks between them on whether the *needle*
+        // is ASCII). Both currently index bytes, but a version bump that changed
+        // either one would compile cleanly and silently corrupt multibyte
+        // highlights. `frizbee_reports_byte_offsets` pins both paths; if it fails
+        // after upgrading frizbee, revisit the byte→char handling here.
         let mut byte_hits: Vec<usize> = Vec::new();
         for tok in &self.require.text_tokens {
             for mi in with_matcher(tok, |m| m.match_list_indices(&[text])) {
-                byte_hits.extend(mi.indices);
+                byte_hits.extend(mi.indices.into_iter().map(|i| i as usize));
             }
         }
         byte_hits.retain(|&b| b < text.len());
@@ -1089,22 +1093,35 @@ mod tests {
 
     #[test]
     fn frizbee_reports_byte_offsets() {
-        // Pins the load-bearing assumption in `highlight_ranges`: frizbee 0.9.x returns
-        // BYTE offsets, not char indices. "あ" is 3 bytes, so the 'b' in "あb" is at byte 3
-        // but char index 1. If a future frizbee returns char indices (as its upstream
-        // `main` does), this fails loudly instead of mis-highlighting multibyte titles.
-        let hits: Vec<usize> = frizbee::match_list_indices("b", &["あb"], &fuzzy_config())
-            .into_iter()
-            .flat_map(|m| m.indices)
-            .collect();
-        assert!(
-            hits.contains(&3),
-            "expected byte offset 3 for 'b' in \"あb\", got {hits:?} — frizbee may have switched to char indices"
-        );
-        assert!(
-            !hits.contains(&1),
-            "index 1 would mean char indices, not bytes"
-        );
+        // Pins the load-bearing assumption in `highlight_ranges`: frizbee returns
+        // BYTE offsets, not char indices. Both needles below sit at byte 3 and char
+        // index 1, so a switch to char indices fails this loudly instead of silently
+        // mis-highlighting multibyte titles.
+        //
+        // Both matching paths are pinned because `UnicodeMatching::Smart` (the
+        // default) picks between them on whether the *needle* is ASCII: "b" takes
+        // the byte path, "グ" the unicode one. Pinning only the ASCII needle would
+        // leave half the contract untested.
+        let hits = |needle: &str, haystack: &str| -> Vec<usize> {
+            Matcher::new(needle, &fuzzy_config())
+                .match_list_indices(&[haystack])
+                .into_iter()
+                .flat_map(|m| m.indices)
+                .map(|i| i as usize)
+                .collect()
+        };
+
+        for (needle, haystack) in [("b", "あb"), ("グ", "バグ")] {
+            let got = hits(needle, haystack);
+            assert!(
+                got.contains(&3),
+                "expected byte offset 3 for {needle:?} in {haystack:?}, got {got:?} — frizbee may have switched to char indices"
+            );
+            assert!(
+                !got.contains(&1),
+                "index 1 for {needle:?} in {haystack:?} would mean char indices, not bytes"
+            );
+        }
     }
 
     #[test]
