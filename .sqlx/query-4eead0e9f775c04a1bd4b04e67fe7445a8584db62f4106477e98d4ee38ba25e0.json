@@ -6,14 +6,20 @@
       {
         "name": "id!: i64",
         "ordinal": 0,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "filter_streams",
+            "name": "id"
+          }
+        }
       }
     ],
     "parameters": {
       "Right": 4
     },
     "nullable": [
-      true
+      null
     ]
   },
   "hash": "4eead0e9f775c04a1bd4b04e67fe7445a8584db62f4106477e98d4ee38ba25e0"

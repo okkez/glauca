@@ -31,7 +31,7 @@ pub async fn raw_pool(path: &Path) -> SqlitePool {
 
 /// A SQLite file that is not a glauca cache: it holds `table_sql` and no
 /// `_sqlx_migrations`, which is how `open_pool` tells someone else's database from ours.
-pub async fn foreign_database(table_sql: &str) -> NamedTempFile {
+pub async fn foreign_database(table_sql: &'static str) -> NamedTempFile {
     let file = NamedTempFile::new().expect("tempfile");
     let pool = raw_pool(file.path()).await;
     sqlx::query(table_sql)
