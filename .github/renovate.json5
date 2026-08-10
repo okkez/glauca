@@ -16,6 +16,16 @@
       matchUpdateTypes: ["minor", "patch"],
       groupName: "cargo minor/patch",
     },
+    {
+      // 0.x の minor は Cargo では破壊的（`^0.9` は 0.12 を含まない）。update type
+      // としては "minor" なので放っておくと上の minor/patch グループに入り、自明な
+      // patch の山に breaking が埋もれる（#68 が frizbee 0.9→0.12 と sqlx 0.8→0.9 で
+      // これに当たった）。個別 PR に切り出して、落ちたときに原因が 1 つに絞れるようにする。
+      matchManagers: ["cargo"],
+      matchUpdateTypes: ["minor"],
+      matchCurrentVersion: "<1.0.0",
+      groupName: null,
+    },
   ],
   lockFileMaintenance: {
     // `cargo update` を回し、ブランチ追従の git 依存（gpui/zed 系・psm master）を
