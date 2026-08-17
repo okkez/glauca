@@ -14,17 +14,17 @@
       // crates.io の minor/patch はまとめる（major は個別 PR のまま）
       matchManagers: ["cargo"],
       matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: ">=1.0.0",
       groupName: "cargo minor/patch",
     },
     {
-      // 0.x の minor は Cargo では破壊的（`^0.9` は 0.12 を含まない）。update type
-      // としては "minor" なので放っておくと上の minor/patch グループに入り、自明な
-      // patch の山に breaking が埋もれる（#68 が frizbee 0.9→0.12 と sqlx 0.8→0.9 で
-      // これに当たった）。個別 PR に切り出して、落ちたときに原因が 1 つに絞れるようにする。
+      // 0.x の minor は Cargo の semver では破壊的（`^0.9` は 0.12 を含まない）が、
+      // Renovate の update type としては "minor" になる。グループ化のルール自体を
+      // バージョンで区切り、0.x の minor だけをグループから外して個別 PR にする。
       matchManagers: ["cargo"],
-      matchUpdateTypes: ["minor"],
+      matchUpdateTypes: ["patch"],
       matchCurrentVersion: "<1.0.0",
-      groupName: null,
+      groupName: "cargo minor/patch",
     },
   ],
   lockFileMaintenance: {
