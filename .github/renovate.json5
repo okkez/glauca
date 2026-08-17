@@ -14,6 +14,16 @@
       // crates.io の minor/patch はまとめる（major は個別 PR のまま）
       matchManagers: ["cargo"],
       matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: ">=1.0.0",
+      groupName: "cargo minor/patch",
+    },
+    {
+      // 0.x の minor は Cargo の semver では破壊的（`^0.9` は 0.12 を含まない）が、
+      // Renovate の update type としては "minor" になる。グループ化のルール自体を
+      // バージョンで区切り、0.x の minor だけをグループから外して個別 PR にする。
+      matchManagers: ["cargo"],
+      matchUpdateTypes: ["patch"],
+      matchCurrentVersion: "<1.0.0",
       groupName: "cargo minor/patch",
     },
   ],
