@@ -10,8 +10,8 @@ use std::collections::HashMap;
 /// `max_typos: 0` keeps matching to a strict subsequence (fzf-style, no typo
 /// tolerance). frizbee matches case-insensitively by default (case only
 /// influences scoring, which we ignore). `SortStrategy::IndexAsc` keeps the
-/// input order and skips the score sort — we match one item at a time, so
-/// result order is unused.
+/// input order and skips the score sort — callers only ask whether anything
+/// matched, or union the indices, so result order is unused.
 fn fuzzy_config() -> Config {
     Config {
         max_typos: Some(0),
@@ -1133,6 +1133,33 @@ mod tests {
         let ranges = q.highlight_ranges(text);
         assert_eq!(ranges, vec![(7, 10)]);
         assert_eq!(&text[7..10], "bug");
+    }
+
+    #[test]
+    fn plain_text_token_treats_query_syntax_as_literal_not_frizbee_syntax() {
+        // frizbee 0.12 added query syntax (`!` negate, `^` prefix-anchor, `$`
+        // suffix-anchor, `'` exact) understood only by `Matcher::from_query` /
+        // `Pattern::parse`. `with_matcher` above builds its cache via `Matcher::new`,
+        // which goes through `Pattern::from(&str)` and keeps the needle literal instead.
+        // User filter tokens reach `Matcher::new` almost verbatim (`FilterQuery::parse`
+        // only strips a leading `-`), so if this call site ever switched to
+        // `from_query`, a leading `!` would invert the filter's meaning while every
+        // other test here kept passing.
+        let q = FilterQuery::parse("!wip");
+        assert!(q.matches(&item("!wip literal", "a", "open", &[], "o/r")));
+        assert!(!q.matches(&item("wip: refactor", "a", "open", &[], "o/r")));
+    }
+
+    #[test]
+    fn highlight_ranges_non_ascii_needle_takes_unicode_path() {
+        // An ASCII needle (e.g. "bug", used elsewhere in this file) takes frizbee's
+        // byte-matching path. A non-ASCII needle is the only way production code
+        // reaches `UnicodeMatching::Smart`'s *unicode* path, whose indices land on
+        // continuation bytes: "グ" on "バグ修正" hits byte 4, mid-character. Correct
+        // output here depends on the coalesce + floor/ceil_char_boundary + merge
+        // block actually snapping that back to the whole character.
+        let q = FilterQuery::parse("グ");
+        assert_eq!(q.highlight_ranges("バグ修正"), vec![(3, 6)]);
     }
 
     #[test]
