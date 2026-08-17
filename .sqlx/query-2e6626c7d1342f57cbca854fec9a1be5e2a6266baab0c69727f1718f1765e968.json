@@ -6,7 +6,13 @@
       {
         "name": "last_full_fetch_attempt_at",
         "ordinal": 0,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "queries",
+            "name": "last_full_fetch_attempt_at"
+          }
+        }
       }
     ],
     "parameters": {

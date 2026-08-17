@@ -6,127 +6,277 @@
       {
         "name": "query_id",
         "ordinal": 0,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "query_id"
+          }
+        }
       },
       {
         "name": "kind",
         "ordinal": 1,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "kind"
+          }
+        }
       },
       {
         "name": "repo_owner",
         "ordinal": 2,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "repo_owner"
+          }
+        }
       },
       {
         "name": "repo_name",
         "ordinal": 3,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "repo_name"
+          }
+        }
       },
       {
         "name": "repo_private",
         "ordinal": 4,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "repo_private"
+          }
+        }
       },
       {
         "name": "number",
         "ordinal": 5,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "number"
+          }
+        }
       },
       {
         "name": "title",
         "ordinal": 6,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "title"
+          }
+        }
       },
       {
         "name": "url",
         "ordinal": 7,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "url"
+          }
+        }
       },
       {
         "name": "author",
         "ordinal": 8,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "author"
+          }
+        }
       },
       {
         "name": "author_avatar_url",
         "ordinal": 9,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "author_avatar_url"
+          }
+        }
       },
       {
         "name": "state",
         "ordinal": 10,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "state"
+          }
+        }
       },
       {
         "name": "updated_at",
         "ordinal": 11,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "updated_at"
+          }
+        }
       },
       {
         "name": "labels",
         "ordinal": 12,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "labels"
+          }
+        }
       },
       {
         "name": "comment_count",
         "ordinal": 13,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "comment_count"
+          }
+        }
       },
       {
         "name": "requested_reviewers",
         "ordinal": 14,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "requested_reviewers"
+          }
+        }
       },
       {
         "name": "reviews",
         "ordinal": 15,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "reviews"
+          }
+        }
       },
       {
         "name": "body",
         "ordinal": 16,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "body"
+          }
+        }
       },
       {
         "name": "assignees",
         "ordinal": 17,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "assignees"
+          }
+        }
       },
       {
         "name": "is_draft",
         "ordinal": 18,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "is_draft"
+          }
+        }
       },
       {
         "name": "created_at_item",
         "ordinal": 19,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "created_at_item"
+          }
+        }
       },
       {
         "name": "base_ref",
         "ordinal": 20,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "base_ref"
+          }
+        }
       },
       {
         "name": "head_ref",
         "ordinal": 21,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "head_ref"
+          }
+        }
       },
       {
         "name": "review_decision",
         "ordinal": 22,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "review_decision"
+          }
+        }
       },
       {
         "name": "milestone",
         "ordinal": 23,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "milestone"
+          }
+        }
       },
       {
         "name": "last_read_updated_at",
         "ordinal": 24,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "last_read_updated_at"
+          }
+        }
       }
     ],
     "parameters": {

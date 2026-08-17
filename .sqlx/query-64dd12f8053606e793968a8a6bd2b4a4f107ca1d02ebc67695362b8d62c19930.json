@@ -6,7 +6,13 @@
       {
         "name": "parent_id",
         "ordinal": 0,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "filter_streams",
+            "name": "parent_id"
+          }
+        }
       }
     ],
     "parameters": {

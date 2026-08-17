@@ -6,29 +6,53 @@
       {
         "name": "id!: i64",
         "ordinal": 0,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "id"
+          }
+        }
       },
       {
         "name": "repo_owner",
         "ordinal": 1,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "repo_owner"
+          }
+        }
       },
       {
         "name": "repo_name",
         "ordinal": 2,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "repo_name"
+          }
+        }
       },
       {
         "name": "number",
         "ordinal": 3,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "number"
+          }
+        }
       }
     ],
     "parameters": {
       "Right": 1
     },
     "nullable": [
-      true,
+      false,
       false,
       false,
       false
