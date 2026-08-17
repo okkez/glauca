@@ -23,8 +23,8 @@ fn fuzzy_config() -> Config {
 thread_local! {
     /// Per-thread cache of compiled matchers, keyed by needle. Building a `Matcher`
     /// allocates a prefilter + Smith-Waterman state, and filtering runs over every item
-    /// on each keystroke: rebuilding one per item (via the free `frizbee::match_list`)
-    /// measured ~8x slower. Cleared past a cap to bound memory over a session.
+    /// on each keystroke: rebuilding a `Matcher` per item instead of reusing one per
+    /// needle measured ~8x slower. Cleared past a cap to bound memory over a session.
     static MATCHERS: RefCell<HashMap<String, Matcher>> = RefCell::new(HashMap::new());
 }
 
