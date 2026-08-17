@@ -1,5 +1,5 @@
 use crate::db::CachedItem;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use octocrab::Octocrab;
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -107,7 +107,7 @@ pub async fn get_current_user(client: &Octocrab) -> Result<CurrentUser, CurrentU
         }),
         Err(e) => {
             let kind = classify_current_user_error(&e);
-            warn!(error = %e, transient = (kind == CurrentUserError::Transient),
+            warn!(error = %describe_octocrab_error(&e), transient = (kind == CurrentUserError::Transient),
                   "get_current_user failed (unauthenticated or API error)");
             Err(kind)
         }
@@ -286,6 +286,41 @@ fn is_rate_limit_response(status: u16, message: &str) -> bool {
     msg.contains("rate limit") || msg.contains("abuse") || msg.contains("secondary")
 }
 
+/// Summarize an octocrab error in one line, for logs and the UI.
+///
+/// Every `octocrab::Error` variant carries a backtrace that snafu captures whether or
+/// not `RUST_BACKTRACE` is set, and octocrab's own `Display` interpolates it — so
+/// formatting one costs ~40 lines of tokio frames per failure and buries the cause.
+/// Nothing here may reach for `{e}`: the arms pull out the parts worth reading, and the
+/// fallback drops to the source, which is never itself an `octocrab::Error`.
+fn describe_octocrab_error(e: &octocrab::Error) -> String {
+    match e {
+        // GitHub answered and refused: the status and message are the whole diagnosis.
+        // `GitHubError`'s `Display` spans several lines, so assemble the line here.
+        octocrab::Error::GitHub { source, .. } => format!(
+            "GitHub API {}: {}",
+            source.status_code.as_u16(),
+            source.message
+        ),
+        // The path is what makes this one actionable — it names the field whose shape we
+        // guessed wrong, e.g. a null `data.search` on a query GitHub rejected.
+        octocrab::Error::Json { source, .. } => {
+            format!(
+                "malformed response at {}: {}",
+                source.path(),
+                source.inner()
+            )
+        }
+        octocrab::Error::Service { source, .. } => format!("transport error: {source}"),
+        octocrab::Error::Hyper { source, .. } => format!("transport error: {source}"),
+        octocrab::Error::Http { source, .. } => format!("HTTP error: {source}"),
+        other => match std::error::Error::source(other) {
+            Some(source) => source.to_string(),
+            None => "unrecognized GitHub client error".to_string(),
+        },
+    }
+}
+
 /// Classify an octocrab error: HTTP 429, or 403 whose message names a rate/abuse
 /// limit, is a rate limit; everything else is a generic failure.
 fn classify_octocrab_error(e: octocrab::Error) -> SearchError {
@@ -294,7 +329,12 @@ fn classify_octocrab_error(e: octocrab::Error) -> SearchError {
     {
         return SearchError::RateLimited;
     }
-    SearchError::Other(anyhow::Error::new(e).context("GraphQL search failed"))
+    // The description is baked in rather than kept as a source: an `octocrab::Error`
+    // left in the chain would put its backtrace one `{:#}` away from the log again.
+    SearchError::Other(anyhow::anyhow!(
+        "GraphQL search failed: {}",
+        describe_octocrab_error(&e)
+    ))
 }
 
 #[derive(Deserialize)]
@@ -464,10 +504,9 @@ pub async fn fetch_item(
             "number": number,
         }
     });
-    let resp: serde_json::Value = client
-        .graphql(&payload)
-        .await
-        .context("GraphQL item fetch failed")?;
+    let resp: serde_json::Value = client.graphql(&payload).await.map_err(|e| {
+        anyhow::anyhow!("GraphQL item fetch failed: {}", describe_octocrab_error(&e))
+    })?;
 
     let node = &resp["data"]["repository"]["issueOrPullRequest"];
     if node.is_null() {
@@ -1104,5 +1143,65 @@ mod tests {
         });
         let item = node_to_cached_item(&node, 1).unwrap();
         assert!(item.author.is_none());
+    }
+
+    // A transport failure with a stand-in for whatever tower/hyper hands back.
+    fn transport_error(msg: &'static str) -> octocrab::Error {
+        octocrab::Error::Service {
+            source: msg.into(),
+            backtrace: std::backtrace::Backtrace::disabled(),
+        }
+    }
+
+    // Why `describe_octocrab_error` exists at all: octocrab 0.44 interpolates the
+    // backtrace into `Display`. If a future octocrab stops doing this, the helper's
+    // arms become dead weight and this test is what says so.
+    #[test]
+    fn octocrab_still_puts_its_backtrace_in_display() {
+        let rendered = transport_error("client error (Connect)").to_string();
+
+        assert!(
+            rendered.contains("Found at"),
+            "octocrab dropped it: {rendered}"
+        );
+    }
+
+    #[test]
+    fn describing_an_error_keeps_the_cause_and_drops_the_backtrace() {
+        let described = describe_octocrab_error(&transport_error("client error (Connect)"));
+
+        assert_eq!(described, "transport error: client error (Connect)");
+    }
+
+    // The fallback arm exists for octocrab's `#[non_exhaustive]` variants. `Installation`
+    // is the one with no `source`, so it proves the arm can't fall back to `Display`.
+    #[test]
+    fn describing_a_sourceless_error_still_avoids_the_backtrace() {
+        let err = octocrab::Error::Installation {
+            backtrace: std::backtrace::Backtrace::disabled(),
+        };
+
+        let described = describe_octocrab_error(&err);
+
+        assert!(
+            !described.contains("Found at"),
+            "leaked backtrace: {described}"
+        );
+        assert!(!described.is_empty());
+    }
+
+    // The engine logs and shows this text verbatim, so the cause has to survive the
+    // trip through `SearchError` — "GraphQL search failed" alone is undiagnosable.
+    #[test]
+    fn a_failed_search_reports_why_it_failed() {
+        let SearchError::Other(err) = classify_octocrab_error(transport_error("dns failure"))
+        else {
+            panic!("a transport failure is not a rate limit");
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "GraphQL search failed: transport error: dns failure"
+        );
     }
 }
