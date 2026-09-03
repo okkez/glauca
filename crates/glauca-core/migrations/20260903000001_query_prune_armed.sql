@@ -17,18 +17,20 @@
 --     would delete those on their first absence, which is exactly what corroboration
 --     exists to prevent.
 --
--- The flag is set by `update_query` on a changed search string and cleared by
--- `db::disarm_prune` after the prune that used it, so it covers exactly one walk: the
--- first whose pages came from the new definition. That is the expiry the row-state
--- version could not have.
+-- The flag is set by `update_query` on a changed search string, and read, applied and
+-- cleared inside `db::prune_missing_items`' transaction, so it covers exactly one walk:
+-- the first whose pages came from the new definition. That is the expiry the row-state
+-- version could not have. It lives in that transaction because a clear that could fail
+-- after the delete committed would leave an arm alive past the walk it was set for --
+-- the same failure in miniature.
 --
--- Both the read and the clear match on `queries.query`, not just the id, and both happen
--- against the string the walk is actually paging. A walk can be on a stale definition for
--- two reasons -- a second front-end never hears about the edit (`QueryUpdated` reaches the
--- editing process only, and the cache is shared), and a queued `SyncJob` carries the
--- string snapshotted when it was enqueued -- and such a walk must neither take the arm nor
--- spend it. Timing alone does not separate those cases, which is why the definition is the
--- key rather than the moment of the read.
+-- The read matches on `queries.query`, not just the id, against the string the walk is
+-- actually paging. A walk can be on a stale definition for two reasons -- a second
+-- front-end never hears about the edit (`QueryUpdated` reaches the editing process only,
+-- and the cache is shared), and a queued `SyncJob` carries the string snapshotted when it
+-- was enqueued -- and such a walk must neither take the arm nor spend it. Timing alone
+-- does not separate those cases, which is why the definition is the key rather than the
+-- moment of the read.
 --
 -- A query whose result set stays truncated never prunes and so never spends its arm. That
 -- is inert while it lasts, since only a prune reads the flag; if the result set later
