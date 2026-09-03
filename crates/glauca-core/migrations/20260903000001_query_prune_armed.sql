@@ -17,20 +17,23 @@
 --     would delete those on their first absence, which is exactly what corroboration
 --     exists to prevent.
 --
--- The flag is set by `update_query` on a changed search string, read once *before* a walk
--- begins, and cleared by `db::disarm_prune` after the prune that used it. It therefore
--- covers exactly one walk: the first whose pages came from the new definition. That is the
--- expiry the row-state version could not have.
+-- The flag is set by `update_query` on a changed search string and cleared by
+-- `db::disarm_prune` after the prune that used it, so it covers exactly one walk: the
+-- first whose pages came from the new definition. That is the expiry the row-state
+-- version could not have.
 --
--- Both halves of that matter. A walk already in flight when the edit lands paged the *old*
--- definition, so it must neither use the arm nor spend it; reading before the walk denies
--- it the first, and disarming from the prune rather than from `mark_fetched` denies it the
--- second. (Such a walk still stamps `last_full_fetch_at`, and `prune_missing_items` refuses
--- it because that stamp moved, so it prunes nothing.)
+-- Both the read and the clear match on `queries.query`, not just the id, and both happen
+-- against the string the walk is actually paging. A walk can be on a stale definition for
+-- two reasons -- a second front-end never hears about the edit (`QueryUpdated` reaches the
+-- editing process only, and the cache is shared), and a queued `SyncJob` carries the
+-- string snapshotted when it was enqueued -- and such a walk must neither take the arm nor
+-- spend it. Timing alone does not separate those cases, which is why the definition is the
+-- key rather than the moment of the read.
 --
--- A query whose result set is permanently truncated never prunes and so never spends its
--- arm. That costs nothing: the flag is only read to choose a strike threshold, and only a
--- prune reads it.
+-- A query whose result set stays truncated never prunes and so never spends its arm. That
+-- is inert while it lasts, since only a prune reads the flag; if the result set later
+-- drops below the cap, the first walk that can prune is also the first to have validated
+-- the cache against the new definition, so it is the walk the arm was for.
 --
 -- `missing_count` is left alone. Rows still sitting at 1 from an edit before this
 -- migration are indistinguishable from rows genuinely absent once, and the harmless

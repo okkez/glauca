@@ -516,6 +516,35 @@ fn strikes_for(trust: PruneTrust, armed: bool) -> i64 {
     if armed { 1 } else { trust.strikes_required() }
 }
 
+/// Prune what this walk didn't return, and spend the arm if the prune was the one it was
+/// set for.
+///
+/// The pairing is the point, and it is why this is a function rather than two calls at the
+/// call site: only a prune that actually ran (`Considered`) observed anything on the new
+/// definition's behalf, so only that one may clear the flag. A `Skipped` prune — the
+/// concurrency guard refusing a walk whose `last_full_fetch_at` moved under it — leaves the
+/// arm for the walk that can use it.
+async fn prune_and_disarm(
+    pool: &SqlitePool,
+    query_id: i64,
+    query_str: &str,
+    keep: &[db::ItemKey],
+    strikes: i64,
+    armed_before_walk: bool,
+    stamp_before_walk: Option<&str>,
+) -> anyhow::Result<db::PruneOutcome> {
+    let outcome = db::prune_missing_items(pool, query_id, keep, strikes, stamp_before_walk).await?;
+    if armed_before_walk
+        && matches!(outcome, db::PruneOutcome::Considered { .. })
+        && let Err(e) = db::disarm_prune(pool, query_id, query_str).await
+    {
+        // Left armed, so the next walk of this definition also prunes on first absence.
+        // Logged because that is a real difference in behaviour, not a no-op.
+        warn!(error = %e, "could not disarm prune; the next walk keeps the arm");
+    }
+    Ok(outcome)
+}
+
 /// Resolve the `updated:>=` threshold for one sync. `Some(ts)` narrows the fetch to
 /// items updated since `ts`; `None` means a full fetch — the authoritative result
 /// set, and the only kind that may prune.
@@ -593,15 +622,17 @@ pub async fn sync_task(
         None
     };
     // Read with the stamp above, for the same reason: both describe the query as it stood
-    // when this walk started. An edit landing mid-walk arms the *next* walk, not this one,
-    // whose pages came from the old definition.
+    // when this walk started. Matched against `query_str` as well as the id, so a walk
+    // paging a definition the query has since moved off doesn't take the new one's arm.
     let armed_before_walk = is_full
-        && db::prune_armed(&pool, query_id).await.unwrap_or_else(|e| {
-            // Unarmed is the direction that prunes less; the edit's rows wait one more
-            // full-fetch interval instead of a live row losing its read marker.
-            warn!(error = %e, "could not read prune_armed; requiring corroboration");
-            false
-        });
+        && db::prune_armed(&pool, query_id, &query_str)
+            .await
+            .unwrap_or_else(|e| {
+                // Unarmed is the direction that prunes less; the edit's rows wait one more
+                // full-fetch interval instead of a live row losing its read marker.
+                warn!(error = %e, "could not read prune_armed; requiring corroboration");
+                false
+            });
 
     // Reload the query's items from the DB and push them to the UI. Called after
     // each page (incremental display) and after a prune actually removes rows.
@@ -722,11 +753,13 @@ pub async fn sync_task(
     // longer returns (e.g. a PR that was merged and left an `is:open` query).
     if may_prune(is_full, total_node_count, complete) {
         let strikes = strikes_for(opts.prune_trust, armed_before_walk);
-        match db::prune_missing_items(
+        match prune_and_disarm(
             &pool,
             query_id,
+            &query_str,
             &keep_keys,
             strikes,
+            armed_before_walk,
             last_full_fetch_before_walk.as_deref(),
         )
         .await
@@ -758,13 +791,6 @@ pub async fn sync_task(
                 // reload already reflects every upsert.
                 if deleted > 0 {
                     reload().await;
-                }
-                // This walk is the one the arm was set for, and it has now used it. A
-                // skipped or never-attempted prune leaves it for the walk that can.
-                if armed_before_walk && let Err(e) = db::disarm_prune(&pool, query_id).await {
-                    // Left armed, so the next walk also prunes on first absence. Logged
-                    // because that is a real difference in behaviour, not a no-op.
-                    warn!(error = %e, "could not disarm prune; the next walk keeps the arm");
                 }
             }
             Err(e) => {
@@ -2121,7 +2147,7 @@ async fn mark_filtered_items_read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{seed_three_queries, test_pool};
+    use crate::test_support::{make_item, seed_three_queries, test_pool};
     use rstest::rstest;
 
     /// Cache one unread PR by `alice` under `query_id`.
@@ -2499,28 +2525,100 @@ mod tests {
         );
     }
 
-    /// The arm is read once, before the walk. A walk that began before the edit must not
-    /// pick it up: its result set is the *old* definition's, so its absences are ordinary.
+    /// An armed query whose cached rows are absent from the walk loses them on the first
+    /// absence, and the walk spends the arm on its way out.
     #[tokio::test]
-    async fn an_edit_during_a_walk_does_not_arm_that_walk() {
+    async fn a_prune_that_ran_spends_the_arm() {
         let (pool, _file) = test_pool().await;
-        let qid = db::upsert_query(&pool, "repo:o/a is:pr", "pull_request", None)
+        let (qid, query) = armed_query_with_one_item(&pool).await;
+
+        let outcome = prune_and_disarm(&pool, qid, &query, &[], 1, true, None)
+            .await
+            .expect("prune");
+
+        assert!(matches!(
+            outcome,
+            db::PruneOutcome::Considered { deleted: 1, .. }
+        ));
+        assert!(!db::prune_armed(&pool, qid, &query).await.expect("armed"));
+    }
+
+    /// A prune the concurrency guard refused observed nothing, so the arm has to survive
+    /// for the walk that can use it.
+    #[tokio::test]
+    async fn a_skipped_prune_keeps_the_arm() {
+        let (pool, _file) = test_pool().await;
+        let (qid, query) = armed_query_with_one_item(&pool).await;
+        db::mark_fetched(&pool, qid, true)
+            .await
+            .expect("a rival walk finished");
+
+        let outcome = prune_and_disarm(&pool, qid, &query, &[], 1, true, None)
+            .await
+            .expect("prune");
+
+        assert!(matches!(outcome, db::PruneOutcome::Skipped { .. }));
+        assert!(db::prune_armed(&pool, qid, &query).await.expect("armed"));
+    }
+
+    /// A walk that started unarmed must not spend an arm set while it was running: that arm
+    /// belongs to the walk which will page the definition it was set for.
+    #[tokio::test]
+    async fn a_walk_that_started_unarmed_never_disarms() {
+        let (pool, _file) = test_pool().await;
+        let (qid, query) = armed_query_with_one_item(&pool).await;
+
+        prune_and_disarm(&pool, qid, &query, &[], db::PRUNE_STRIKES, false, None)
+            .await
+            .expect("prune");
+
+        assert!(db::prune_armed(&pool, qid, &query).await.expect("armed"));
+    }
+
+    /// The arm belongs to a *definition*, not to whichever walk reaches the prune first.
+    /// A second front-end never hears about the edit, so it keeps syncing the old search
+    /// string; that walk must neither read the arm nor clear it.
+    #[tokio::test]
+    async fn a_walk_of_the_previous_query_string_leaves_the_arm() {
+        let (pool, _file) = test_pool().await;
+        let (qid, new_query) = armed_query_with_one_item(&pool).await;
+
+        assert!(
+            !db::prune_armed(&pool, qid, STALE_QUERY)
+                .await
+                .expect("armed")
+        );
+
+        prune_and_disarm(&pool, qid, STALE_QUERY, &[], db::PRUNE_STRIKES, false, None)
+            .await
+            .expect("prune");
+
+        assert!(
+            db::prune_armed(&pool, qid, &new_query)
+                .await
+                .expect("armed"),
+            "the edit's own walk must still find the arm"
+        );
+    }
+
+    /// The search string a query is edited *away* from, i.e. what a front-end that missed
+    /// the edit still holds.
+    const STALE_QUERY: &str = "repo:o/a is:pr";
+
+    /// A query just edited to a new search string, with one cached row for a prune to find.
+    /// Returns the new string, since the arm is keyed by it.
+    async fn armed_query_with_one_item(pool: &SqlitePool) -> (i64, String) {
+        let new_query = "repo:o/a is:merged".to_string();
+        let qid = db::upsert_query(pool, STALE_QUERY, "pull_request", None)
             .await
             .expect("q");
-
-        let armed_before_walk = db::prune_armed(&pool, qid).await.expect("armed");
-        db::update_query(&pool, qid, None, "repo:o/a is:merged")
+        db::upsert_items(pool, &[make_item(qid, 1, "PR 1")])
             .await
-            .expect("edit lands mid-walk");
-
-        assert_eq!(
-            strikes_for(PruneTrust::Corroborate, armed_before_walk),
-            db::PRUNE_STRIKES
-        );
-        assert!(
-            db::prune_armed(&pool, qid).await.expect("armed"),
-            "the arm must survive for the walk that runs under the new definition"
-        );
+            .expect("item");
+        db::update_query(pool, qid, None, &new_query)
+            .await
+            .expect("edit");
+        (qid, new_query)
     }
 
     /// While the worker isn't draining (e.g. offline), repeated timer ticks must not pile

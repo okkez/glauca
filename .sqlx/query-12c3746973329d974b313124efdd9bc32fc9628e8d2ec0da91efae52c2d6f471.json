@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT prune_armed AS \"prune_armed!: i64\" FROM queries WHERE id = ?",
+  "query": "SELECT prune_armed AS \"prune_armed!: i64\" FROM queries WHERE id = ? AND query = ?",
   "describe": {
     "columns": [
       {
@@ -16,11 +16,11 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false
     ]
   },
-  "hash": "19f58bc4722c2d32cd3c762c78c436b73dd8ef08847a518ae2be04b260a767af"
+  "hash": "12c3746973329d974b313124efdd9bc32fc9628e8d2ec0da91efae52c2d6f471"
 }
