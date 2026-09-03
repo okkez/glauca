@@ -1,0 +1,39 @@
+-- Move the "prune on the first absence" arming from the item rows to the query row.
+--
+-- Editing a query's search string means the next full walk is authoritative for a
+-- definition the cache has never seen: whatever it doesn't return is stale by
+-- construction, not a paging race, so it should go without waiting for a second
+-- strike. `db::update_query` expressed that by pre-loading every cached row's
+-- `missing_count` to `PRUNE_STRIKES - 1`. Two problems with that:
+--
+--   * It rewrites up to `max_items_per_query` rows to change one integer. The rows
+--     carry `body`, so a 1000-item query wrote several MB of pages while holding the
+--     write lock, in the middle of an interactive edit.
+--   * `missing_count = 1` then meant two different things — "armed by an edit" and
+--     "observed absent once" — with no way to tell them apart and so no way to expire
+--     the first. An incremental sync in between disarmed only the rows it returned
+--     (`upsert_items` zeroes the counter), leaving every un-updated row armed
+--     indefinitely. A full walk arriving much later — possibly racing an update —
+--     would delete those on their first absence, which is exactly what corroboration
+--     exists to prevent.
+--
+-- The flag is set by `update_query` on a changed search string, read once *before* a walk
+-- begins, and cleared by `db::disarm_prune` after the prune that used it. It therefore
+-- covers exactly one walk: the first whose pages came from the new definition. That is the
+-- expiry the row-state version could not have.
+--
+-- Both halves of that matter. A walk already in flight when the edit lands paged the *old*
+-- definition, so it must neither use the arm nor spend it; reading before the walk denies
+-- it the first, and disarming from the prune rather than from `mark_fetched` denies it the
+-- second. (Such a walk still stamps `last_full_fetch_at`, and `prune_missing_items` refuses
+-- it because that stamp moved, so it prunes nothing.)
+--
+-- A query whose result set is permanently truncated never prunes and so never spends its
+-- arm. That costs nothing: the flag is only read to choose a strike threshold, and only a
+-- prune reads it.
+--
+-- `missing_count` is left alone. Rows still sitting at 1 from an edit before this
+-- migration are indistinguishable from rows genuinely absent once, and the harmless
+-- reading is the conservative one — they need a second absence, and any search that
+-- returns them resets the counter to 0.
+ALTER TABLE queries ADD COLUMN prune_armed INTEGER NOT NULL DEFAULT 0;

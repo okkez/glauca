@@ -507,6 +507,15 @@ impl PruneTrust {
     }
 }
 
+/// How many consecutive absences this walk must see before it deletes a row.
+///
+/// [`PruneTrust`] is the caller's policy; a walk that began with the query armed overrides
+/// it to one, because its absences mean "no longer matches" rather than "raced the
+/// pagination". `armed` must be `db::prune_armed` as read *before* the walk — see there.
+fn strikes_for(trust: PruneTrust, armed: bool) -> i64 {
+    if armed { 1 } else { trust.strikes_required() }
+}
+
 /// Resolve the `updated:>=` threshold for one sync. `Some(ts)` narrows the fetch to
 /// items updated since `ts`; `None` means a full fetch — the authoritative result
 /// set, and the only kind that may prune.
@@ -583,6 +592,16 @@ pub async fn sync_task(
     } else {
         None
     };
+    // Read with the stamp above, for the same reason: both describe the query as it stood
+    // when this walk started. An edit landing mid-walk arms the *next* walk, not this one,
+    // whose pages came from the old definition.
+    let armed_before_walk = is_full
+        && db::prune_armed(&pool, query_id).await.unwrap_or_else(|e| {
+            // Unarmed is the direction that prunes less; the edit's rows wait one more
+            // full-fetch interval instead of a live row losing its read marker.
+            warn!(error = %e, "could not read prune_armed; requiring corroboration");
+            false
+        });
 
     // Reload the query's items from the DB and push them to the UI. Called after
     // each page (incremental display) and after a prune actually removes rows.
@@ -702,7 +721,7 @@ pub async fn sync_task(
     // After a full fetch that we can vouch for, drop cached items the query no
     // longer returns (e.g. a PR that was merged and left an `is:open` query).
     if may_prune(is_full, total_node_count, complete) {
-        let strikes = opts.prune_trust.strikes_required();
+        let strikes = strikes_for(opts.prune_trust, armed_before_walk);
         match db::prune_missing_items(
             &pool,
             query_id,
@@ -739,6 +758,13 @@ pub async fn sync_task(
                 // reload already reflects every upsert.
                 if deleted > 0 {
                     reload().await;
+                }
+                // This walk is the one the arm was set for, and it has now used it. A
+                // skipped or never-attempted prune leaves it for the walk that can.
+                if armed_before_walk && let Err(e) = db::disarm_prune(&pool, query_id).await {
+                    // Left armed, so the next walk also prunes on first absence. Logged
+                    // because that is a real difference in behaviour, not a no-op.
+                    warn!(error = %e, "could not disarm prune; the next walk keeps the arm");
                 }
             }
             Err(e) => {
@@ -2454,6 +2480,46 @@ mod tests {
         assert_eq!(
             resolve_since(&pool, qid, query, incremental_opts(1800)).await,
             None
+        );
+    }
+
+    /// A walk that started with the query armed deletes on the first absence: it is the
+    /// first to see the new definition, so a row it doesn't return no longer matches.
+    #[test]
+    fn strikes_for_an_armed_walk_is_one() {
+        assert_eq!(strikes_for(PruneTrust::Corroborate, true), 1);
+    }
+
+    /// Every other automatic walk corroborates, so a transient absence costs nothing.
+    #[test]
+    fn strikes_for_an_unarmed_walk_corroborates() {
+        assert_eq!(
+            strikes_for(PruneTrust::Corroborate, false),
+            db::PRUNE_STRIKES
+        );
+    }
+
+    /// The arm is read once, before the walk. A walk that began before the edit must not
+    /// pick it up: its result set is the *old* definition's, so its absences are ordinary.
+    #[tokio::test]
+    async fn an_edit_during_a_walk_does_not_arm_that_walk() {
+        let (pool, _file) = test_pool().await;
+        let qid = db::upsert_query(&pool, "repo:o/a is:pr", "pull_request", None)
+            .await
+            .expect("q");
+
+        let armed_before_walk = db::prune_armed(&pool, qid).await.expect("armed");
+        db::update_query(&pool, qid, None, "repo:o/a is:merged")
+            .await
+            .expect("edit lands mid-walk");
+
+        assert_eq!(
+            strikes_for(PruneTrust::Corroborate, armed_before_walk),
+            db::PRUNE_STRIKES
+        );
+        assert!(
+            db::prune_armed(&pool, qid).await.expect("armed"),
+            "the arm must survive for the walk that runs under the new definition"
         );
     }
 

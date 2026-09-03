@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT prune_armed AS \"prune_armed!: i64\" FROM queries WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "prune_armed!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "queries",
+            "name": "prune_armed"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "19f58bc4722c2d32cd3c762c78c436b73dd8ef08847a518ae2be04b260a767af"
+}
