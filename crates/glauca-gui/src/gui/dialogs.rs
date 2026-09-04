@@ -2,7 +2,7 @@
 //! About and Shortcuts info dialogs.
 
 use gpui::*;
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Textarea, TextareaState};
 use gpui_component::radio::RadioGroup;
 
 use glauca_core::engine::{EngineCommand, ReviewEvent};
@@ -18,8 +18,7 @@ impl GlaucaApp {
         cx: &mut Context<Self>,
     ) {
         let body = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(3, 12)
                 .placeholder("Comment body")
         });
@@ -31,7 +30,7 @@ impl GlaucaApp {
             let item = item.clone();
             dlg.title("Comment")
                 .w(px(560.))
-                .content(move |content, _w, _cx| content.child(Input::new(&body_c).h(px(220.))))
+                .content(move |content, _w, _cx| content.child(Textarea::new(&body_c).h(px(220.))))
                 .on_ok(move |_, _w, cx| {
                     let b = body_ok.read(cx).value().to_string();
                     let b = b.trim().to_string();
@@ -63,8 +62,7 @@ impl GlaucaApp {
     ) {
         self.review_action = ReviewEvent::Approve;
         let body = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(3, 12)
                 .placeholder("Review comment (required for Comment / Request changes)")
         });
@@ -152,7 +150,7 @@ impl GlaucaApp {
                     content
                         .gap_3()
                         .child(radios)
-                        .child(Input::new(&body_render).h(px(180.)))
+                        .child(Textarea::new(&body_render).h(px(180.)))
                         .child(buttons)
                 })
         });
