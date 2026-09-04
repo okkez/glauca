@@ -1,0 +1,30 @@
+-- Move the "prune on the first absence" arming from the item rows to the query row.
+--
+-- Editing a query's search string means the next full walk is authoritative for a
+-- definition the cache has never seen: whatever it doesn't return is stale by
+-- construction, not a paging race, so it should go without waiting for a second
+-- strike. `db::update_query` expressed that by pre-loading every cached row's
+-- `missing_count` to `PRUNE_STRIKES - 1`. Two problems with that:
+--
+--   * It rewrites up to `max_items_per_query` rows to change one integer. The rows
+--     carry `body`, so a 1000-item query wrote several MB of pages while holding the
+--     write lock, in the middle of an interactive edit.
+--   * `missing_count = 1` then meant two different things — "armed by an edit" and
+--     "observed absent once" — with no way to tell them apart and so no way to expire
+--     the first. An incremental sync in between disarmed only the rows it returned
+--     (`upsert_items` zeroes the counter), leaving every un-updated row armed
+--     indefinitely. A full walk arriving much later — possibly racing an update —
+--     would delete those on their first absence, which is exactly what corroboration
+--     exists to prevent.
+--
+-- The flag is set by `db::update_query` on a changed search string, and read, applied and
+-- cleared inside `db::prune_missing_items`' transaction. What it covers, why it is keyed
+-- to the search string rather than to the moment it is read, and why all three happen in
+-- one transaction, are `db::is_prune_armed`'s to state -- this file is applied history and
+-- nobody reopens it when that changes.
+--
+-- `missing_count` is left alone. Rows still sitting at 1 from an edit before this
+-- migration are indistinguishable from rows genuinely absent once, and the harmless
+-- reading is the conservative one — they need a second absence, and any search that
+-- returns them resets the counter to 0.
+ALTER TABLE queries ADD COLUMN prune_armed INTEGER NOT NULL DEFAULT 0;

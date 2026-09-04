@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE queries SET name = ?, query = ?, last_fetched_at = NULL, last_full_fetch_at = NULL, last_full_fetch_attempt_at = NULL, prune_armed = 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6ad485ab73874c6f3a9ba91e457e2ae822ae2d59011fda90a666f584ab2c27f9"
+}

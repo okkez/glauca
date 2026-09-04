@@ -702,12 +702,12 @@ pub async fn sync_task(
     // After a full fetch that we can vouch for, drop cached items the query no
     // longer returns (e.g. a PR that was merged and left an `is:open` query).
     if may_prune(is_full, total_node_count, complete) {
-        let strikes = opts.prune_trust.strikes_required();
         match db::prune_missing_items(
             &pool,
             query_id,
+            &query_str,
             &keep_keys,
-            strikes,
+            opts.prune_trust.strikes_required(),
             last_full_fetch_before_walk.as_deref(),
         )
         .await
@@ -717,15 +717,18 @@ pub async fn sync_task(
             // logged separately because it observed nothing, so it is not evidence.
             Ok(db::PruneOutcome::Skipped { reason }) => info!(reason, "prune skipped"),
             Ok(db::PruneOutcome::Considered {
+                strikes,
                 cached,
                 absent,
                 deleted,
                 absent_keys,
                 deleted_keys,
             }) => {
-                // `strikes` distinguishes a corroborating walk from a `PruneTrust::Immediate`
-                // one: read as the same, an immediate deletion looks like an item that left
-                // after two observations.
+                // `strikes` distinguishes a corroborating walk from a one-strike one (a
+                // `PruneTrust::Immediate` resync, or the walk after a query edit): read as
+                // the same, an immediate deletion looks like an item that left after two
+                // observations. It is the threshold the delete was bound with, not the one
+                // requested, since the prune may have applied the query's arm instead.
                 info!(
                     strikes,
                     cached,
