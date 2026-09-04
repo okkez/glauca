@@ -300,9 +300,11 @@ pub async fn reorder_filter_stream(pool: &SqlitePool, upper_id: i64, lower_id: i
 /// Update an existing query's display name and/or search string.
 /// Passing `None` for `name` clears the display name (falls back to query string).
 ///
-/// A changed *search string* resets both fetch timestamps and arms the query, so the first
-/// completed full fetch under the new definition drops whatever it no longer returns
-/// instead of leaving it for another full-fetch interval. See [`prune_armed`].
+/// A changed *search string* clears all three fetch timestamps — including
+/// `last_full_fetch_attempt_at`, the sole input to `is_full_fetch_due`, so a full fetch is
+/// immediately due — and arms the query, so the first completed full fetch under the new
+/// definition drops whatever it no longer returns instead of leaving it for another
+/// full-fetch interval. See [`is_prune_armed`].
 ///
 /// A rename must do neither: the result set is unchanged, so the transient absences the
 /// strike count exists to absorb are fully live and one would cost a live row its read
@@ -467,9 +469,15 @@ pub async fn mark_fetched(pool: &SqlitePool, query_id: i64, full_fetch: bool) ->
 /// Whether a walk that paged `query_str` may delete on the *first* absence.
 ///
 /// Set by [`update_query`] when the search string changes and cleared by the prune that
-/// uses it, so it covers the first walk whose result set reflects the query's new
-/// definition — where an absence is a row that no longer matches rather than a paging race.
-/// Every other walk falls back to the threshold its caller asked for.
+/// uses it, so it covers the first walk that reflects the query's new definition *and gets
+/// as far as pruning* — where an absence is a row that no longer matches rather than a
+/// paging race. A walk the concurrency guard refuses observed nothing, so it neither takes
+/// the arm nor spends it. Every other walk falls back to the threshold its caller asked for.
+///
+/// A query whose result set stays truncated never prunes, so it never spends its arm. That
+/// is inert while it lasts, since only a prune reads this; if the result set later drops
+/// below the cap, the first walk that can prune is also the first to have validated the
+/// cache against the new definition, so it is the walk the arm was for.
 ///
 /// The arm belongs to a definition, not to whichever walk reaches the prune first, so
 /// `query_str` is matched as well as the id. Two things put a walk on a stale string: a
@@ -483,18 +491,18 @@ pub async fn mark_fetched(pool: &SqlitePool, query_id: i64, full_fetch: bool) ->
 ///
 /// A query deleted out from under a running sync reads as unarmed — the direction that
 /// prunes less. Takes an executor so the prune can read it inside its own transaction.
-async fn prune_armed<'e, E>(exec: E, query_id: i64, query_str: &str) -> Result<bool>
+async fn is_prune_armed<'e, E>(exec: E, query_id: i64, query_str: &str) -> Result<bool>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let armed = sqlx::query_scalar!(
+    let stored = sqlx::query_scalar!(
         r#"SELECT prune_armed AS "prune_armed!: i64" FROM queries WHERE id = ? AND query = ?"#,
         query_id,
         query_str,
     )
     .fetch_optional(exec)
     .await?;
-    Ok(armed.unwrap_or(0) != 0)
+    Ok(stored.unwrap_or(0) != 0)
 }
 
 /// RFC3339 UTC threshold for an incremental fetch: the query's `last_fetched_at`
@@ -570,18 +578,28 @@ impl PruneOutcome {
             Self::Considered { deleted, .. } => *deleted,
         }
     }
+
+    /// The threshold this attempt applied; `None` for a skipped attempt, which applied none.
+    #[cfg(test)]
+    fn strikes(&self) -> Option<i64> {
+        match self {
+            Self::Skipped { .. } => None,
+            Self::Considered { strikes, .. } => Some(*strikes),
+        }
+    }
 }
 
 /// Record that this full fetch of `query_str` didn't return the cached rows absent from
 /// `keep`, and delete the ones that have reached the required consecutive absences.
 /// Returns what the attempt observed — see [`PruneOutcome`].
 ///
-/// `upsert_items` zeroes the counter, so any search that returns the item again disarms
-/// it, and the threshold is only ever reached by *consecutive* absences.
+/// `upsert_items` resets the counter to zero, so any search that returns the item again
+/// puts it back to no strikes, and the threshold is only ever reached by *consecutive*
+/// absences.
 ///
 /// `base_strikes` is the caller's policy, from `engine::PruneTrust`. It is what applies
-/// unless the query is [`prune_armed`] for `query_str`, in which case the first absence is
-/// enough and the arm is spent here. Reading the flag, applying it and clearing it all
+/// unless the query is [`is_prune_armed`] for `query_str`, in which case the first absence
+/// is enough and the arm is spent here. Reading the flag, applying it and clearing it all
 /// happen inside the transaction below, for the same reason the stamp guard does: a clear
 /// that could fail after the delete committed would leave an arm alive past the walk it
 /// was set for, which is the failure the flag exists to prevent.
@@ -645,14 +663,16 @@ pub async fn prune_missing_items(
         });
     }
 
-    // The arm is read here rather than before the walk because the *definition* is what it
-    // is keyed to, not the moment of the read — see `prune_armed`.
+    // Read in this transaction rather than captured by `sync_task` before the walk began:
+    // the read, the strike choice and the clear have to commit together with the delete
+    // (see the doc above). Reading this late is safe because the arm is keyed to the
+    // definition, not to the moment of the read — see `is_prune_armed`.
     //
     // The clear needs no `query` predicate of its own: this transaction holds the write
-    // lock, and `update_query` takes the same one, so the row cannot be edited between the
-    // read above and the write below. An edit that loses that race finds the flag already
-    // cleared and sets its own.
-    let armed = prune_armed(&mut *tx, query_id, query_str).await?;
+    // lock and `update_query` takes the same one, so the row cannot be edited between the
+    // `is_prune_armed` read and the clear that follows it. An edit that loses that race
+    // finds the flag already cleared and sets its own.
+    let armed = is_prune_armed(&mut *tx, query_id, query_str).await?;
     let strikes = if armed { 1 } else { base_strikes };
     if armed {
         sqlx::query!("UPDATE queries SET prune_armed = 0 WHERE id = ?", query_id)
@@ -2157,7 +2177,8 @@ mod tests {
 
     /// The one place these tests call `prune_missing_items`, so its argument list is written
     /// once. The helpers around it name the shapes the production callers actually take.
-    /// `query_str` is the definition the walk paged; the helpers pass the unedited one.
+    /// `query_str` is the definition the walk paged: the helpers pass `CACHED_QUERY`,
+    /// except `prune_after_edit_outcome`, which passes the string the query was edited to.
     async fn prune_outcome(
         pool: &SqlitePool,
         query_id: i64,
@@ -2479,10 +2500,44 @@ mod tests {
     /// definition an arm belongs to.
     const EDITED_QUERY: &str = "repo:owner/r is:merged";
 
-    /// Prune as the first walk under a query's new definition, i.e. one that paged
-    /// `EDITED_QUERY` after the edit armed it.
-    async fn prune_after_edit(pool: &SqlitePool, query_id: i64, keep: &[ItemKey]) -> PruneOutcome {
+    /// A query whose cache holds `numbers` and whose search string has since been edited to
+    /// [`EDITED_QUERY`] — armed, with its rows' strike counts untouched.
+    async fn armed_query_with_items(pool: &SqlitePool, numbers: &[i64]) -> i64 {
+        let qid = query_with_items(pool, numbers).await;
+        update_query(pool, qid, None, EDITED_QUERY)
+            .await
+            .expect("edit");
+        qid
+    }
+
+    /// Whether the query is armed for a walk that paged `query_str`.
+    async fn is_armed(pool: &SqlitePool, query_id: i64, query_str: &str) -> bool {
+        is_prune_armed(pool, query_id, query_str)
+            .await
+            .expect("read prune_armed")
+    }
+
+    /// Prune as the first walk under the query's new definition, i.e. one that paged
+    /// [`EDITED_QUERY`] after the edit armed it.
+    async fn prune_after_edit_outcome(
+        pool: &SqlitePool,
+        query_id: i64,
+        keep: &[ItemKey],
+    ) -> PruneOutcome {
         prune_outcome(pool, query_id, EDITED_QUERY, keep, PRUNE_STRIKES, None).await
+    }
+
+    /// Prune as a walk still paging the pre-edit definition — a second front-end that never
+    /// heard about the edit, or a job queued before it.
+    ///
+    /// Delegates rather than repeating the argument list: such a walk must behave as an
+    /// ordinary automatic prune, and that is the claim the tests using this make.
+    async fn prune_of_previous_definition(
+        pool: &SqlitePool,
+        query_id: i64,
+        keep: &[ItemKey],
+    ) -> usize {
+        auto_prune(pool, query_id, keep).await
     }
 
     /// Editing a query arms the *query*, not its rows: the strike counter keeps meaning
@@ -2496,9 +2551,12 @@ mod tests {
             .await
             .expect("update");
 
-        assert!(prune_armed(&pool, qid, EDITED_QUERY).await.expect("armed"));
-        // The rows are untouched, so a walk that isn't the armed one still needs two strikes.
-        assert_eq!(auto_prune(&pool, qid, &keep(&[1])).await, 0);
+        assert!(is_armed(&pool, qid, EDITED_QUERY).await);
+        // The rows are untouched, so a walk the arm doesn't cover still needs two strikes.
+        assert_eq!(
+            prune_of_previous_definition(&pool, qid, &keep(&[1])).await,
+            0
+        );
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1, 2]);
     }
 
@@ -2507,60 +2565,58 @@ mod tests {
     #[tokio::test]
     async fn an_armed_walk_prunes_on_the_first_absence() {
         let (pool, _file) = test_pool().await;
-        let qid = query_with_items(&pool, &[1, 2]).await;
-        update_query(&pool, qid, None, EDITED_QUERY)
-            .await
-            .expect("update");
+        let qid = armed_query_with_items(&pool, &[1, 2]).await;
 
-        assert_eq!(prune_after_edit(&pool, qid, &keep(&[1])).await.deleted(), 1);
+        let deleted = prune_after_edit_outcome(&pool, qid, &keep(&[1]))
+            .await
+            .deleted();
+
+        assert_eq!(deleted, 1);
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);
-        // And the arm is spent, so the walk after it corroborates again.
-        assert!(!prune_armed(&pool, qid, EDITED_QUERY).await.expect("armed"));
+    }
+
+    /// The arm covers exactly one walk: the prune that used it clears it, so the walk after
+    /// that is back to corroborating.
+    #[tokio::test]
+    async fn a_prune_spends_the_arm() {
+        let (pool, _file) = test_pool().await;
+        let qid = armed_query_with_items(&pool, &[1, 2]).await;
+
+        prune_after_edit_outcome(&pool, qid, &keep(&[1])).await;
+
+        assert!(!is_armed(&pool, qid, EDITED_QUERY).await);
     }
 
     /// The threshold the delete was bound with, reported back. `engine` logs it as
-    /// `strikes=`, which `hack/analyze-prune-logs.rb` reads to tell a corroborating walk
-    /// from a one-strike one — so it has to be what was applied, not what was asked for.
+    /// `strikes=`, which the log analysis reads to tell a corroborating walk from a
+    /// one-strike one — so it has to be what was applied, not what was asked for.
     #[tokio::test]
     async fn a_prune_reports_the_threshold_it_applied() {
         let (pool, _file) = test_pool().await;
         let qid = query_with_items(&pool, &[1]).await;
 
-        let unarmed = auto_prune_outcome(&pool, qid, &keep(&[1])).await;
-        assert!(matches!(
-            unarmed,
-            PruneOutcome::Considered {
-                strikes: PRUNE_STRIKES,
-                ..
-            }
-        ));
+        let before_edit = auto_prune_outcome(&pool, qid, &keep(&[1])).await;
+        assert_eq!(before_edit.strikes(), Some(PRUNE_STRIKES));
 
         update_query(&pool, qid, None, EDITED_QUERY)
             .await
             .expect("update");
-        let armed = prune_after_edit(&pool, qid, &keep(&[1])).await;
-        assert!(matches!(armed, PruneOutcome::Considered { strikes: 1, .. }));
+        let after_edit = prune_after_edit_outcome(&pool, qid, &keep(&[1])).await;
+        assert_eq!(after_edit.strikes(), Some(1));
     }
 
     /// The arm belongs to the definition it was set for. A walk still paging the string the
-    /// query was edited away from — a second front-end that never heard about the edit —
-    /// must neither delete on first absence nor spend the arm.
+    /// query was edited away from must neither delete on first absence nor spend the arm.
     #[tokio::test]
     async fn a_walk_of_the_previous_definition_neither_uses_nor_spends_the_arm() {
         let (pool, _file) = test_pool().await;
-        let qid = query_with_items(&pool, &[1]).await;
-        update_query(&pool, qid, None, EDITED_QUERY)
-            .await
-            .expect("update");
+        let qid = armed_query_with_items(&pool, &[1]).await;
 
-        assert!(!prune_armed(&pool, qid, CACHED_QUERY).await.expect("armed"));
-        assert_eq!(
-            auto_prune(&pool, qid, &[]).await,
-            0,
-            "first absence only strikes"
-        );
+        let deleted = prune_of_previous_definition(&pool, qid, &[]).await;
+
+        assert_eq!(deleted, 0, "a first absence must only record a strike");
         assert!(
-            prune_armed(&pool, qid, EDITED_QUERY).await.expect("armed"),
+            is_armed(&pool, qid, EDITED_QUERY).await,
             "the edit's own walk must still find the arm"
         );
     }
@@ -2570,18 +2626,18 @@ mod tests {
     #[tokio::test]
     async fn a_skipped_prune_keeps_the_arm() {
         let (pool, _file) = test_pool().await;
-        let qid = query_with_items(&pool, &[1]).await;
-        update_query(&pool, qid, None, EDITED_QUERY)
-            .await
-            .expect("update");
+        let qid = armed_query_with_items(&pool, &[1]).await;
         mark_fetched(&pool, qid, true)
             .await
             .expect("a rival walk finished");
 
-        let outcome = prune_after_edit(&pool, qid, &[]).await;
+        let outcome = prune_after_edit_outcome(&pool, qid, &[]).await;
 
-        assert!(matches!(outcome, PruneOutcome::Skipped { .. }));
-        assert!(prune_armed(&pool, qid, EDITED_QUERY).await.expect("armed"));
+        assert!(
+            matches!(outcome, PruneOutcome::Skipped { .. }),
+            "a rival walk's stamp must make this prune skip, got {outcome:?}"
+        );
+        assert!(is_armed(&pool, qid, EDITED_QUERY).await);
     }
 
     /// Only a prune spends the arm. Stamping a fetch must not: a walk that began before the
@@ -2590,15 +2646,12 @@ mod tests {
     #[tokio::test]
     async fn fetching_does_not_disarm_the_query() {
         let (pool, _file) = test_pool().await;
-        let qid = query_with_items(&pool, &[1]).await;
-        update_query(&pool, qid, None, EDITED_QUERY)
-            .await
-            .expect("update");
+        let qid = armed_query_with_items(&pool, &[1]).await;
 
         mark_fetched(&pool, qid, false).await.expect("incremental");
         mark_fetched(&pool, qid, true).await.expect("full");
 
-        assert!(prune_armed(&pool, qid, EDITED_QUERY).await.expect("armed"));
+        assert!(is_armed(&pool, qid, EDITED_QUERY).await);
     }
 
     /// Renaming must NOT arm: the result set is unchanged, so a single transient absence
@@ -2612,7 +2665,7 @@ mod tests {
             .await
             .expect("rename");
 
-        assert!(!prune_armed(&pool, qid, CACHED_QUERY).await.expect("armed"));
+        assert!(!is_armed(&pool, qid, CACHED_QUERY).await);
         // A first absence must still be just a strike.
         assert_eq!(auto_prune(&pool, qid, &[]).await, 0);
         assert_eq!(remaining_numbers(&pool, qid).await, vec![1]);

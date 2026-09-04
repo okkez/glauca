@@ -583,6 +583,7 @@ pub async fn sync_task(
     } else {
         None
     };
+
     // Reload the query's items from the DB and push them to the UI. Called after
     // each page (incremental display) and after a prune actually removes rows.
     let reload = || load_items_task(pool.clone(), query_id, opts.background, tx.clone());

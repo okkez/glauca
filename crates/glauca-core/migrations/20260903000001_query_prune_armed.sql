@@ -17,25 +17,11 @@
 --     would delete those on their first absence, which is exactly what corroboration
 --     exists to prevent.
 --
--- The flag is set by `update_query` on a changed search string, and read, applied and
--- cleared inside `db::prune_missing_items`' transaction, so it covers exactly one walk:
--- the first whose pages came from the new definition. That is the expiry the row-state
--- version could not have. It lives in that transaction because a clear that could fail
--- after the delete committed would leave an arm alive past the walk it was set for --
--- the same failure in miniature.
---
--- The read matches on `queries.query`, not just the id, against the string the walk is
--- actually paging. A walk can be on a stale definition for two reasons -- a second
--- front-end never hears about the edit (`QueryUpdated` reaches the editing process only,
--- and the cache is shared), and a queued `SyncJob` carries the string snapshotted when it
--- was enqueued -- and such a walk must neither take the arm nor spend it. Timing alone
--- does not separate those cases, which is why the definition is the key rather than the
--- moment of the read.
---
--- A query whose result set stays truncated never prunes and so never spends its arm. That
--- is inert while it lasts, since only a prune reads the flag; if the result set later
--- drops below the cap, the first walk that can prune is also the first to have validated
--- the cache against the new definition, so it is the walk the arm was for.
+-- The flag is set by `db::update_query` on a changed search string, and read, applied and
+-- cleared inside `db::prune_missing_items`' transaction. What it covers, why it is keyed
+-- to the search string rather than to the moment it is read, and why all three happen in
+-- one transaction, are `db::is_prune_armed`'s to state -- this file is applied history and
+-- nobody reopens it when that changes.
 --
 -- `missing_count` is left alone. Rows still sitting at 1 from an edit before this
 -- migration are indistinguishable from rows genuinely absent once, and the harmless
