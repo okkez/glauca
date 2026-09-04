@@ -1,10 +1,9 @@
-# knope drives releases for this git-only workspace.
+# knope drives releases for this unpublished workspace.
 #
 # release-plz could not be used: it runs `cargo package --workspace` to
-# determine versions, which fails here because glauca-gui depends on gpui (a git
-# dependency not on crates.io) and glauca-tui depends on the unpublished
-# glauca-core path crate. knope never runs cargo — it only edits the files below
-# and talks to the GitHub API.
+# determine versions, which fails here because glauca-tui and glauca-gui depend
+# on the unpublished glauca-core path crate. knope never runs cargo — it only
+# edits the files below and talks to the GitHub API.
 #
 # Flow: a conventional-commit merge to main makes knope open/update a "release"
 # PR (version bump + CHANGELOG). Merging that PR makes knope create the

@@ -5,9 +5,9 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 version = "0.2.2"
-# Not published to crates.io: the workspace depends on gpui via git, which
-# crates.io forbids. knope manages versions/changelog/releases only; see
-# knope.toml for why release-plz could not be used.
+# Not published to crates.io: these are applications, not libraries. knope
+# manages versions/changelog/releases only; see knope.toml for why release-plz
+# could not be used.
 publish = false
 
 [workspace.dependencies]
@@ -42,16 +42,16 @@ tempfile = "3.27.0"
 rstest = "0.26"
 glauca-core = { path = "crates/glauca-core" }
 smol = "2"
-# gpui GUI stack (pre-1.0, git-only). We track zed's default branch (same reference
-# gpui-component uses internally) so the whole graph resolves to ONE gpui. The exact
-# commit is pinned in Cargo.lock; bump it deliberately. Requires rustc >= 1.95
-# (see rust-toolchain.toml).
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-# Real HTTP client for the gpui App (remote avatar image loading). Same git
-# source as gpui so the whole graph resolves to ONE http_client/gpui rev.
-reqwest_client = { git = "https://github.com/zed-industries/zed" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "cda0fc7fd4e4809dd2a8bae0337ac43b49e9f675" }
+# gpui GUI stack (pre-1.0). zed publishes gpui to crates.io as gpui-pre, and
+# gpui-component 0.6 depends on that same crate, so the whole graph resolves to
+# ONE gpui without any git dependency. Requires rustc >= 1.95 (see
+# rust-toolchain.toml).
+gpui = { package = "gpui-pre", version = "0.3.3" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.3", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+# Real HTTP client for the gpui App (remote avatar image loading). Same gpui-pre
+# release train as gpui so the whole graph resolves to ONE http_client/gpui.
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "0.3.3" }
+gpui-component = "0.6.0"
 
 # Release builds: shrink binaries (the TUI is distributed as a gh extension
 # download) without giving up debuggability or CI time. Measured on linux
@@ -84,15 +84,3 @@ panic = "abort"
 # own crates still rebuild quickly.
 [profile.dev.package."*"]
 opt-level = 3
-
-# gpui-component patches psm for stacker; mirror it since [patch] does not propagate
-# from a git dependency's own workspace.
-[patch.crates-io]
-psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
-# zed patches async-process to a fork that adds Child::adopt_raw_pid, used by
-# util/src/command/darwin.rs (macOS only). [patch] does not propagate from zed's
-# own workspace, so without mirroring it the aarch64-apple-darwin glauca-gui build
-# fails with E0599. async-task is the other patch zed applies; mirror both so the
-# dependency graph resolves identically to zed's.
-async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
-async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }

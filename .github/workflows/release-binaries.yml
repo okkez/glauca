@@ -17,8 +17,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
-  # Fetch git dependencies (e.g. gpui) via the git CLI for more reliable fetches.
-  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
   upload:

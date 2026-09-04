@@ -54,8 +54,8 @@ The GitHub client uses `octocrab` plus GraphQL search; the cache uses `sqlx` wit
 - For the **Tauri app**: the Tauri CLI (`cargo install tauri-cli`) and a system WebView
   (WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows). No Node toolchain is needed.
 
-> Note: the GUI depends on `gpui` crates pulled directly from git, so the first build downloads
-> and compiles them.
+> Note: the GUI pulls in the whole `gpui` stack, so the first build downloads and compiles a
+> large dependency tree.
 
 ## Installation
 
