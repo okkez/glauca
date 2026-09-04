@@ -26,12 +26,18 @@
       matchCurrentVersion: "<1.0.0",
       groupName: "cargo minor/patch",
     },
+    {
+      // gpui スタックは lockstep でしか上げられない。gpui-component は特定の
+      // gpui-pre に依存しており、片方だけ上がると API が合わずコンパイルできない。
+      // 1 PR にまとめる。後方のルールが優先されるので minor/patch グループより後。
+      matchManagers: ["cargo"],
+      matchPackageNames: ["gpui-pre", "/^gpui-pre-/", "gpui-component"],
+      groupName: "gpui stack",
+    },
   ],
   lockFileMaintenance: {
-    // `cargo update` を回し、ブランチ追従の git 依存（gpui/zed 系・psm master）を
-    // Cargo.lock ごと追従する。GUI(gpui)系を頻繁に上げないよう、頻度は月次に下げる。
-    // 注: rev ピンの git 依存（gpui-component / async-process / async-task）は
-    // Renovate でも自動更新されない。これらは従来どおり手動で bump する。
+    // `cargo update` を回して semver 範囲内の推移的依存を Cargo.lock ごと更新する。
+    // git 依存が無くなったので、これは純粋に lock の鮮度維持。
     enabled: true,
     schedule: ["before 9am on the first day of the month"],
   },
