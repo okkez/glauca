@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.2.2"
+version = "0.3.0"
 # Not published to crates.io: these are applications, not libraries. knope
 # manages versions/changelog/releases only; see knope.toml for why release-plz
 # could not be used.

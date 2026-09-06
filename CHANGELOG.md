@@ -1,3 +1,48 @@
+## 0.3.0 (2026-09-06)
+
+### Breaking Changes
+
+- Forced major bump via the bump:major label.
+
+### Features
+
+- log whether a sync pruned, and what it observed ([#65](https://github.com/okkez/glauca/pull/65) by @okkez)
+- carry an actor kind on UserRef so teams can be told from users ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- keep the reviewer's type and fetch team avatars ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- match team-review-requested against teams only ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- show requested review teams with their own glyph ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- render review teams as rounded squares, as GitHub does ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- add people octicon for team avatars ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- render review teams as rounded squares, as GitHub does ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- warn when a filter's @me can't be expanded ([#73](https://github.com/okkez/glauca/pull/73) by @okkez)
+
+### Fixes
+
+- run the prune guard even when nothing was absent ([#65](https://github.com/okkez/glauca/pull/65) by @okkez)
+- log what the prune measurement needs to be readable ([#65](https://github.com/okkez/glauca/pull/65) by @okkez)
+- make .avatar-team override deterministic regardless of order ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- round team avatar image, not just its clipping frame ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- salvage well-formed reviewers around an unrecognised kind ([#67](https://github.com/okkez/glauca/pull/67) by @okkez)
+- keep retrying the current-user lookup so @me expands mid-session ([#73](https://github.com/okkez/glauca/pull/73) by @okkez)
+- address review findings on the @me resolution path ([#73](https://github.com/okkez/glauca/pull/73) by @okkez)
+- refuse mark-all-read on an unexpanded @me, and shorten the retry ceiling ([#73](https://github.com/okkez/glauca/pull/73) by @okkez)
+- keep a reordered left pane reordered across launches ([#74](https://github.com/okkez/glauca/pull/74) by @okkez)
+- backfill the positions of rows saved without one ([#74](https://github.com/okkez/glauca/pull/74) by @okkez)
+- take the write lock up front when reordering, and never confirm a reorder that did not happen ([#74](https://github.com/okkez/glauca/pull/74) by @okkez)
+- tell the user when a reorder failed, and pin what the backfill promises ([#74](https://github.com/okkez/glauca/pull/74) by @okkez)
+- check the schema before any pragma touches the file ([#76](https://github.com/okkez/glauca/pull/76) by @okkez)
+- refuse a reorder whose pair is no longer adjacent ([#76](https://github.com/okkez/glauca/pull/76) by @okkez)
+- let the DB own the left-pane order ([#76](https://github.com/okkez/glauca/pull/76) by @okkez)
+- reload the left pane on every reorder outcome, not just success ([#76](https://github.com/okkez/glauca/pull/76) by @okkez)
+- serialize left-pane reorders through a dedicated worker ([#76](https://github.com/okkez/glauca/pull/76) by @okkez)
+- reselect after a reorder deletes the active entry, gate reorder input on the round trip ([#76](https://github.com/okkez/glauca/pull/76) by @okkez)
+- unlatch the reorder gate on every silent-drop path ([#76](https://github.com/okkez/glauca/pull/76) by @okkez)
+- stop stale reorder replies from reopening a newer gate ([#76](https://github.com/okkez/glauca/pull/76) by @okkez)
+- stop firing a foreground sync on reorder re-select ([#76](https://github.com/okkez/glauca/pull/76) by @okkez)
+- report why a GitHub call failed instead of a backtrace ([#80](https://github.com/okkez/glauca/pull/80) by @okkez)
+- arm prune on the query row instead of every item ([#81](https://github.com/okkez/glauca/pull/81) by @okkez)
+- key the prune arm to the definition it was set for ([#81](https://github.com/okkez/glauca/pull/81) by @okkez)
+
 ## 0.2.2 (2026-07-31)
 
 ### Features
