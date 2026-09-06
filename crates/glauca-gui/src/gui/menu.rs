@@ -1,7 +1,6 @@
 //! Context/action menu: building the anchored `PopupMenu` for items and
 //! left-pane entries, and dispatching the chosen `ItemAction`.
 
-use gpui::*;
 use gpui_component::menu::PopupMenu;
 
 use glauca_core::actions::CustomAction;

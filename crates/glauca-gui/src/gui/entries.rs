@@ -1,12 +1,9 @@
 //! Left-pane entry operations: delete, reorder, mark-all-read, the item
 //! filter recompute, and the select/resync flow when the current entry changes.
 
-use gpui::*;
-
 use glauca_core::engine::EngineCommand;
 use glauca_core::filter::{FilterQuery, StreamFilter};
 use glauca_core::logic::*;
-use glauca_core::types::*;
 
 use super::*;
 

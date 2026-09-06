@@ -1,10 +1,7 @@
 //! Navigation and focus: engine-command send helpers, selection/preview, and
 //! the j/k/h/l/enter/`/`/Esc key handlers that move between panes and rows.
 
-use gpui::*;
-
 use glauca_core::engine::EngineCommand;
-use glauca_core::types::*;
 
 use super::*;
 

@@ -2,13 +2,11 @@
 //! `Render` impl that wires key actions and mounts the overlay/menu/dialog layers.
 
 use gpui::prelude::FluentBuilder as _;
-use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::DropdownMenu;
 use gpui_component::{ActiveTheme, Root, Sizable, StyledExt, h_flex, v_flex};
 
 use glauca_core::logic::*;
-use glauca_core::types::*;
 
 use super::*;
 

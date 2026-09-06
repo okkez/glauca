@@ -5,7 +5,6 @@ use anyhow::Result;
 use glauca_core::db;
 use glauca_core::engine::{Engine, MaintenanceConfig, SyncConfig};
 use glauca_core::github;
-use gpui::*;
 use gpui_component::Root;
 use std::path::PathBuf;
 

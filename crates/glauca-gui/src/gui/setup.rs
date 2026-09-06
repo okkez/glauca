@@ -2,7 +2,6 @@
 //! delivery loop, filter-input subscription, settings restore) and the theme /
 //! settings-save / notification-toggle handlers.
 
-use gpui::*;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::resizable::ResizableState;
 use gpui_component::text::TextViewState;
