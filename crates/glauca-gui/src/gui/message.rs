@@ -1,11 +1,8 @@
 //! Engine-message handling: the `AppMessage` dispatcher and the view-state
 //! synchronization it drives (pending items, unread counts, read marking).
 
-use gpui::*;
-
 use glauca_core::engine::AppMessage;
 use glauca_core::logic::*;
-use glauca_core::types::*;
 
 use super::*;
 

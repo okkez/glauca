@@ -1,7 +1,6 @@
 //! Modal dialogs: GitHub action prompts (comment / review / merge) plus the
 //! About and Shortcuts info dialogs.
 
-use gpui::*;
 use gpui_component::input::{Textarea, TextareaState};
 use gpui_component::radio::RadioGroup;
 

@@ -1,11 +1,8 @@
 //! Item actions: open in browser, copy URL, run a custom action, and the
 //! manual refresh of the current list/item.
 
-use gpui::*;
-
 use glauca_core::actions::CustomAction;
 use glauca_core::engine::EngineCommand;
-use glauca_core::types::*;
 
 use super::*;
 

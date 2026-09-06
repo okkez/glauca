@@ -1,7 +1,6 @@
 //! Detail pane and comments-overlay rendering (the two largest read views).
 
 use gpui::prelude::FluentBuilder as _;
-use gpui::*;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::{TextView, markdown};
 use gpui_component::tooltip::Tooltip;

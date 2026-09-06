@@ -1,10 +1,7 @@
 //! Add/edit dialogs for saved queries and filter streams: the shared
 //! two-field form and the query/filter-stream specific entry points.
 
-use gpui::*;
-
 use glauca_core::engine::EngineCommand;
-use glauca_core::types::*;
 
 use super::*;
 

@@ -1,10 +1,6 @@
 //! Comments overlay: open/close and the single-key controls active while the overlay is
 //! focused. `on_quit` lives here too, since it exits from the same key surface.
 
-use gpui::*;
-
-use glauca_core::types::*;
-
 use super::*;
 
 impl GlaucaApp {
