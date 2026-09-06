@@ -3133,7 +3133,7 @@ dependencies = [
 
 [[package]]
 name = "glauca-core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3155,7 +3155,7 @@ dependencies = [
 
 [[package]]
 name = "glauca-gui"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3176,7 +3176,7 @@ dependencies = [
 
 [[package]]
 name = "glauca-tauri"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "glauca-tui"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
