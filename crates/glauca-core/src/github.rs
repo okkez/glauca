@@ -289,8 +289,8 @@ fn is_rate_limit_response(status: u16, message: &str) -> bool {
 /// Summarize an octocrab error in one line, for logs and the UI.
 ///
 /// Every `octocrab::Error` variant carries a backtrace that snafu captures whether or
-/// not `RUST_BACKTRACE` is set, and octocrab's own `Display` interpolates it — so
-/// formatting one costs ~40 lines of tokio frames per failure and buries the cause.
+/// not `RUST_BACKTRACE` is set, and some variants' `Display` (`Graphql`, `Installation`)
+/// interpolate it — so formatting one costs ~40 lines of tokio frames and buries the cause.
 /// Nothing here may reach for `{e}`: the arms pull out the parts worth reading, and the
 /// fallback drops to the source, which is never itself an `octocrab::Error`.
 fn describe_octocrab_error(e: &octocrab::Error) -> String {
@@ -1153,12 +1153,15 @@ mod tests {
         }
     }
 
-    // Why `describe_octocrab_error` exists at all: octocrab 0.44 interpolates the
-    // backtrace into `Display`. If a future octocrab stops doing this, the helper's
-    // arms become dead weight and this test is what says so.
+    // Why `describe_octocrab_error` must never fall back to `{e}`: some variants still
+    // interpolate the backtrace into `Display`. If a future octocrab stops doing this
+    // for all of them, the rule can go and this test is what says so.
     #[test]
     fn octocrab_still_puts_its_backtrace_in_display() {
-        let rendered = transport_error("client error (Connect)").to_string();
+        let rendered = octocrab::Error::Installation {
+            backtrace: std::backtrace::Backtrace::disabled(),
+        }
+        .to_string();
 
         assert!(
             rendered.contains("Found at"),
