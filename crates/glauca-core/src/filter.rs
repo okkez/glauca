@@ -8,8 +8,9 @@ use std::collections::HashMap;
 /// Shared frizbee config for plain-text token matching.
 ///
 /// `max_typos: 0` keeps matching to a strict subsequence (fzf-style, no typo
-/// tolerance). frizbee matches case-insensitively by default (case only
-/// influences scoring, which we ignore). `SortStrategy::IndexAsc` keeps the
+/// tolerance). frizbee defaults to smart case (a needle with an uppercase letter
+/// matches case-sensitively); matching stays case-insensitive only because
+/// `FilterQuery::parse` lowercases every token first. `SortStrategy::IndexAsc` keeps the
 /// input order and skips the score sort — callers only ask whether anything
 /// matched, or union the indices, so result order is unused.
 fn fuzzy_config() -> Config {
