@@ -13,27 +13,33 @@ use glauca_core::types::{ActorKind, ItemEntry, UserRef};
 /// theme, which is near-black. Only the fields the app reads via `cx.theme()` are
 /// overridden. Must run *after* the theme switches to dark: `Theme::change` /
 /// `apply_config` rebuild `colors` from the base config and would discard these.
+///
+/// Write through `Theme::update`, not `Theme::global_mut`: TextView's link and
+/// inline-code colors and the scrollbar/resize-handle colors are copied out of the
+/// theme when it syncs, so a bare `global_mut` edit never reaches them.
 pub(crate) fn apply_github_dark_overlay(cx: &mut App) {
-    let c = &mut Theme::global_mut(cx).colors;
-    c.background = rgb(0x0d1117).into(); // canvas.default
-    c.foreground = rgb(0xe6edf3).into(); // fg.default
-    c.border = rgb(0x30363d).into(); // border.default
-    c.sidebar = rgb(0x161b22).into(); // canvas.subtle (left pane)
-    c.sidebar_foreground = rgb(0xe6edf3).into();
-    // `accent` is gpui-component's inline-code background and our unread row tint. A
-    // bright blue there is hard to read, so use a neutral grey — links and the
-    // filter-match highlight use `link` instead so they stay blue.
-    c.accent = rgb(0x373e47).into();
-    c.accent_foreground = rgb(0xe6edf3).into();
-    c.link = rgb(0x2f81f7).into(); // accent.fg — links + filter-match highlight
-    c.primary = rgb(0x2f81f7).into();
-    c.muted_foreground = rgb(0x8b949e).into(); // fg.muted
-    c.list_active = rgb(0x21262d).into(); // selected row
-    c.list_hover = rgb(0x161b22).into(); // hovered row
-    c.green = rgb(0x3fb950).into(); // success (open)
-    c.red = rgb(0xf85149).into(); // danger (closed)
-    c.magenta = rgb(0xa371f7).into(); // done/purple (merged)
-    c.yellow = rgb(0xd29922).into(); // attention (pending review)
+    Theme::update(cx, |theme| {
+        let c = &mut theme.colors;
+        c.background = rgb(0x0d1117).into(); // canvas.default
+        c.foreground = rgb(0xe6edf3).into(); // fg.default
+        c.border = rgb(0x30363d).into(); // border.default
+        c.sidebar = rgb(0x161b22).into(); // canvas.subtle (left pane)
+        c.sidebar_foreground = rgb(0xe6edf3).into();
+        // `accent` is gpui-component's inline-code background and our unread row tint. A
+        // bright blue there is hard to read, so use a neutral grey — links and the
+        // filter-match highlight use `link` instead so they stay blue.
+        c.accent = rgb(0x373e47).into();
+        c.accent_foreground = rgb(0xe6edf3).into();
+        c.link = rgb(0x2f81f7).into(); // accent.fg — links + filter-match highlight
+        c.primary = rgb(0x2f81f7).into();
+        c.muted_foreground = rgb(0x8b949e).into(); // fg.muted
+        c.list_active = rgb(0x21262d).into(); // selected row
+        c.list_hover = rgb(0x161b22).into(); // hovered row
+        c.green = rgb(0x3fb950).into(); // success (open)
+        c.red = rgb(0xf85149).into(); // danger (closed)
+        c.magenta = rgb(0xa371f7).into(); // done/purple (merged)
+        c.yellow = rgb(0xd29922).into(); // attention (pending review)
+    });
 }
 
 /// A `label: value` row in the detail pane.
