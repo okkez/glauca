@@ -4,7 +4,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::DropdownMenu;
-use gpui_component::{ActiveTheme, Root, Sizable, StyledExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Sizable, StyledExt, h_flex, v_flex};
 
 use glauca_core::logic::*;
 
@@ -759,12 +759,5 @@ impl Render for GlaucaApp {
                     .with_priority(1),
                 )
             })
-            // gpui-component stores open dialogs/sheets/notifications in `Root`, but
-            // `Root`'s own render does NOT paint them — the inner view must mount the
-            // overlay layers (see examples/dialog_overlay). Without these, every
-            // `open_dialog` is invisible.
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_sheet_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
     }
 }
