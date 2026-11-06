@@ -1,3 +1,10 @@
+## 0.3.1 (2026-11-06)
+
+### Fixes
+
+- stop mounting overlay layers that gpui-component 0.9 now owns ([#85](https://github.com/okkez/glauca/pull/85) by @renovate[bot])
+- apply the GitHub dark palette through Theme::update ([#96](https://github.com/okkez/glauca/pull/96) by @okkez)
+
 ## 0.3.0 (2026-09-06)
 
 ### Breaking Changes
