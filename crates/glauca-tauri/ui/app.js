@@ -1077,7 +1077,7 @@ function renderDetail(it) {
 
   if ((it.labels || []).length) header.appendChild(textField("labels", it.labels.join(", ")));
   if (it.base_ref && it.head_ref) {
-    const behind = it.behind_by > 0 ? `  ·  ${behindBaseLabel(it.behind_by)}` : "";
+    const behind = isBehind(it) ? `  ·  ${behindBaseLabel(it.behind_by)}` : "";
     header.appendChild(textField("branch", `${it.head_ref} → ${it.base_ref}${behind}`));
   }
   const assignees = it.assignees || [];
@@ -1118,6 +1118,12 @@ function renderDetail(it) {
       ? el("div", { class: "body", text: it.body })
       : el("div", { class: "body-empty", text: "(no description)" })
   );
+}
+
+// Mirrors ItemEntry::behind_by_commits: behind_by outlives a merge (search syncs
+// keep it), so only an open PR counts as behind.
+function isBehind(it) {
+  return it.state === "open" && it.behind_by > 0;
 }
 
 // Same wording as glauca_core::types::behind_base_label / update_branch_prompt.
@@ -1172,7 +1178,7 @@ function itemActions(it) {
       },
     });
     acts.push({
-      label: it.behind_by > 0 ? "Update branch (behind)" : "Update branch",
+      label: isBehind(it) ? "Update branch (behind)" : "Update branch",
       run: () => call("update_branch", { target: prTarget(entry, it) }),
     });
     acts.push({

@@ -168,8 +168,13 @@ impl ItemEntry {
         format!("{}/{}", self.repo_owner, self.repo_name)
     }
 
-    /// How many commits the PR is behind its base, when it is behind at all.
+    /// How many commits the PR is behind its base, when it is open and behind at all.
+    /// `behind_by` survives search syncs, so the state check is what stops a PR merged
+    /// since its last refresh from still reading as behind.
     pub fn behind_by_commits(&self) -> Option<i64> {
+        if self.state != "open" {
+            return None;
+        }
         self.behind_by.filter(|n| *n > 0)
     }
 }
@@ -346,7 +351,23 @@ mod tests {
     #[case(None, None)]
     fn behind_by_commits_cases(#[case] v: Option<i64>, #[case] expected: Option<i64>) {
         let item = ItemEntry {
+            state: "open".into(),
             behind_by: v,
+            ..Default::default()
+        };
+        assert_eq!(item.behind_by_commits(), expected);
+    }
+
+    // A search sync updates `state` but keeps `behind_by` from the last refresh, so a
+    // PR merged since then must not keep advertising that it is behind.
+    #[rstest]
+    #[case("open", Some(2))]
+    #[case("merged", None)]
+    #[case("closed", None)]
+    fn behind_by_commits_only_for_open_items(#[case] state: &str, #[case] expected: Option<i64>) {
+        let item = ItemEntry {
+            state: state.into(),
+            behind_by: Some(2),
             ..Default::default()
         };
         assert_eq!(item.behind_by_commits(), expected);
@@ -380,10 +401,12 @@ mod tests {
     #[test]
     fn label_for_marks_behind() {
         let behind = ItemEntry {
+            state: "open".into(),
             behind_by: Some(2),
             ..Default::default()
         };
         let up_to_date = ItemEntry {
+            state: "open".into(),
             behind_by: Some(0),
             ..Default::default()
         };
