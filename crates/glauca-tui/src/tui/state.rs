@@ -113,6 +113,7 @@ impl App {
             merge_strategy_cursor: 0,
             review_event_cursor: 0,
             review_body: None,
+            pending_update_branch: None,
             comments: Vec::new(),
             comments_loading: false,
             comments_scroll: 0,
@@ -212,6 +213,31 @@ impl App {
     /// Returns the root query id for the currently selected entry.
     pub fn selected_root_query_id(&self) -> Option<i64> {
         self.selected_entry().map(|e| e.root_query_id())
+    }
+
+    /// A merge was held back because the PR is behind its base. Prompt for Update branch,
+    /// unless the user is mid-input somewhere else: hijacking that mode would throw away
+    /// what they were typing, so just point them at the action instead.
+    pub(crate) fn on_merge_blocked_behind(
+        &mut self,
+        target: glauca_core::types::PrTarget,
+        base_ref: Option<String>,
+    ) {
+        if self.input_mode == InputMode::Normal {
+            self.pending_update_branch = Some((target, base_ref));
+            self.input_mode = InputMode::ConfirmUpdateBranch;
+        } else {
+            self.status = Some(format!(
+                "#{} is behind {} — use Update branch",
+                target.number,
+                base_ref.as_deref().unwrap_or("base")
+            ));
+        }
+    }
+
+    /// The PR the update-branch prompt was about, consuming it.
+    pub(crate) fn take_update_branch_target(&mut self) -> Option<glauca_core::types::PrTarget> {
+        self.pending_update_branch.take().map(|(target, _)| target)
     }
 
     /// The selected item as a PR action target, tagged with the query it belongs to.
@@ -323,6 +349,46 @@ mod tests {
     use crate::tui::test_support::*;
     use glauca_core::types::FilterStreamEntry;
     use rstest::rstest;
+
+    fn target(number: i64) -> glauca_core::types::PrTarget {
+        glauca_core::types::PrTarget {
+            query_id: 1,
+            repo_owner: "owner".into(),
+            repo_name: "repo".into(),
+            number,
+            url: format!("https://github.com/owner/repo/pull/{number}"),
+        }
+    }
+
+    #[test]
+    fn blocked_behind_in_normal_mode_opens_confirm() {
+        let mut app = make_app_with_items(&["First"]);
+        app.on_merge_blocked_behind(target(42), Some("master".into()));
+        assert_eq!(app.input_mode, InputMode::ConfirmUpdateBranch);
+        assert_eq!(app.pending_update_branch.as_ref().unwrap().0.number, 42);
+    }
+
+    #[test]
+    fn blocked_behind_while_in_other_mode_only_sets_status() {
+        let mut app = make_app_with_items(&["First"]);
+        app.input_mode = InputMode::Filter;
+        app.on_merge_blocked_behind(target(42), Some("master".into()));
+        assert_eq!(app.input_mode, InputMode::Filter);
+        assert!(app.pending_update_branch.is_none());
+        assert_eq!(
+            app.status.as_deref(),
+            Some("#42 is behind master — use Update branch")
+        );
+    }
+
+    #[test]
+    fn confirm_uses_target_from_message() {
+        // The selection moved to #1 while the prompt for #42 was up.
+        let mut app = make_app_with_items(&["First"]);
+        app.on_merge_blocked_behind(target(42), None);
+        assert_eq!(app.take_update_branch_target().map(|t| t.number), Some(42));
+        assert!(app.pending_update_branch.is_none());
+    }
 
     #[test]
     fn clamp_item_cursor_when_filter_reduces_list() {

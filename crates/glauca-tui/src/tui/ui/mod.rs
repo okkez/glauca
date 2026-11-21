@@ -33,7 +33,7 @@ use detail::draw_item_detail;
 use markdown::render_markdown;
 use modals::{
     draw_action_popup, draw_custom_action_popup, draw_help_popup, draw_merge_menu_popup,
-    draw_modal, draw_review_menu_popup,
+    draw_modal, draw_review_menu_popup, draw_update_branch_confirm_popup,
 };
 use panes::{draw_item_list, draw_query_list};
 use text::{highlight_spans, wrap_spans};
@@ -81,6 +81,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_comments_popup(f, app, area);
     } else if app.input_mode == InputMode::Help {
         draw_help_popup(f, area);
+    } else if app.input_mode == InputMode::ConfirmUpdateBranch {
+        draw_update_branch_confirm_popup(f, app, area);
     }
 }
 
@@ -164,6 +166,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::ReviewMenu => "REVIEW   j/k:move  Enter:submit  Esc:cancel".to_string(),
         InputMode::CommentsPopup => "COMMENTS  j/k:scroll  g/G:top/bottom  Esc/q:close".to_string(),
         InputMode::Help => "HELP     Esc/?/q:close".to_string(),
+        InputMode::ConfirmUpdateBranch => "CONFIRM  y:update  n/Esc:cancel".to_string(),
     };
 
     // Assemble only the segments that apply, in fixed order, then join, rather than

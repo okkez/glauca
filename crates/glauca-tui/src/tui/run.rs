@@ -403,9 +403,23 @@ where
                                         }
                                         ItemAction::UpdateBranch => {
                                             app.input_mode = InputMode::Normal;
+                                            if let Some(target) = app.selected_pr_target() {
+                                                app.status = Some(format!(
+                                                    "Updating branch of #{}…",
+                                                    target.number
+                                                ));
+                                                engine.send(EngineCommand::UpdateBranch { target }).await;
+                                            }
                                         }
                                     }
                                 }
+                            }
+                        }
+                        Action::ConfirmUpdateBranch => {
+                            app.input_mode = InputMode::Normal;
+                            if let Some(target) = app.take_update_branch_target() {
+                                app.status = Some(format!("Updating branch of #{}…", target.number));
+                                engine.send(EngineCommand::UpdateBranch { target }).await;
                             }
                         }
                         Action::ConfirmMergeStrategy => {

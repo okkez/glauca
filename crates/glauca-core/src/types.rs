@@ -273,6 +273,20 @@ impl PrTarget {
     }
 }
 
+/// Detail-pane badge text for a PR `n` (≥ 1) commits behind its base.
+pub fn behind_base_label(n: i64) -> String {
+    let unit = if n == 1 { "commit" } else { "commits" };
+    format!("Behind base ({n} {unit})")
+}
+
+/// Confirmation shown when a merge was held back because the PR is behind `base`.
+pub fn update_branch_prompt(number: i64, base: Option<&str>) -> String {
+    format!(
+        "#{number} is behind {}. Update branch now?",
+        base.unwrap_or("base")
+    )
+}
+
 /// What to do when the user asks to merge, given the PR's freshly fetched
 /// `mergeStateStatus`.
 #[derive(Debug, PartialEq, Eq)]
@@ -336,6 +350,20 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(item.behind_by_commits(), expected);
+    }
+
+    #[rstest]
+    #[case(1, "Behind base (1 commit)")]
+    #[case(2, "Behind base (2 commits)")]
+    fn behind_base_label_cases(#[case] n: i64, #[case] expected: &str) {
+        assert_eq!(behind_base_label(n), expected);
+    }
+
+    #[rstest]
+    #[case(Some("master"), "#42 is behind master. Update branch now?")]
+    #[case(None, "#42 is behind base. Update branch now?")]
+    fn update_branch_prompt_cases(#[case] base: Option<&str>, #[case] expected: &str) {
+        assert_eq!(update_branch_prompt(42, base), expected);
     }
 
     #[test]

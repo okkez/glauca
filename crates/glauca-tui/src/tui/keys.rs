@@ -21,7 +21,21 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         InputMode::ReviewMenu => handle_key_review_menu(app, key),
         InputMode::CommentsPopup => handle_key_comments_popup(app, key),
         InputMode::Help => handle_key_help(app, key),
+        InputMode::ConfirmUpdateBranch => handle_key_confirm_update_branch(app, key),
         InputMode::Normal => handle_key_normal(app, key),
+    }
+}
+
+/// `y` confirms (the run loop sends the update); `n` / Esc drop the prompt.
+fn handle_key_confirm_update_branch(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('y') => Action::ConfirmUpdateBranch,
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.pending_update_branch = None;
+            app.input_mode = InputMode::Normal;
+            Action::None
+        }
+        _ => Action::None,
     }
 }
 
@@ -549,6 +563,39 @@ fn handle_key_filter_stream_modal(app: &mut App, key: KeyEvent, save: Action) ->
 mod tests {
     use super::*;
     use crate::tui::test_support::*;
+
+    #[rstest::rstest]
+    #[case(KeyCode::Char('y'), true)]
+    #[case(KeyCode::Char('n'), false)]
+    #[case(KeyCode::Esc, false)]
+    fn confirm_update_branch_keys(#[case] code: KeyCode, #[case] confirms: bool) {
+        let mut app = make_app_with_items(&["First"]);
+        app.on_merge_blocked_behind(
+            glauca_core::types::PrTarget::for_item(1, &app.items[0].clone()),
+            None,
+        );
+        let action = handle_key(&mut app, make_key(code));
+        if confirms {
+            assert!(matches!(action, Action::ConfirmUpdateBranch));
+        } else {
+            assert!(matches!(action, Action::None));
+            assert_eq!(app.input_mode, InputMode::Normal);
+            assert!(app.pending_update_branch.is_none());
+        }
+    }
+
+    #[test]
+    fn confirm_update_branch_ignores_other_keys() {
+        let mut app = make_app_with_items(&["First"]);
+        app.on_merge_blocked_behind(
+            glauca_core::types::PrTarget::for_item(1, &app.items[0].clone()),
+            None,
+        );
+        let action = handle_key(&mut app, make_key(KeyCode::Char('x')));
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.input_mode, InputMode::ConfirmUpdateBranch);
+        assert!(app.pending_update_branch.is_some());
+    }
 
     #[test]
     fn tab_cycles_focus_forward() {
