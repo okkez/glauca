@@ -1116,6 +1116,12 @@ function renderDetail(it) {
   );
 }
 
+// A PR as the engine's PrTarget: enough to act on it and re-fetch it into
+// `entry`'s query. Field names are the Rust struct's (snake_case).
+function prTarget(entry, it) {
+  return { query_id: entry.rootQueryId, repo_owner: it.repo_owner, repo_name: it.repo_name, number: it.number, url: it.url };
+}
+
 // The actions applicable to `it`, shared by the detail-pane buttons and the
 // item action menu (Enter / right-click). Mirrors ItemAction::available_for.
 function itemActions(it) {
@@ -1157,7 +1163,7 @@ function itemActions(it) {
       label: "Merge",
       run: async () => {
         const s = ((await promptModal("Merge strategy (squash / merge / rebase):", "squash")) || "").trim();
-        if (["squash", "merge", "rebase"].includes(s)) call("merge", { url: it.url, strategy: s });
+        if (["squash", "merge", "rebase"].includes(s)) call("merge", { target: prTarget(entry, it), strategy: s });
       },
     });
   }

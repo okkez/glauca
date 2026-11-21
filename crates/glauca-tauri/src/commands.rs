@@ -16,7 +16,7 @@ use glauca_core::logic::{
     ChangeCounts, ME_UNEXPANDED_WARNING, compute_unread_counts, count_changes, expand_me,
     has_unexpanded_me,
 };
-use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy};
+use glauca_core::types::{ItemEntry, LeftPaneEntry, MergeStrategy, PrTarget};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::State;
@@ -565,10 +565,10 @@ pub async fn submit_review(
 #[tauri::command]
 pub async fn merge(
     state: State<'_, AppState>,
-    url: String,
+    target: PrTarget,
     strategy: MergeStrategy,
 ) -> Result<(), String> {
-    dispatch(&state.tx, EngineCommand::Merge { url, strategy }).await
+    dispatch(&state.tx, EngineCommand::Merge { target, strategy }).await
 }
 
 #[tauri::command]

@@ -181,10 +181,12 @@ impl GlaucaApp {
                                 window.close_dialog(cx);
                                 if let Some(app) = this.upgrade() {
                                     app.update(cx, |app, _| {
-                                        app.send(EngineCommand::Merge {
-                                            url: item.url.clone(),
-                                            strategy: strat,
-                                        })
+                                        if let Some(query_id) = app.selected_root_query_id() {
+                                            app.send(EngineCommand::Merge {
+                                                target: PrTarget::for_item(query_id, &item),
+                                                strategy: strat,
+                                            })
+                                        }
                                     });
                                 }
                             },

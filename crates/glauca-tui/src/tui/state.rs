@@ -214,6 +214,13 @@ impl App {
         self.selected_entry().map(|e| e.root_query_id())
     }
 
+    /// The selected item as a PR action target, tagged with the query it belongs to.
+    pub fn selected_pr_target(&self) -> Option<glauca_core::types::PrTarget> {
+        let item = self.selected_item()?;
+        let query_id = self.selected_root_query_id()?;
+        Some(glauca_core::types::PrTarget::for_item(query_id, item))
+    }
+
     pub(crate) fn clamp_item_cursor(&mut self) {
         let max = self.filtered_items().len().saturating_sub(1);
         if self.item_cursor > max {

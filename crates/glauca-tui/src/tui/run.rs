@@ -409,16 +409,11 @@ where
                             }
                         }
                         Action::ConfirmMergeStrategy => {
-                            if let Some(item) = app.selected_item().cloned() {
+                            if let Some(target) = app.selected_pr_target() {
                                 let strategies = MergeStrategy::all();
                                 if let Some(strategy) = strategies.get(app.merge_strategy_cursor).cloned() {
                                     app.input_mode = InputMode::Normal;
-                                    engine
-                                        .send(EngineCommand::Merge {
-                                            url: item.url.clone(),
-                                            strategy,
-                                        })
-                                        .await;
+                                    engine.send(EngineCommand::Merge { target, strategy }).await;
                                 }
                             }
                         }

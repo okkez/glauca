@@ -341,6 +341,7 @@ impl GlaucaApp {
                 }
                 needs_refilter = true;
             }
+            AppMessage::MergeBlockedBehind { .. } => {}
         }
         if needs_refilter {
             self.recompute_filtered();
