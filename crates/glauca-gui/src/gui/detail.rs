@@ -127,7 +127,16 @@ impl GlaucaApp {
             })
             .when_some(
                 item.base_ref.as_ref().zip(item.head_ref.as_ref()),
-                |e, (base, head)| e.child(detail_field("branch", &format!("{head} → {base}"), cx)),
+                |e, (base, head)| {
+                    let mut branch = format!("{head} → {base}");
+                    if let Some(n) = item.behind_by_commits() {
+                        branch.push_str(&format!(
+                            "  ·  {}",
+                            glauca_core::types::behind_base_label(n)
+                        ));
+                    }
+                    e.child(detail_field("branch", &branch, cx))
+                },
             )
             .when(!item.assignees.is_empty(), |e| {
                 e.child(detail_people_field(

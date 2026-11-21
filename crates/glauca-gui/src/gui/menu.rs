@@ -70,7 +70,15 @@ impl GlaucaApp {
             // octorus is a terminal TUI launched only from the CLI front-end; it
             // is never offered in the GUI menu, so this arm is unreachable.
             ItemAction::ReviewOctorus => {}
-            ItemAction::UpdateBranch => {}
+            ItemAction::UpdateBranch => {
+                if let Some(query_id) = self.selected_root_query_id() {
+                    let number = item.number;
+                    self.send(EngineCommand::UpdateBranch {
+                        target: glauca_core::types::PrTarget::for_item(query_id, &item),
+                    });
+                    self.status = Some(format!("Updating branch of #{number}…"));
+                }
+            }
         }
     }
 }
@@ -108,7 +116,7 @@ pub(crate) fn populate_menu(
             let item = *item;
             for action in ItemAction::available_for(&item.kind) {
                 let item = item.clone();
-                let label = action.label().to_string();
+                let label = action.label_for(&item);
                 menu = app_menu_item(menu, app, label, move |this, window, cx| {
                     this.dispatch_action(action.clone(), item.clone(), window, cx);
                 });

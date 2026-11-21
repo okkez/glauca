@@ -341,7 +341,9 @@ impl GlaucaApp {
                 }
                 needs_refilter = true;
             }
-            AppMessage::MergeBlockedBehind { .. } => {}
+            AppMessage::MergeBlockedBehind { target, base_ref } => {
+                self.open_update_branch_dialog(target, base_ref, window, cx);
+            }
         }
         if needs_refilter {
             self.recompute_filtered();
