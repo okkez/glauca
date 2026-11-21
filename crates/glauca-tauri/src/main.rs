@@ -198,6 +198,7 @@ fn main() -> anyhow::Result<()> {
             commands::comment,
             commands::submit_review,
             commands::merge,
+            commands::update_branch,
             commands::mark_item_read,
             commands::mark_all_read,
             commands::list_custom_actions,

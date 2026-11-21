@@ -572,6 +572,11 @@ pub async fn merge(
 }
 
 #[tauri::command]
+pub async fn update_branch(state: State<'_, AppState>, target: PrTarget) -> Result<(), String> {
+    dispatch(&state.tx, EngineCommand::UpdateBranch { target }).await
+}
+
+#[tauri::command]
 pub async fn mark_item_read(
     state: State<'_, AppState>,
     query_id: i64,

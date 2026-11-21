@@ -458,15 +458,16 @@ function filterStreamModal(title, initName, initFilters) {
   });
 }
 
-// Yes/No confirmation modal. Resolves true if confirmed, false otherwise.
-function confirmModal(message) {
+// Yes/No confirmation modal. Resolves true if confirmed, false otherwise. The
+// confirm button defaults to a red "Delete" for the delete prompts.
+function confirmModal(message, { okText = "Delete", okClass = "danger" } = {}) {
   return new Promise((resolve) => {
     const overlay = el("div", { class: "modal-overlay" });
     const finish = (val) => {
       overlay.remove();
       resolve(val);
     };
-    const ok = el("button", { text: "Delete", class: "danger", onclick: () => finish(true) });
+    const ok = el("button", { text: okText, class: okClass, onclick: () => finish(true) });
     const cancel = el("button", { text: "Cancel", onclick: () => finish(false) });
     overlay.appendChild(
       el("div", { class: "modal-box" }, [
@@ -1075,7 +1076,10 @@ function renderDetail(it) {
   const reviewerChip = (o) => el("span", { class: "chip" }, [reviewerAvatar(o.user, o.state), el("span", { text: o.user.login })]);
 
   if ((it.labels || []).length) header.appendChild(textField("labels", it.labels.join(", ")));
-  if (it.base_ref && it.head_ref) header.appendChild(textField("branch", `${it.head_ref} → ${it.base_ref}`));
+  if (it.base_ref && it.head_ref) {
+    const behind = it.behind_by > 0 ? `  ·  ${behindBaseLabel(it.behind_by)}` : "";
+    header.appendChild(textField("branch", `${it.head_ref} → ${it.base_ref}${behind}`));
+  }
   const assignees = it.assignees || [];
   if (assignees.length)
     header.appendChild(field("assignees", el("span", { class: "field-chips" }, assignees.map(userChip))));
@@ -1114,6 +1118,14 @@ function renderDetail(it) {
       ? el("div", { class: "body", text: it.body })
       : el("div", { class: "body-empty", text: "(no description)" })
   );
+}
+
+// Same wording as glauca_core::types::behind_base_label / update_branch_prompt.
+function behindBaseLabel(n) {
+  return `Behind base (${n} ${n === 1 ? "commit" : "commits"})`;
+}
+function updateBranchPrompt(number, base) {
+  return `#${number} is behind ${base || "base"}. Update branch now?`;
 }
 
 // A PR as the engine's PrTarget: enough to act on it and re-fetch it into
@@ -1158,6 +1170,10 @@ function itemActions(it) {
         const text = await promptModal("Review comment:");
         if (text) call("submit_review", { url: it.url, event: "comment", body: text });
       },
+    });
+    acts.push({
+      label: it.behind_by > 0 ? "Update branch (behind)" : "Update branch",
+      run: () => call("update_branch", { target: prTarget(entry, it) }),
     });
     acts.push({
       label: "Merge",
@@ -1789,6 +1805,14 @@ function handleMessage(msg) {
       break;
     case "ActionDone":
       setStatus(d);
+      break;
+    case "MergeBlockedBehind":
+      // Act on the PR named in the message; the selection may have moved since.
+      confirmModal(updateBranchPrompt(d.target.number, d.base_ref), { okText: "Update branch", okClass: "" }).then(
+        (ok) => {
+          if (ok) call("update_branch", { target: d.target });
+        }
+      );
       break;
     case "ActionError":
       // Also the failure path for a reorder round trip (both the reorder and the
