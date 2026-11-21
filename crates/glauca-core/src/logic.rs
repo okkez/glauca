@@ -216,6 +216,8 @@ pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
         head_ref: c.head_ref,
         review_decision: c.review_decision,
         milestone: c.milestone,
+        merge_state_status: c.merge_state_status,
+        behind_by: c.behind_by,
         last_read_updated_at: c.last_read_updated_at,
         is_new,
     }

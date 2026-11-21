@@ -2128,6 +2128,8 @@ mod tests {
             head_ref: None,
             review_decision: None,
             milestone: None,
+            merge_state_status: None,
+            behind_by: None,
             last_read_updated_at: None,
         };
         db::upsert_item(pool, &item).await.expect("seed item");

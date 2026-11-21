@@ -152,6 +152,10 @@ pub struct ItemEntry {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
+    /// GitHub's `mergeStateStatus`; set only once the item has been re-fetched by number.
+    pub merge_state_status: Option<String>,
+    /// Commits the head is behind its base, as of the last by-number re-fetch.
+    pub behind_by: Option<i64>,
     /// The `updated_at` the user had seen when they last read this item. `None` means
     /// never read; the item is unread iff `updated_at` is newer — `logic::is_item_unread`.
     pub last_read_updated_at: Option<String>,
@@ -162,6 +166,11 @@ impl ItemEntry {
     /// The canonical `"owner/name"` repository string used across the UI and filters.
     pub fn repo_display(&self) -> String {
         format!("{}/{}", self.repo_owner, self.repo_name)
+    }
+
+    /// How many commits the PR is behind its base, when it is behind at all.
+    pub fn behind_by_commits(&self) -> Option<i64> {
+        self.behind_by.filter(|n| *n > 0)
     }
 }
 
@@ -254,5 +263,24 @@ impl MergeStrategy {
             Self::Merge => "--merge",
             Self::Rebase => "--rebase",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(Some(2), Some(2))]
+    #[case(Some(1), Some(1))]
+    #[case(Some(0), None)]
+    #[case(None, None)]
+    fn behind_by_commits_cases(#[case] v: Option<i64>, #[case] expected: Option<i64>) {
+        let item = ItemEntry {
+            behind_by: v,
+            ..Default::default()
+        };
+        assert_eq!(item.behind_by_commits(), expected);
     }
 }

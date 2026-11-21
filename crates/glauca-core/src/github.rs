@@ -211,16 +211,47 @@ query SearchItems($q: String!, $after: String) {{
     )
 }
 
-/// GraphQL single-item query (refresh one PR/Issue by number).
+/// GraphQL single-item query (refresh one PR/Issue by number). Unlike the search, it
+/// asks for `mergeStateStatus`: in a 100-node search that field makes GitHub time out.
 fn item_query() -> String {
     format!(
         "
 query FetchItem($owner: String!, $name: String!, $number: Int!) {{
   repository(owner: $owner, name: $name) {{
-    issueOrPullRequest(number: $number) {{{ITEM_FIELDS}}}
+    issueOrPullRequest(number: $number) {{{ITEM_FIELDS}
+      ... on PullRequest {{ mergeStateStatus isCrossRepository }}
+    }}
   }}
 }}"
     )
+}
+
+/// How far a PR's head is behind its base. A separate query because `compare` takes
+/// the head ref name as an argument, which the item query has to return first.
+const COMPARE_QUERY: &str = "
+query CompareBase($owner: String!, $name: String!, $number: Int!, $head: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      baseRef { compare(headRef: $head) { behindBy } }
+    }
+  }
+}";
+
+/// The head ref to compare against the base, when a comparison means anything: an open
+/// PR whose head lives in the same repository (a fork's head ref doesn't exist here).
+fn compare_head(node: &serde_json::Value) -> Option<&str> {
+    let applicable = node["__typename"].as_str() == Some("PullRequest")
+        && node["state"].as_str() == Some("OPEN")
+        && node["isCrossRepository"].as_bool() == Some(false);
+    if !applicable {
+        return None;
+    }
+    node["headRefName"].as_str()
+}
+
+fn parse_behind_by(resp: &serde_json::Value) -> Option<i64> {
+    resp.pointer("/data/repository/pullRequest/baseRef/compare/behindBy")
+        .and_then(|v| v.as_i64())
 }
 
 #[derive(Deserialize)]
@@ -512,7 +543,24 @@ pub async fn fetch_item(
     if node.is_null() {
         return Ok(None);
     }
-    Ok(node_to_cached_item(node, query_id))
+    let Some(mut item) = node_to_cached_item(node, query_id) else {
+        return Ok(None);
+    };
+    if let Some(head) = compare_head(node) {
+        let payload = serde_json::json!({
+            "query": COMPARE_QUERY,
+            "variables": { "owner": owner, "name": name, "number": number, "head": head }
+        });
+        // The item itself is good; a failed comparison only costs the behind badge.
+        match client.graphql::<serde_json::Value>(&payload).await {
+            Ok(resp) => item.behind_by = parse_behind_by(&resp),
+            Err(e) => tracing::debug!(
+                error = %describe_octocrab_error(&e),
+                "compare query failed; leaving behind_by unset"
+            ),
+        }
+    }
+    Ok(Some(item))
 }
 
 /// Convert a single GraphQL search node (Issue or PullRequest) to a `CachedItem`.
@@ -656,6 +704,12 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
     } else {
         None
     };
+    // Present only in `item_query` responses; a search node leaves it `None`.
+    let merge_state_status = if is_pr {
+        node["mergeStateStatus"].as_str().map(|s| s.to_string())
+    } else {
+        None
+    };
 
     Some(CachedItem {
         query_id,
@@ -683,6 +737,8 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         head_ref,
         review_decision,
         milestone,
+        merge_state_status,
+        behind_by: None,
         // A freshly fetched item carries no read marker; upsert preserves the
         // existing row's `last_read_updated_at` via its DO UPDATE clause.
         last_read_updated_at: None,
@@ -1021,6 +1077,78 @@ mod tests {
         });
         let item = node_to_cached_item(&node, 1).unwrap();
         assert_eq!(item.state, "merged");
+    }
+
+    fn minimal_pr_node() -> serde_json::Value {
+        serde_json::json!({
+            "__typename": "PullRequest",
+            "number": 7,
+            "title": "PR",
+            "state": "OPEN",
+            "url": "https://github.com/owner/repo/pull/7",
+            "updatedAt": "2026-05-23T10:00:00Z",
+            "author": { "__typename": "User", "login": "dave" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo" },
+            "comments": { "totalCount": 0 },
+            "reviewRequests": { "nodes": [] },
+            "headRefName": "feature",
+            "isCrossRepository": false
+        })
+    }
+
+    #[test]
+    fn node_to_cached_item_pr_merge_state_status() {
+        let mut node = minimal_pr_node();
+        node["mergeStateStatus"] = "BEHIND".into();
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert_eq!(item.merge_state_status.as_deref(), Some("BEHIND"));
+        // The behind count comes from a separate compare query in `fetch_item`.
+        assert_eq!(item.behind_by, None);
+    }
+
+    #[test]
+    fn node_to_cached_item_issue_has_no_merge_state_status() {
+        let mut node = minimal_pr_node();
+        node["__typename"] = "Issue".into();
+        node["mergeStateStatus"] = "BEHIND".into();
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert_eq!(item.merge_state_status, None);
+    }
+
+    #[rstest]
+    #[case::open_same_repo("PullRequest", "OPEN", false, Some("feature"), Some("feature"))]
+    #[case::fork("PullRequest", "OPEN", true, Some("feature"), None)]
+    #[case::merged("PullRequest", "MERGED", false, Some("feature"), None)]
+    #[case::no_head("PullRequest", "OPEN", false, None, None)]
+    #[case::issue("Issue", "OPEN", false, None, None)]
+    fn compare_head_cases(
+        #[case] typename: &str,
+        #[case] state: &str,
+        #[case] cross: bool,
+        #[case] head: Option<&str>,
+        #[case] expected: Option<&str>,
+    ) {
+        let mut node = minimal_pr_node();
+        node["__typename"] = typename.into();
+        node["state"] = state.into();
+        node["isCrossRepository"] = cross.into();
+        node["headRefName"] = head.into();
+        assert_eq!(compare_head(&node), expected);
+    }
+
+    #[test]
+    fn parse_behind_by_reads_compare() {
+        let resp = serde_json::json!({
+            "data": { "repository": { "pullRequest": {
+                "baseRef": { "compare": { "behindBy": 2 } }
+            } } }
+        });
+        assert_eq!(parse_behind_by(&resp), Some(2));
+        let no_base = serde_json::json!({
+            "data": { "repository": { "pullRequest": { "baseRef": null } } }
+        });
+        assert_eq!(parse_behind_by(&no_base), None);
     }
 
     #[test]
