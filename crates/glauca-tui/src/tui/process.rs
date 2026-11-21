@@ -131,6 +131,7 @@ mod tests {
                 ItemAction::ViewComments,
                 ItemAction::Comment,
                 ItemAction::ApprovePR,
+                ItemAction::UpdateBranch,
                 ItemAction::MergePR,
             ]
         );

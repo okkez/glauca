@@ -70,6 +70,7 @@ impl GlaucaApp {
             // octorus is a terminal TUI launched only from the CLI front-end; it
             // is never offered in the GUI menu, so this arm is unreachable.
             ItemAction::ReviewOctorus => {}
+            ItemAction::UpdateBranch => {}
         }
     }
 }

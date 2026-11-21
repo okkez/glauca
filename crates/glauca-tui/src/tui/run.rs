@@ -401,6 +401,9 @@ where
                                             app.input_mode = InputMode::Normal;
                                             refresh_selected_item(&mut app, &engine).await;
                                         }
+                                        ItemAction::UpdateBranch => {
+                                            app.input_mode = InputMode::Normal;
+                                        }
                                     }
                                 }
                             }

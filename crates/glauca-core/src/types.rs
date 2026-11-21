@@ -190,6 +190,8 @@ pub enum ItemAction {
     Comment,
     ViewComments,
     ApprovePR,
+    /// Merge the base branch into the PR's head (`gh pr update-branch`).
+    UpdateBranch,
     MergePR,
     CopyUrl,
     /// Re-fetch just this item from GitHub. Offered by both front-ends.
@@ -206,10 +208,22 @@ impl ItemAction {
             Self::Comment => "Comment",
             Self::ViewComments => "View comments",
             Self::ApprovePR => "Approve PR",
+            Self::UpdateBranch => "Update branch",
             Self::MergePR => "Merge PR",
             Self::CopyUrl => "Copy URL",
             Self::RefreshItem => "Refresh item",
             Self::ReviewOctorus => "Review with octorus",
+        }
+    }
+
+    /// The menu label for this action on `item`: flags Update branch when the PR is
+    /// known to be behind its base.
+    pub fn label_for(&self, item: &ItemEntry) -> String {
+        match self {
+            Self::UpdateBranch if item.behind_by_commits().is_some() => {
+                "Update branch (behind)".into()
+            }
+            _ => self.label().into(),
         }
     }
 
@@ -222,6 +236,7 @@ impl ItemAction {
                 Self::ViewComments,
                 Self::Comment,
                 Self::ApprovePR,
+                Self::UpdateBranch,
                 Self::MergePR,
             ],
             "issue" => vec![
@@ -233,6 +248,45 @@ impl ItemAction {
             ],
             _ => vec![],
         }
+    }
+}
+
+/// Everything needed to act on one PR and then re-fetch it into its query's cache.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PrTarget {
+    pub query_id: i64,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub number: i64,
+    pub url: String,
+}
+
+impl PrTarget {
+    pub fn for_item(query_id: i64, item: &ItemEntry) -> Self {
+        Self {
+            query_id,
+            repo_owner: item.repo_owner.clone(),
+            repo_name: item.repo_name.clone(),
+            number: item.number,
+            url: item.url.clone(),
+        }
+    }
+}
+
+/// What to do when the user asks to merge, given the PR's freshly fetched
+/// `mergeStateStatus`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MergePrecheck {
+    Proceed,
+    OfferUpdate,
+}
+
+/// Only `BEHIND` stops the merge: it is GitHub saying the branch must be updated
+/// first. Anything else, unknown included, is left for `gh pr merge` to judge.
+pub fn merge_precheck(status: Option<&str>) -> MergePrecheck {
+    match status {
+        Some("BEHIND") => MergePrecheck::OfferUpdate,
+        _ => MergePrecheck::Proceed,
     }
 }
 
@@ -282,5 +336,68 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(item.behind_by_commits(), expected);
+    }
+
+    #[test]
+    fn update_branch_only_for_pull_requests() {
+        let pr = ItemAction::available_for("pull_request");
+        let ub = pr
+            .iter()
+            .position(|a| *a == ItemAction::UpdateBranch)
+            .expect("PRs offer Update branch");
+        assert_eq!(pr[ub + 1], ItemAction::MergePR);
+        assert!(!ItemAction::available_for("issue").contains(&ItemAction::UpdateBranch));
+    }
+
+    #[test]
+    fn label_for_marks_behind() {
+        let behind = ItemEntry {
+            behind_by: Some(2),
+            ..Default::default()
+        };
+        let up_to_date = ItemEntry {
+            behind_by: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            ItemAction::UpdateBranch.label_for(&behind),
+            "Update branch (behind)"
+        );
+        assert_eq!(
+            ItemAction::UpdateBranch.label_for(&up_to_date),
+            "Update branch"
+        );
+        assert_eq!(ItemAction::MergePR.label_for(&behind), "Merge PR");
+    }
+
+    #[rstest]
+    #[case(Some("BEHIND"), MergePrecheck::OfferUpdate)]
+    #[case(Some("BLOCKED"), MergePrecheck::Proceed)]
+    #[case(Some("CLEAN"), MergePrecheck::Proceed)]
+    #[case(Some("UNKNOWN"), MergePrecheck::Proceed)]
+    #[case(None, MergePrecheck::Proceed)]
+    fn merge_precheck_cases(#[case] s: Option<&str>, #[case] expected: MergePrecheck) {
+        assert_eq!(merge_precheck(s), expected);
+    }
+
+    #[test]
+    fn pr_target_for_item_copies_identity() {
+        let item = ItemEntry {
+            number: 42,
+            repo_owner: "o".into(),
+            repo_name: "r".into(),
+            url: "https://github.com/o/r/pull/42".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            PrTarget::for_item(7, &item),
+            PrTarget {
+                query_id: 7,
+                repo_owner: "o".into(),
+                repo_name: "r".into(),
+                number: 42,
+                url: "https://github.com/o/r/pull/42".into(),
+            }
+        );
     }
 }
