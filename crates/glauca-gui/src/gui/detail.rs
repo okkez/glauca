@@ -129,7 +129,7 @@ impl GlaucaApp {
                 item.base_ref.as_ref().zip(item.head_ref.as_ref()),
                 |e, (base, head)| {
                     let mut branch = format!("{head} → {base}");
-                    if let Some(badge) = item.behind_base_badge() {
+                    if let Some(badge) = item.branch_update_badge() {
                         branch.push_str(&format!("  ·  {badge}"));
                     }
                     e.child(detail_field("branch", &branch, cx))

@@ -440,6 +440,78 @@ async fn refetch_item(
     Ok(Some(item))
 }
 
+/// Merge `target`, unless GitHub says it is behind a base that must be merged in first:
+/// then ask the front-end to offer Update branch instead.
+async fn merge_with_precheck(
+    gh: Octocrab,
+    target: PrTarget,
+    strategy: MergeStrategy,
+    tx: mpsc::Sender<AppMessage>,
+) {
+    match github::fetch_merge_state(&gh, &target.repo_owner, &target.repo_name, target.number).await
+    {
+        Ok(state) if merge_precheck(state.status.as_deref()) == MergePrecheck::OfferUpdate => {
+            let _ = tx
+                .send(AppMessage::MergeBlockedBehind {
+                    target,
+                    base_ref: state.base_ref,
+                })
+                .await;
+            return;
+        }
+        Ok(_) => {}
+        // Not knowing is no reason to block: gh pr merge has the final say.
+        Err(e) => {
+            let _ = tx
+                .send(AppMessage::Status(format!("Merge precheck failed: {e}")))
+                .await;
+        }
+    }
+    let msg = match execute_merge(&target.url, &strategy).await {
+        Ok(done) => AppMessage::ActionDone(done),
+        Err(e) => AppMessage::ActionError(e.to_string()),
+    };
+    let _ = tx.send(msg).await;
+}
+
+/// Run `gh pr update-branch` on `target`, then re-fetch it so the badge clears.
+async fn update_branch_and_refetch(
+    pool: SqlitePool,
+    gh: Octocrab,
+    sem: Arc<Semaphore>,
+    target: PrTarget,
+    tx: mpsc::Sender<AppMessage>,
+) {
+    let done = match execute_update_branch(&target.url).await {
+        Ok(done) => done,
+        Err(e) => {
+            let _ = tx.send(AppMessage::ActionError(e.to_string())).await;
+            return;
+        }
+    };
+    {
+        let _permit = sem.acquire_owned().await.ok();
+        // The update already happened; a failed re-fetch only leaves the badge stale
+        // until the next refresh.
+        if let Err(e) = refetch_item(
+            &pool,
+            &gh,
+            target.query_id,
+            &target.repo_owner,
+            &target.repo_name,
+            target.number,
+            &tx,
+        )
+        .await
+        {
+            let _ = tx
+                .send(AppMessage::Status(format!("Refresh failed: {e}")))
+                .await;
+        }
+    }
+    let _ = tx.send(AppMessage::ActionDone(done)).await;
+}
+
 pub async fn load_items_task(
     pool: SqlitePool,
     query_id: i64,
@@ -2025,87 +2097,21 @@ async fn command_loop(
                 });
             }
             EngineCommand::Merge { target, strategy } => {
-                let pool2 = pool.clone();
-                let gh2 = gh.clone();
-                let tx2 = msg_tx.clone();
-                let sem = item_refresh_sem.clone();
-                tokio::spawn(async move {
-                    // The cached merge state is stale by design (searches don't refresh
-                    // it), so judge from a fresh fetch.
-                    let fetched = {
-                        let _permit = sem.acquire_owned().await.ok();
-                        refetch_item(
-                            &pool2,
-                            &gh2,
-                            target.query_id,
-                            &target.repo_owner,
-                            &target.repo_name,
-                            target.number,
-                            &tx2,
-                        )
-                        .await
-                    };
-                    match fetched {
-                        Ok(Some(item))
-                            if merge_precheck(item.merge_state_status.as_deref())
-                                == MergePrecheck::OfferUpdate =>
-                        {
-                            let _ = tx2
-                                .send(AppMessage::MergeBlockedBehind {
-                                    target,
-                                    base_ref: item.base_ref,
-                                })
-                                .await;
-                            return;
-                        }
-                        Ok(_) => {}
-                        // Not knowing is no reason to block: gh pr merge has the final say.
-                        Err(e) => {
-                            let _ = tx2
-                                .send(AppMessage::Status(format!("Merge precheck failed: {e}")))
-                                .await;
-                        }
-                    }
-                    let msg = match execute_merge(&target.url, &strategy).await {
-                        Ok(done) => AppMessage::ActionDone(done),
-                        Err(e) => AppMessage::ActionError(e.to_string()),
-                    };
-                    let _ = tx2.send(msg).await;
-                });
+                tokio::spawn(merge_with_precheck(
+                    gh.clone(),
+                    target,
+                    strategy,
+                    msg_tx.clone(),
+                ));
             }
             EngineCommand::UpdateBranch { target } => {
-                let pool2 = pool.clone();
-                let gh2 = gh.clone();
-                let tx2 = msg_tx.clone();
-                let sem = item_refresh_sem.clone();
-                tokio::spawn(async move {
-                    let done = match execute_update_branch(&target.url).await {
-                        Ok(done) => done,
-                        Err(e) => {
-                            let _ = tx2.send(AppMessage::ActionError(e.to_string())).await;
-                            return;
-                        }
-                    };
-                    let _permit = sem.acquire_owned().await.ok();
-                    // The update already happened; a failed re-fetch only leaves the
-                    // badge stale until the next refresh.
-                    if let Err(e) = refetch_item(
-                        &pool2,
-                        &gh2,
-                        target.query_id,
-                        &target.repo_owner,
-                        &target.repo_name,
-                        target.number,
-                        &tx2,
-                    )
-                    .await
-                    {
-                        let _ = tx2
-                            .send(AppMessage::Status(format!("Refresh failed: {e}")))
-                            .await;
-                    }
-                    let _ = tx2.send(AppMessage::ActionDone(done)).await;
-                });
+                tokio::spawn(update_branch_and_refetch(
+                    pool.clone(),
+                    gh.clone(),
+                    item_refresh_sem.clone(),
+                    target,
+                    msg_tx.clone(),
+                ));
             }
             EngineCommand::MarkItemRead {
                 query_id,
@@ -2237,7 +2243,6 @@ mod tests {
             head_ref: None,
             review_decision: None,
             milestone: None,
-            merge_state_status: None,
             behind_by: None,
             can_update_branch: false,
             last_read_updated_at: None,

@@ -61,8 +61,9 @@ impl ChangeCounts {
 /// Deliberately asymmetric with [`crate::notify::ItemTracker`]: desktop notifications
 /// count only the `updated` side, so a removal never fires one.
 ///
-/// TODO(known limitation): the diff key is (owner, repo, number) plus `updated_at`, so a
-/// field that changes *without* `updated_at` advancing is not counted and the held-back
+/// TODO(known limitation): the diff key is (owner, repo, number) plus `updated_at` and
+/// `can_update_branch`, so any other field that changes *without* `updated_at` advancing
+/// is not counted and the held-back
 /// list is discarded. The cached row is already correct by then. Applying silently when
 /// `is_empty()` is deliberately not done — `MarkItemRead` is fire-and-forget, so an
 /// in-flight fresh list could resurrect an item the user just read as unread.
@@ -72,15 +73,18 @@ pub fn count_changes(current: &[ItemEntry], fresh: &[ItemEntry]) -> ChangeCounts
         (it.repo_owner.as_str(), it.repo_name.as_str(), it.number)
     }
 
-    let seen: std::collections::HashMap<Key<'_>, &str> = current
+    // `can_update_branch` flips when the base branch moves, which leaves `updated_at` alone.
+    let seen: std::collections::HashMap<Key<'_>, (&str, bool)> = current
         .iter()
-        .map(|it| (key(it), it.updated_at.as_str()))
+        .map(|it| (key(it), (it.updated_at.as_str(), it.can_update_branch)))
         .collect();
     let updated = fresh
         .iter()
         .filter(|it| match seen.get(&key(it)) {
-            None => true,                                         // newly appeared
-            Some(prev_updated) => *prev_updated != it.updated_at, // changed
+            None => true, // newly appeared
+            Some((prev_updated, prev_can_update)) => {
+                *prev_updated != it.updated_at || *prev_can_update != it.can_update_branch
+            }
         })
         .count();
 
@@ -216,7 +220,6 @@ pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
         head_ref: c.head_ref,
         review_decision: c.review_decision,
         milestone: c.milestone,
-        merge_state_status: c.merge_state_status,
         behind_by: c.behind_by,
         can_update_branch: c.can_update_branch,
         last_read_updated_at: c.last_read_updated_at,
@@ -665,6 +668,24 @@ mod tests {
                 removed: want_removed,
             }
         );
+    }
+
+    // A base branch moving on doesn't touch the PR's updated_at, so a full fetch that
+    // only flips the Update branch flag must still count, or the list never shows it.
+    #[rstest]
+    #[case::became_needed(false, true, 1)]
+    #[case::no_longer_needed(true, false, 1)]
+    #[case::unchanged(true, true, 0)]
+    fn count_changes_counts_can_update_branch_flips(
+        #[case] before: bool,
+        #[case] after: bool,
+        #[case] want_updated: usize,
+    ) {
+        let mut current = item_at(1, "same");
+        current.can_update_branch = before;
+        let mut fresh = item_at(1, "same");
+        fresh.can_update_branch = after;
+        assert_eq!(count_changes(&[current], &[fresh]).updated, want_updated);
     }
 
     #[rstest]

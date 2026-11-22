@@ -177,7 +177,7 @@ pub(super) fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                         Span::styled("Branch:   ", Style::default().fg(Color::Gray)),
                         Span::raw(format!("{head} → {base}")),
                     ];
-                    if let Some(badge) = item.behind_base_badge() {
+                    if let Some(badge) = item.branch_update_badge() {
                         spans.push(Span::styled(
                             format!("  {badge}"),
                             Style::default().fg(Color::Yellow),

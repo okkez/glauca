@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,\n               author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,\n               reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,\n               review_decision, milestone, last_read_updated_at, merge_state_status, behind_by,\n               can_update_branch\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
+  "query": "\n        SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,\n               author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,\n               reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,\n               review_decision, milestone, last_read_updated_at, behind_by, can_update_branch\n        FROM items\n        WHERE query_id = ?\n        ORDER BY updated_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -279,19 +279,8 @@
         }
       },
       {
-        "name": "merge_state_status",
-        "ordinal": 25,
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "items",
-            "name": "merge_state_status"
-          }
-        }
-      },
-      {
         "name": "behind_by",
-        "ordinal": 26,
+        "ordinal": 25,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -302,7 +291,7 @@
       },
       {
         "name": "can_update_branch",
-        "ordinal": 27,
+        "ordinal": 26,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -342,9 +331,8 @@
       true,
       true,
       true,
-      true,
       false
     ]
   },
-  "hash": "9128941921714ea3b16262cce72004545cbd7923d3cced629f36d70a1c9225ed"
+  "hash": "c28c54b72949d505682a9774d914d11126f2c8adabd3be37cd0715010d9d4526"
 }

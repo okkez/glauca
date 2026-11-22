@@ -254,12 +254,24 @@ impl App {
         }
     }
 
-    /// Install `items` as the visible list, clamping the cursor. `is_new` is already set
-    /// per item by `cached_item_to_item_entry`, so nothing is recomputed here.
+    /// Install `items` as the visible list, keeping the cursor on the same item when it is
+    /// still listed and clamping it otherwise. `is_new` is already set per item by
+    /// `cached_item_to_item_entry`, so nothing is recomputed here.
     pub(crate) fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
+        let selected = self
+            .selected_item()
+            .map(|it| (it.repo_owner.clone(), it.repo_name.clone(), it.number));
         self.items = items;
         self.items_version = self.items_version.wrapping_add(1);
-        self.clamp_item_cursor();
+        let same_item = selected.and_then(|(owner, name, number)| {
+            self.filtered_items().iter().position(|it| {
+                it.number == number && it.repo_owner == owner && it.repo_name == name
+            })
+        });
+        match same_item {
+            Some(pos) => self.item_cursor = pos,
+            None => self.clamp_item_cursor(),
+        }
     }
 
     /// Empty the visible list, invalidating the memoized filter cache. Use this
@@ -423,6 +435,30 @@ mod tests {
         assert!(app.pending_changes.is_empty());
         assert!(app.pending_items.is_none());
         assert_eq!(app.filtered_items().len(), 2);
+    }
+
+    // A re-fetch re-sorts the list by updated_at. A cursor left at the old index would
+    // point a pending Merge confirmation at a different PR.
+    #[test]
+    fn apply_items_keeps_the_selected_item_when_the_list_reorders() {
+        let mut app = make_app_with_items(&["a", "b", "c"]);
+        app.item_cursor = 1;
+        assert_eq!(app.selected_item().unwrap().number, 2);
+
+        let mut reordered = app.items.clone();
+        reordered.rotate_right(1); // #3, #1, #2
+        app.apply_items_to_view(reordered);
+
+        assert_eq!(app.selected_item().unwrap().number, 2);
+    }
+
+    #[test]
+    fn apply_items_clamps_when_the_selected_item_is_gone() {
+        let mut app = make_app_with_items(&["a", "b", "c"]);
+        app.item_cursor = 2;
+        let remaining = app.items[..1].to_vec();
+        app.apply_items_to_view(remaining);
+        assert_eq!(app.item_cursor, 0);
     }
 
     #[test]

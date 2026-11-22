@@ -152,8 +152,6 @@ pub struct ItemEntry {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
-    /// GitHub's `mergeStateStatus`; set only once the item has been re-fetched by number.
-    pub merge_state_status: Option<String>,
     /// Commits the head is behind its base, as of the last by-number re-fetch.
     pub behind_by: Option<i64>,
     /// GitHub's `viewerCanUpdateBranch`: the web UI would offer "Update branch".
@@ -187,7 +185,7 @@ impl ItemEntry {
     }
 
     /// Detail-pane badge for a PR that needs Update branch.
-    pub fn behind_base_badge(&self) -> Option<String> {
+    pub fn branch_update_badge(&self) -> Option<String> {
         self.needs_branch_update()
             .then(|| behind_base_label(self.behind_by_commits()))
     }
@@ -404,7 +402,7 @@ mod tests {
     #[case::offered_stale_zero("open", true, Some(0), Some("Behind base"))]
     #[case::not_offered("open", false, Some(5), None)]
     #[case::merged("merged", true, Some(2), None)]
-    fn behind_base_badge_cases(
+    fn branch_update_badge_cases(
         #[case] state: &str,
         #[case] can_update: bool,
         #[case] behind_by: Option<i64>,
@@ -417,7 +415,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(item.needs_branch_update(), expected.is_some());
-        assert_eq!(item.behind_base_badge().as_deref(), expected);
+        assert_eq!(item.branch_update_badge().as_deref(), expected);
     }
 
     #[rstest]

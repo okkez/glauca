@@ -991,7 +991,7 @@ function renderItemList() {
       el("div", { class: "it-meta" }, [
         it.repo_private ? octicon("lock", "muted", 12) : null,
         el("span", { class: "meta-text", text: metaText }),
-        isBehind(it) ? el("span", { class: "meta-behind", text: "behind" }) : null,
+        needsBranchUpdate(it) ? el("span", { class: "meta-behind", text: "behind" }) : null,
         el("span", { class: "meta-time", text: relativeTime(it.updated_at, now) }),
       ])
     );
@@ -1078,7 +1078,7 @@ function renderDetail(it) {
 
   if ((it.labels || []).length) header.appendChild(textField("labels", it.labels.join(", ")));
   if (it.base_ref && it.head_ref) {
-    const behind = isBehind(it) ? `  ·  ${behindBaseLabel(it)}` : "";
+    const behind = needsBranchUpdate(it) ? `  ·  ${behindBaseLabel(it)}` : "";
     header.appendChild(textField("branch", `${it.head_ref} → ${it.base_ref}${behind}`));
   }
   const assignees = it.assignees || [];
@@ -1122,7 +1122,7 @@ function renderDetail(it) {
 }
 
 // Mirrors ItemEntry::needs_branch_update.
-function isBehind(it) {
+function needsBranchUpdate(it) {
   return it.state === "open" && it.can_update_branch;
 }
 
@@ -1180,7 +1180,7 @@ function itemActions(it) {
       },
     });
     acts.push({
-      label: isBehind(it) ? "Update branch (behind)" : "Update branch",
+      label: needsBranchUpdate(it) ? "Update branch (behind)" : "Update branch",
       run: () => call("update_branch", { target: prTarget(entry, it) }),
     });
     acts.push({

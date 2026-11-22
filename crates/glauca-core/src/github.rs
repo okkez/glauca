@@ -212,19 +212,62 @@ query SearchItems($q: String!, $after: String) {{
     )
 }
 
-/// GraphQL single-item query (refresh one PR/Issue by number). Unlike the search, it
-/// asks for `mergeStateStatus`: in a 100-node search that field makes GitHub time out.
+/// GraphQL single-item query (refresh one PR/Issue by number).
 fn item_query() -> String {
     format!(
         "
 query FetchItem($owner: String!, $name: String!, $number: Int!) {{
   repository(owner: $owner, name: $name) {{
     issueOrPullRequest(number: $number) {{{ITEM_FIELDS}
-      ... on PullRequest {{ mergeStateStatus isCrossRepository }}
+      ... on PullRequest {{ isCrossRepository }}
     }}
   }}
 }}"
     )
+}
+
+/// `mergeStateStatus` for the merge precheck. Kept out of `ITEM_FIELDS`: in a 100-node
+/// search it makes GitHub time out.
+const MERGE_STATE_QUERY: &str = "
+query MergeState($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { mergeStateStatus baseRefName }
+  }
+}";
+
+/// A PR's merge state as GitHub reports it right now.
+#[derive(Debug, Default, PartialEq)]
+pub struct MergeState {
+    /// `BEHIND`, `CLEAN`, `BLOCKED`, …
+    pub status: Option<String>,
+    pub base_ref: Option<String>,
+}
+
+fn parse_merge_state(resp: &serde_json::Value) -> MergeState {
+    let pr = &resp["data"]["repository"]["pullRequest"];
+    MergeState {
+        status: pr["mergeStateStatus"].as_str().map(str::to_string),
+        base_ref: pr["baseRefName"].as_str().map(str::to_string),
+    }
+}
+
+pub async fn fetch_merge_state(
+    client: &Octocrab,
+    owner: &str,
+    name: &str,
+    number: i64,
+) -> Result<MergeState> {
+    let payload = serde_json::json!({
+        "query": MERGE_STATE_QUERY,
+        "variables": { "owner": owner, "name": name, "number": number }
+    });
+    let resp: serde_json::Value = client.graphql(&payload).await.map_err(|e| {
+        anyhow::anyhow!(
+            "GraphQL merge state fetch failed: {}",
+            describe_octocrab_error(&e)
+        )
+    })?;
+    Ok(parse_merge_state(&resp))
 }
 
 /// How far a PR's head is behind its base. A separate query because `compare` takes
@@ -705,12 +748,6 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
     } else {
         None
     };
-    // Present only in `item_query` responses; a search node leaves it `None`.
-    let merge_state_status = if is_pr {
-        node["mergeStateStatus"].as_str().map(|s| s.to_string())
-    } else {
-        None
-    };
     let can_update_branch = is_pr && node["viewerCanUpdateBranch"].as_bool() == Some(true);
 
     Some(CachedItem {
@@ -739,7 +776,6 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         head_ref,
         review_decision,
         milestone,
-        merge_state_status,
         behind_by: None,
         can_update_branch,
         // A freshly fetched item carries no read marker; upsert preserves the
@@ -1101,13 +1137,23 @@ mod tests {
     }
 
     #[test]
-    fn node_to_cached_item_pr_merge_state_status() {
-        let mut node = minimal_pr_node();
-        node["mergeStateStatus"] = "BEHIND".into();
-        let item = node_to_cached_item(&node, 1).unwrap();
-        assert_eq!(item.merge_state_status.as_deref(), Some("BEHIND"));
-        // The behind count comes from a separate compare query in `fetch_item`.
-        assert_eq!(item.behind_by, None);
+    fn parse_merge_state_reads_status_and_base() {
+        let resp = serde_json::json!({ "data": { "repository": { "pullRequest": {
+            "mergeStateStatus": "BEHIND", "baseRefName": "master"
+        } } } });
+        assert_eq!(
+            parse_merge_state(&resp),
+            MergeState {
+                status: Some("BEHIND".into()),
+                base_ref: Some("master".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_merge_state_tolerates_a_missing_pr() {
+        let resp = serde_json::json!({ "data": { "repository": { "pullRequest": null } } });
+        assert_eq!(parse_merge_state(&resp), MergeState::default());
     }
 
     #[rstest]
@@ -1133,15 +1179,6 @@ mod tests {
     fn search_and_item_queries_ask_for_viewer_can_update_branch() {
         assert!(search_query().contains("viewerCanUpdateBranch"));
         assert!(item_query().contains("viewerCanUpdateBranch"));
-    }
-
-    #[test]
-    fn node_to_cached_item_issue_has_no_merge_state_status() {
-        let mut node = minimal_pr_node();
-        node["__typename"] = "Issue".into();
-        node["mergeStateStatus"] = "BEHIND".into();
-        let item = node_to_cached_item(&node, 1).unwrap();
-        assert_eq!(item.merge_state_status, None);
     }
 
     #[rstest]

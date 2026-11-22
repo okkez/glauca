@@ -867,10 +867,8 @@ pub struct CachedItem {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
-    /// GitHub's `mergeStateStatus` (`BEHIND`, `CLEAN`, …). Only a by-number re-fetch
-    /// fills it; a search upsert keeps the stored value (see `upsert_item_with`).
-    pub merge_state_status: Option<String>,
-    /// Commits the head is behind its base. Same provenance as `merge_state_status`.
+    /// Commits the head is behind its base. Only a by-number re-fetch fills it; a search
+    /// upsert keeps the stored value (see `upsert_item_with`).
     pub behind_by: Option<i64>,
     /// GitHub's `viewerCanUpdateBranch`. Every fetch carries it, so searches overwrite it.
     pub can_update_branch: bool,
@@ -924,9 +922,8 @@ where
             (query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
              author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
              reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
-             review_decision, milestone, last_read_updated_at, merge_state_status, behind_by,
-             can_update_branch)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             review_decision, milestone, last_read_updated_at, behind_by, can_update_branch)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
             title               = excluded.title,
@@ -948,10 +945,8 @@ where
             head_ref            = excluded.head_ref,
             review_decision     = excluded.review_decision,
             milestone           = excluded.milestone,
-            -- Searches don't fetch merge info (too slow for GitHub), so only a by-number
-            -- re-fetch may overwrite it.
-            merge_state_status  = CASE WHEN ? THEN items.merge_state_status
-                                       ELSE excluded.merge_state_status END,
+            -- Searches don't fetch the behind count, so only a by-number re-fetch may
+            -- overwrite it.
             behind_by           = CASE WHEN ? THEN items.behind_by ELSE excluded.behind_by END,
             can_update_branch   = excluded.can_update_branch,
             -- A search that returned this item proves it still matches, so clear its
@@ -985,10 +980,8 @@ where
         item.review_decision,
         item.milestone,
         item.last_read_updated_at,
-        item.merge_state_status,
         item.behind_by,
         can_update_branch_int,
-        matched_query,
         matched_query,
         matched_query,
     )
@@ -1004,8 +997,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
         SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
                author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
                reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
-               review_decision, milestone, last_read_updated_at, merge_state_status, behind_by,
-               can_update_branch
+               review_decision, milestone, last_read_updated_at, behind_by, can_update_branch
         FROM items
         WHERE query_id = ?
         ORDER BY updated_at DESC
@@ -1042,7 +1034,6 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
             head_ref: r.head_ref,
             review_decision: r.review_decision,
             milestone: r.milestone,
-            merge_state_status: r.merge_state_status,
             behind_by: r.behind_by,
             can_update_branch: r.can_update_branch != 0,
             last_read_updated_at: r.last_read_updated_at,
@@ -1865,14 +1856,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_info_round_trips() {
+    async fn behind_by_round_trips() {
         let (pool, _file) = test_pool().await;
         let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await
             .expect("upsert query");
 
         let mut behind = make_item(qid, 1, "Behind");
-        behind.merge_state_status = Some("BEHIND".into());
         behind.behind_by = Some(2);
         upsert_item(&pool, &behind).await.expect("upsert behind");
         upsert_item(&pool, &make_item(qid, 2, "Unknown"))
@@ -1881,42 +1871,36 @@ mod tests {
 
         let items = fetch_items(&pool, qid).await.expect("fetch items");
         let get = |n: i64| items.iter().find(|i| i.number == n).unwrap();
-        assert_eq!(get(1).merge_state_status.as_deref(), Some("BEHIND"));
         assert_eq!(get(1).behind_by, Some(2));
-        assert_eq!(get(2).merge_state_status, None);
         assert_eq!(get(2).behind_by, None);
     }
 
     #[tokio::test]
-    async fn search_upsert_preserves_merge_info() {
+    async fn search_upsert_preserves_behind_by() {
         let (pool, _file) = test_pool().await;
         let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await
             .expect("upsert query");
 
         let mut fetched = make_item(qid, 1, "PR");
-        fetched.merge_state_status = Some("BEHIND".into());
         fetched.behind_by = Some(2);
         upsert_item(&pool, &fetched)
             .await
             .expect("single-item upsert");
 
-        // A search never carries merge info, so it must not wipe what a by-number fetch stored.
+        // A search never carries the behind count, so it must not wipe what a by-number fetch stored.
         upsert_items(&pool, &[make_item(qid, 1, "PR")])
             .await
             .expect("search upsert");
         let items = fetch_items(&pool, qid).await.expect("fetch items");
-        assert_eq!(items[0].merge_state_status.as_deref(), Some("BEHIND"));
         assert_eq!(items[0].behind_by, Some(2));
 
         let mut refreshed = make_item(qid, 1, "PR");
-        refreshed.merge_state_status = Some("CLEAN".into());
         refreshed.behind_by = Some(0);
         upsert_item(&pool, &refreshed)
             .await
             .expect("re-fetch upsert");
         let items = fetch_items(&pool, qid).await.expect("fetch items");
-        assert_eq!(items[0].merge_state_status.as_deref(), Some("CLEAN"));
         assert_eq!(items[0].behind_by, Some(0));
     }
 
@@ -1933,7 +1917,7 @@ mod tests {
         let items = fetch_items(&pool, qid).await.expect("fetch items");
         assert!(items[0].can_update_branch);
 
-        // Unlike merge info, every search carries it, so a later search clears it.
+        // Unlike behind_by, every search carries it, so a later search clears it.
         upsert_items(&pool, &[make_item(qid, 1, "PR")])
             .await
             .expect("search upsert");
