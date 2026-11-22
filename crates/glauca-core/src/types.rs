@@ -168,14 +168,11 @@ impl ItemEntry {
         format!("{}/{}", self.repo_owner, self.repo_name)
     }
 
-    /// How many commits the PR is behind its base, when it is open and behind at all.
-    /// `behind_by` survives search syncs, so the state check is what stops a PR merged
-    /// since its last refresh from still reading as behind.
-    pub fn behind_by_commits(&self) -> Option<i64> {
-        if self.state != "open" {
-            return None;
-        }
-        self.behind_by.filter(|n| *n > 0)
+    /// Whether `other` is the same issue/PR, whatever else about it has changed.
+    pub fn is_same_item(&self, other: &ItemEntry) -> bool {
+        self.number == other.number
+            && self.repo_owner == other.repo_owner
+            && self.repo_name == other.repo_name
     }
 
     /// Whether to flag the PR as needing Update branch: GitHub's own answer, which
@@ -187,7 +184,7 @@ impl ItemEntry {
     /// Detail-pane badge for a PR that needs Update branch.
     pub fn branch_update_badge(&self) -> Option<String> {
         self.needs_branch_update()
-            .then(|| behind_base_label(self.behind_by_commits()))
+            .then(|| behind_base_label(self.behind_by.filter(|n| *n > 0)))
     }
 }
 
@@ -357,33 +354,20 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    #[rstest]
-    #[case(Some(2), Some(2))]
-    #[case(Some(1), Some(1))]
-    #[case(Some(0), None)]
-    #[case(None, None)]
-    fn behind_by_commits_cases(#[case] v: Option<i64>, #[case] expected: Option<i64>) {
-        let item = ItemEntry {
-            state: "open".into(),
-            behind_by: v,
+    #[test]
+    fn is_same_item_compares_repo_and_number_only() {
+        let item = |owner: &str, name: &str, number: i64, title: &str| ItemEntry {
+            repo_owner: owner.into(),
+            repo_name: name.into(),
+            number,
+            title: title.into(),
             ..Default::default()
         };
-        assert_eq!(item.behind_by_commits(), expected);
-    }
-
-    // A search sync updates `state` but keeps `behind_by` from the last refresh, so a
-    // PR merged since then must not keep advertising that it is behind.
-    #[rstest]
-    #[case("open", Some(2))]
-    #[case("merged", None)]
-    #[case("closed", None)]
-    fn behind_by_commits_only_for_open_items(#[case] state: &str, #[case] expected: Option<i64>) {
-        let item = ItemEntry {
-            state: state.into(),
-            behind_by: Some(2),
-            ..Default::default()
-        };
-        assert_eq!(item.behind_by_commits(), expected);
+        let a = item("o", "r", 1, "old title");
+        assert!(a.is_same_item(&item("o", "r", 1, "new title")));
+        assert!(!a.is_same_item(&item("o", "r", 2, "old title")));
+        assert!(!a.is_same_item(&item("o", "other", 1, "old title")));
+        assert!(!a.is_same_item(&item("x", "r", 1, "old title")));
     }
 
     #[rstest]

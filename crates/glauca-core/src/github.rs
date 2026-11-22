@@ -281,11 +281,12 @@ query CompareBase($owner: String!, $name: String!, $number: Int!, $head: String!
   }
 }";
 
-/// The head ref to compare against the base, when a comparison means anything: an open
-/// PR whose head lives in the same repository (a fork's head ref doesn't exist here).
+/// The head ref to compare against the base, when the count would be shown: GitHub
+/// offers Update branch, and the head lives in the same repository (a fork's head ref
+/// doesn't exist here).
 fn compare_head(node: &serde_json::Value) -> Option<&str> {
     let applicable = node["__typename"].as_str() == Some("PullRequest")
-        && node["state"].as_str() == Some("OPEN")
+        && node["viewerCanUpdateBranch"].as_bool() == Some(true)
         && node["isCrossRepository"].as_bool() == Some(false);
     if !applicable {
         return None;
@@ -1181,22 +1182,24 @@ mod tests {
         assert!(item_query().contains("viewerCanUpdateBranch"));
     }
 
+    // The count only decorates the Update branch badge, so it is fetched only when GitHub
+    // would offer the button, and never for a fork (its head ref isn't in this repo).
     #[rstest]
-    #[case::open_same_repo("PullRequest", "OPEN", false, Some("feature"), Some("feature"))]
-    #[case::fork("PullRequest", "OPEN", true, Some("feature"), None)]
-    #[case::merged("PullRequest", "MERGED", false, Some("feature"), None)]
-    #[case::no_head("PullRequest", "OPEN", false, None, None)]
-    #[case::issue("Issue", "OPEN", false, None, None)]
+    #[case::offered("PullRequest", true, false, Some("feature"), Some("feature"))]
+    #[case::not_offered("PullRequest", false, false, Some("feature"), None)]
+    #[case::fork("PullRequest", true, true, Some("feature"), None)]
+    #[case::no_head("PullRequest", true, false, None, None)]
+    #[case::issue("Issue", true, false, None, None)]
     fn compare_head_cases(
         #[case] typename: &str,
-        #[case] state: &str,
+        #[case] can_update: bool,
         #[case] cross: bool,
         #[case] head: Option<&str>,
         #[case] expected: Option<&str>,
     ) {
         let mut node = minimal_pr_node();
         node["__typename"] = typename.into();
-        node["state"] = state.into();
+        node["viewerCanUpdateBranch"] = can_update.into();
         node["isCrossRepository"] = cross.into();
         node["headRefName"] = head.into();
         assert_eq!(compare_head(&node), expected);

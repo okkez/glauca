@@ -150,6 +150,9 @@ pub struct App {
     pub review_event_cursor: usize,
     /// Review comment captured from the editor, pending the review-event choice.
     pub review_body: Option<String>,
+    /// The PR the `MergeMenu` was opened for. Fixed at open: a reload while the menu
+    /// is up can move the selection to another PR.
+    pub merge_target: Option<glauca_core::types::PrTarget>,
     /// The PR (and its base ref) the `ConfirmUpdateBranch` prompt is about. Taken from
     /// the engine's message, not the selection, which may have moved since.
     pub pending_update_branch: Option<(glauca_core::types::PrTarget, Option<String>)>,

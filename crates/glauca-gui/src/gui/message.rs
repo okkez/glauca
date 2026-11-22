@@ -7,10 +7,22 @@ use glauca_core::logic::*;
 use super::*;
 
 impl GlaucaApp {
-    /// Install `items` as the visible list. Caller refilters / notifies. `is_new` is
-    /// already set per item by `cached_item_to_item_entry`, so nothing is recomputed here.
+    /// Install `items` as the visible list and refilter, keeping the cursor on the same
+    /// item when it is still listed: a reload re-sorts by `updated_at`, and an index
+    /// cursor would silently move the detail pane and actions to another PR. Caller
+    /// notifies. `is_new` is already set per item by `cached_item_to_item_entry`.
     pub(crate) fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
+        let selected = self.selected_item();
         self.items = items;
+        self.recompute_filtered();
+        let selected_pos = selected.and_then(|sel| {
+            self.filtered
+                .iter()
+                .position(|&i| self.items[i].is_same_item(&sel))
+        });
+        if let Some(pos) = selected_pos {
+            self.item_cursor = pos;
+        }
     }
 
     /// Drop any held-back background-sync results / banner.
@@ -30,7 +42,6 @@ impl GlaucaApp {
             self.recompute_unread(qid, &items);
         }
         self.apply_items_to_view(items);
-        self.recompute_filtered();
         cx.notify();
     }
 
@@ -169,7 +180,6 @@ impl GlaucaApp {
                         // any banner (this load supersedes it).
                         self.apply_items_to_view(items);
                         self.clear_pending();
-                        needs_refilter = true;
                     }
                 }
             }

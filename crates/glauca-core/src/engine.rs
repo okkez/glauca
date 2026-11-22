@@ -443,7 +443,9 @@ async fn refetch_item(
 /// Merge `target`, unless GitHub says it is behind a base that must be merged in first:
 /// then ask the front-end to offer Update branch instead.
 async fn merge_with_precheck(
+    pool: SqlitePool,
     gh: Octocrab,
+    sem: Arc<Semaphore>,
     target: PrTarget,
     strategy: MergeStrategy,
     tx: mpsc::Sender<AppMessage>,
@@ -467,11 +469,15 @@ async fn merge_with_precheck(
                 .await;
         }
     }
-    let msg = match execute_merge(&target.url, &strategy).await {
-        Ok(done) => AppMessage::ActionDone(done),
-        Err(e) => AppMessage::ActionError(e.to_string()),
+    let done = match execute_merge(&target.url, &strategy).await {
+        Ok(done) => done,
+        Err(e) => {
+            let _ = tx.send(AppMessage::ActionError(e.to_string())).await;
+            return;
+        }
     };
-    let _ = tx.send(msg).await;
+    refetch_after_action(&pool, &gh, &sem, &target, &tx).await;
+    let _ = tx.send(AppMessage::ActionDone(done)).await;
 }
 
 /// Run `gh pr update-branch` on `target`, then re-fetch it so the badge clears.
@@ -489,27 +495,36 @@ async fn update_branch_and_refetch(
             return;
         }
     };
-    {
-        let _permit = sem.acquire_owned().await.ok();
-        // The update already happened; a failed re-fetch only leaves the badge stale
-        // until the next refresh.
-        if let Err(e) = refetch_item(
-            &pool,
-            &gh,
-            target.query_id,
-            &target.repo_owner,
-            &target.repo_name,
-            target.number,
-            &tx,
-        )
-        .await
-        {
-            let _ = tx
-                .send(AppMessage::Status(format!("Refresh failed: {e}")))
-                .await;
-        }
-    }
+    refetch_after_action(&pool, &gh, &sem, &target, &tx).await;
     let _ = tx.send(AppMessage::ActionDone(done)).await;
+}
+
+/// Re-fetch `target` after a gh action changed it on GitHub, so the cached state, list
+/// marker and badge follow. The action already happened, so a failed re-fetch only
+/// leaves them stale until the next sync.
+async fn refetch_after_action(
+    pool: &SqlitePool,
+    gh: &Octocrab,
+    sem: &Arc<Semaphore>,
+    target: &PrTarget,
+    tx: &mpsc::Sender<AppMessage>,
+) {
+    let _permit = sem.clone().acquire_owned().await.ok();
+    if let Err(e) = refetch_item(
+        pool,
+        gh,
+        target.query_id,
+        &target.repo_owner,
+        &target.repo_name,
+        target.number,
+        tx,
+    )
+    .await
+    {
+        let _ = tx
+            .send(AppMessage::Status(format!("Refresh failed: {e}")))
+            .await;
+    }
 }
 
 pub async fn load_items_task(
@@ -1449,8 +1464,8 @@ pub enum EngineCommand {
         event: ReviewEvent,
         body: Option<String>,
     },
-    /// Re-fetches the PR first; if GitHub reports it `BEHIND`, replies with
-    /// `AppMessage::MergeBlockedBehind` instead of merging.
+    /// Asks GitHub for the PR's `mergeStateStatus` first; if it is `BEHIND`, replies
+    /// with `AppMessage::MergeBlockedBehind` instead of merging.
     Merge {
         target: PrTarget,
         strategy: MergeStrategy,
@@ -2098,7 +2113,9 @@ async fn command_loop(
             }
             EngineCommand::Merge { target, strategy } => {
                 tokio::spawn(merge_with_precheck(
+                    pool.clone(),
                     gh.clone(),
+                    item_refresh_sem.clone(),
                     target,
                     strategy,
                     msg_tx.clone(),

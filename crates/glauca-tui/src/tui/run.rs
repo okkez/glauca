@@ -382,10 +382,7 @@ where
                                                 }
                                             }
                                         }
-                                        ItemAction::MergePR => {
-                                            app.input_mode = InputMode::MergeMenu;
-                                            app.merge_strategy_cursor = 0;
-                                        }
+                                        ItemAction::MergePR => app.begin_merge(),
                                         ItemAction::CopyUrl => {
                                             app.input_mode = InputMode::Normal;
                                             app.status = Some(match copy_to_clipboard_osc52(&item.url) {
@@ -423,12 +420,10 @@ where
                             }
                         }
                         Action::ConfirmMergeStrategy => {
-                            if let Some(target) = app.selected_pr_target() {
-                                let strategies = MergeStrategy::all();
-                                if let Some(strategy) = strategies.get(app.merge_strategy_cursor).cloned() {
-                                    app.input_mode = InputMode::Normal;
-                                    engine.send(EngineCommand::Merge { target, strategy }).await;
-                                }
+                            let strategy = MergeStrategy::all().get(app.merge_strategy_cursor).cloned();
+                            app.input_mode = InputMode::Normal;
+                            if let (Some(target), Some(strategy)) = (app.take_merge_target(), strategy) {
+                                engine.send(EngineCommand::Merge { target, strategy }).await;
                             }
                         }
                         Action::ConfirmReviewEvent => {
