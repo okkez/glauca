@@ -157,36 +157,34 @@ impl GlaucaApp {
 
     pub(crate) fn open_merge_dialog(
         &mut self,
-        item: ItemEntry,
+        target: PrTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let this = cx.weak_entity();
         window.open_dialog(cx, move |dlg, _w, _cx| {
             let this = this.clone();
-            let item = item.clone();
+            let target = target.clone();
             dlg.title("Merge strategy")
                 .w(px(320.))
                 .content(move |content, _w, _cx| {
                     let mut col = content.gap_2();
                     for (ix, strat) in MergeStrategy::all().into_iter().enumerate() {
                         let label = strat.label().to_string();
-                        let item = item.clone();
+                        let target = target.clone();
                         let this = this.clone();
                         col = col.child(Button::new(("merge", ix)).label(label).on_click(
                             move |_, window, cx| {
-                                let item = item.clone();
+                                let target = target.clone();
                                 let strat = strat.clone();
                                 let this = this.clone();
                                 window.close_dialog(cx);
                                 if let Some(app) = this.upgrade() {
                                     app.update(cx, |app, _| {
-                                        if let Some(query_id) = app.selected_root_query_id() {
-                                            app.send(EngineCommand::Merge {
-                                                target: PrTarget::for_item(query_id, &item),
-                                                strategy: strat,
-                                            })
-                                        }
+                                        app.send(EngineCommand::Merge {
+                                            target,
+                                            strategy: strat,
+                                        })
                                     });
                                 }
                             },

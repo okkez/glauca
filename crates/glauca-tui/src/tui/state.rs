@@ -113,7 +113,8 @@ impl App {
             merge_strategy_cursor: 0,
             review_event_cursor: 0,
             review_body: None,
-            merge_target: None,
+            action_item: None,
+            action_query_id: None,
             pending_update_branch: None,
             comments: Vec::new(),
             comments_loading: false,
@@ -241,23 +242,27 @@ impl App {
         self.pending_update_branch.take().map(|(target, _)| target)
     }
 
-    /// Open the merge-strategy menu for the selected PR.
+    /// Open the action menu for the selected item.
+    pub(crate) fn open_action_menu(&mut self) {
+        self.action_item = self.selected_item().cloned();
+        self.action_query_id = self.selected_root_query_id();
+        self.action_cursor = 0;
+        self.input_mode = InputMode::ActionMenu;
+    }
+
+    /// The item the action menu was opened on, as a PR action target in the query it
+    /// was opened from.
+    pub(crate) fn action_pr_target(&self) -> Option<glauca_core::types::PrTarget> {
+        let item = self.action_item.as_ref()?;
+        let query_id = self.action_query_id?;
+        Some(glauca_core::types::PrTarget::for_item(query_id, item))
+    }
+
+    /// Open the merge-strategy menu for the action menu's PR. It is only reachable from
+    /// the action menu, so `action_pr_target` still names the PR when a strategy is picked.
     pub(crate) fn begin_merge(&mut self) {
-        self.merge_target = self.selected_pr_target();
         self.merge_strategy_cursor = 0;
         self.input_mode = InputMode::MergeMenu;
-    }
-
-    /// The PR the merge-strategy menu was opened for, consuming it.
-    pub(crate) fn take_merge_target(&mut self) -> Option<glauca_core::types::PrTarget> {
-        self.merge_target.take()
-    }
-
-    /// The selected item as a PR action target, tagged with the query it belongs to.
-    pub fn selected_pr_target(&self) -> Option<glauca_core::types::PrTarget> {
-        let item = self.selected_item()?;
-        let query_id = self.selected_root_query_id()?;
-        Some(glauca_core::types::PrTarget::for_item(query_id, item))
     }
 
     pub(crate) fn clamp_item_cursor(&mut self) {
@@ -271,13 +276,15 @@ impl App {
     /// still listed and clamping it otherwise. `is_new` is already set per item by
     /// `cached_item_to_item_entry`, so nothing is recomputed here.
     pub(crate) fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
-        let selected = self.selected_item().cloned();
-        self.items = items;
+        let selected_idx = self
+            .selected_item()
+            .and_then(|sel| self.items.iter().position(|it| std::ptr::eq(it, sel)));
+        let old_items = std::mem::replace(&mut self.items, items);
         self.items_version = self.items_version.wrapping_add(1);
-        let selected_pos = selected.and_then(|sel| {
+        let selected_pos = selected_idx.and_then(|i| {
             self.filtered_items()
                 .iter()
-                .position(|it| it.is_same_item(&sel))
+                .position(|it| it.is_same_item(&old_items[i]))
         });
         match selected_pos {
             Some(pos) => self.item_cursor = pos,
@@ -463,21 +470,29 @@ mod tests {
         assert_eq!(app.selected_item().unwrap().number, 2);
     }
 
-    // A reload while the strategy menu is open can drop the chosen PR from the filtered
-    // list (merged elsewhere, say), moving the cursor to a neighbour. The merge must
-    // still go to the PR the menu was opened for.
+    // A reload while the action or merge menu is open can drop the chosen PR from the
+    // filtered list (merged elsewhere, say) and move the cursor to a neighbour; the left
+    // pane can move too. The choice must still go to the PR, and query, the menu opened on.
     #[test]
-    fn merge_target_is_fixed_when_the_menu_opens() {
+    fn action_target_is_fixed_when_the_menu_opens() {
         let mut app = make_app_with_items(&["a", "b", "c"]);
         app.item_cursor = 1;
+        app.open_action_menu();
         app.begin_merge();
         assert_eq!(app.input_mode, InputMode::MergeMenu);
 
         let without_b = vec![app.items[0].clone(), app.items[2].clone()];
         app.apply_items_to_view(without_b);
+        app.entries.push(LeftPaneEntry::Query(QueryEntry {
+            id: 2,
+            label: "other".into(),
+            query_str: "other".into(),
+            kind: "pull_request".into(),
+        }));
+        app.entry_cursor = 1;
 
-        assert_eq!(app.take_merge_target().map(|t| t.number), Some(2));
-        assert!(app.take_merge_target().is_none());
+        let target = app.action_pr_target().expect("pinned target");
+        assert_eq!((target.query_id, target.number), (1, 2));
     }
 
     #[test]

@@ -175,13 +175,22 @@ impl ItemEntry {
             && self.repo_name == other.repo_name
     }
 
+    /// What a sync compares to tell whether this item changed: `updated_at`, plus
+    /// `can_update_branch`, which flips when the base branch moves and so leaves
+    /// `updated_at` alone.
+    pub fn sync_fingerprint(&self) -> (&str, bool) {
+        (self.updated_at.as_str(), self.can_update_branch)
+    }
+
     /// Whether to flag the PR as needing Update branch: GitHub's own answer, which
     /// already accounts for strict branch protection and `allow_update_branch`.
     pub fn needs_branch_update(&self) -> bool {
         self.state == "open" && self.can_update_branch
     }
 
-    /// Detail-pane badge for a PR that needs Update branch.
+    /// Detail-pane badge for a PR that needs Update branch. `behind_by` is only as fresh
+    /// as the last by-number fetch while `can_update_branch` follows every search, so a
+    /// stored 0 can outlive the base moving on: it means "count unknown", not "0 commits".
     pub fn branch_update_badge(&self) -> Option<String> {
         self.needs_branch_update()
             .then(|| behind_base_label(self.behind_by.filter(|n| *n > 0)))
@@ -310,11 +319,12 @@ pub enum MergePrecheck {
     OfferUpdate,
 }
 
-/// Only `BEHIND` stops the merge: it is GitHub saying the branch must be updated
-/// first. Anything else, unknown included, is left for `gh pr merge` to judge.
-pub fn merge_precheck(status: Option<&str>) -> MergePrecheck {
+/// Only `BEHIND`, on a branch the viewer can update, stops the merge: it is GitHub
+/// saying the branch must be updated first. Anything else, unknown included, is left
+/// for `gh pr merge` to judge.
+pub fn merge_precheck(status: Option<&str>, can_update_branch: bool) -> MergePrecheck {
     match status {
-        Some("BEHIND") => MergePrecheck::OfferUpdate,
+        Some("BEHIND") if can_update_branch => MergePrecheck::OfferUpdate,
         _ => MergePrecheck::Proceed,
     }
 }
@@ -443,14 +453,21 @@ mod tests {
         assert_eq!(ItemAction::MergePR.label_for(&behind), "Merge PR");
     }
 
+    // Offering Update branch to someone who can't run it only leads to a gh error, so
+    // a BEHIND PR the viewer can't update goes on to `gh pr merge` and its own message.
     #[rstest]
-    #[case(Some("BEHIND"), MergePrecheck::OfferUpdate)]
-    #[case(Some("BLOCKED"), MergePrecheck::Proceed)]
-    #[case(Some("CLEAN"), MergePrecheck::Proceed)]
-    #[case(Some("UNKNOWN"), MergePrecheck::Proceed)]
-    #[case(None, MergePrecheck::Proceed)]
-    fn merge_precheck_cases(#[case] s: Option<&str>, #[case] expected: MergePrecheck) {
-        assert_eq!(merge_precheck(s), expected);
+    #[case(Some("BEHIND"), true, MergePrecheck::OfferUpdate)]
+    #[case(Some("BEHIND"), false, MergePrecheck::Proceed)]
+    #[case(Some("BLOCKED"), true, MergePrecheck::Proceed)]
+    #[case(Some("CLEAN"), true, MergePrecheck::Proceed)]
+    #[case(Some("UNKNOWN"), true, MergePrecheck::Proceed)]
+    #[case(None, true, MergePrecheck::Proceed)]
+    fn merge_precheck_cases(
+        #[case] s: Option<&str>,
+        #[case] can_update: bool,
+        #[case] expected: MergePrecheck,
+    ) {
+        assert_eq!(merge_precheck(s, can_update), expected);
     }
 
     #[test]

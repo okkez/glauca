@@ -12,16 +12,19 @@ impl GlaucaApp {
     /// cursor would silently move the detail pane and actions to another PR. Caller
     /// notifies. `is_new` is already set per item by `cached_item_to_item_entry`.
     pub(crate) fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
-        let selected = self.selected_item();
-        self.items = items;
+        let selected_idx = self.filtered.get(self.item_cursor).copied();
+        let old_items = std::mem::replace(&mut self.items, items);
         self.recompute_filtered();
-        let selected_pos = selected.and_then(|sel| {
-            self.filtered
-                .iter()
-                .position(|&i| self.items[i].is_same_item(&sel))
-        });
+        let selected_pos = selected_idx
+            .and_then(|old| old_items.get(old))
+            .and_then(|sel| {
+                self.filtered
+                    .iter()
+                    .position(|&i| self.items[i].is_same_item(sel))
+            });
         if let Some(pos) = selected_pos {
             self.item_cursor = pos;
+            self.items_list.scroll_to_reveal_item(pos);
         }
     }
 

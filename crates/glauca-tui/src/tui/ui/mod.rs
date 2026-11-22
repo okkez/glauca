@@ -166,7 +166,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::ReviewMenu => "REVIEW   j/k:move  Enter:submit  Esc:cancel".to_string(),
         InputMode::CommentsPopup => "COMMENTS  j/k:scroll  g/G:top/bottom  Esc/q:close".to_string(),
         InputMode::Help => "HELP     Esc/?/q:close".to_string(),
-        InputMode::ConfirmUpdateBranch => "CONFIRM  y:update  n/Esc:cancel".to_string(),
+        InputMode::ConfirmUpdateBranch => "CONFIRM  U:update  n/Esc:cancel".to_string(),
     };
 
     // Assemble only the segments that apply, in fixed order, then join, rather than

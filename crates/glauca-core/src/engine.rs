@@ -280,7 +280,8 @@ fn gh_subcommand(kind: &str) -> &'static str {
 }
 
 /// Spawn a gh action future and report its outcome to the UI as `ActionDone` /
-/// `ActionError`. Shared by the `OpenBrowser`/`Comment`/`Approve`/`Merge` arms.
+/// `ActionError`. Shared by the `OpenBrowser`/`Comment`/`Approve` arms; PR actions that
+/// change the PR go through `finish_pr_action` to re-fetch it as well.
 fn spawn_action(
     tx: mpsc::Sender<AppMessage>,
     fut: impl std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
@@ -420,9 +421,9 @@ pub async fn execute_update_branch(url: &str) -> anyhow::Result<String> {
     Ok("Branch updated".into())
 }
 
-/// Re-fetch one item by number, store it, and reload its query's list. Returns the
-/// stored item, or `None` when it no longer exists on GitHub. Callers hold an
-/// `item_refresh_sem` permit around it.
+/// Re-fetch one item by number, store it, and reload its query's list. Returns
+/// `false` when it no longer exists on GitHub. Callers hold an `item_refresh_sem`
+/// permit around it.
 async fn refetch_item(
     pool: &SqlitePool,
     gh: &Octocrab,
@@ -431,13 +432,13 @@ async fn refetch_item(
     repo_name: &str,
     number: i64,
     tx: &mpsc::Sender<AppMessage>,
-) -> anyhow::Result<Option<db::CachedItem>> {
+) -> anyhow::Result<bool> {
     let Some(item) = github::fetch_item(gh, query_id, repo_owner, repo_name, number).await? else {
-        return Ok(None);
+        return Ok(false);
     };
     db::upsert_item(pool, &item).await?;
     load_items_task(pool.clone(), query_id, false, tx.clone()).await;
-    Ok(Some(item))
+    Ok(true)
 }
 
 /// Merge `target`, unless GitHub says it is behind a base that must be merged in first:
@@ -452,7 +453,10 @@ async fn merge_with_precheck(
 ) {
     match github::fetch_merge_state(&gh, &target.repo_owner, &target.repo_name, target.number).await
     {
-        Ok(state) if merge_precheck(state.status.as_deref()) == MergePrecheck::OfferUpdate => {
+        Ok(state)
+            if merge_precheck(state.status.as_deref(), state.can_update_branch)
+                == MergePrecheck::OfferUpdate =>
+        {
             let _ = tx
                 .send(AppMessage::MergeBlockedBehind {
                     target,
@@ -469,47 +473,33 @@ async fn merge_with_precheck(
                 .await;
         }
     }
-    let done = match execute_merge(&target.url, &strategy).await {
-        Ok(done) => done,
-        Err(e) => {
-            let _ = tx.send(AppMessage::ActionError(e.to_string())).await;
-            return;
-        }
-    };
-    refetch_after_action(&pool, &gh, &sem, &target, &tx).await;
-    let _ = tx.send(AppMessage::ActionDone(done)).await;
+    let result = execute_merge(&target.url, &strategy).await;
+    finish_pr_action(result, &pool, &gh, &sem, &target, &tx).await;
 }
 
-/// Run `gh pr update-branch` on `target`, then re-fetch it so the badge clears.
-async fn update_branch_and_refetch(
-    pool: SqlitePool,
-    gh: Octocrab,
-    sem: Arc<Semaphore>,
-    target: PrTarget,
-    tx: mpsc::Sender<AppMessage>,
-) {
-    let done = match execute_update_branch(&target.url).await {
-        Ok(done) => done,
-        Err(e) => {
-            let _ = tx.send(AppMessage::ActionError(e.to_string())).await;
-            return;
-        }
-    };
-    refetch_after_action(&pool, &gh, &sem, &target, &tx).await;
-    let _ = tx.send(AppMessage::ActionDone(done)).await;
-}
-
-/// Re-fetch `target` after a gh action changed it on GitHub, so the cached state, list
-/// marker and badge follow. The action already happened, so a failed re-fetch only
-/// leaves them stale until the next sync.
-async fn refetch_after_action(
+/// Report a gh action on `target` to the UI, then re-fetch the PR so the cached state,
+/// list marker and badge follow. The report goes first: it is the outcome the user
+/// waits for, and the re-fetch may queue behind other refreshes on `sem`.
+async fn finish_pr_action(
+    result: anyhow::Result<String>,
     pool: &SqlitePool,
     gh: &Octocrab,
-    sem: &Arc<Semaphore>,
+    sem: &Semaphore,
     target: &PrTarget,
     tx: &mpsc::Sender<AppMessage>,
 ) {
-    let _permit = sem.clone().acquire_owned().await.ok();
+    match result {
+        Ok(done) => {
+            let _ = tx.send(AppMessage::ActionDone(done)).await;
+        }
+        Err(e) => {
+            let _ = tx.send(AppMessage::ActionError(e.to_string())).await;
+            return;
+        }
+    }
+    let _permit = sem.acquire().await.ok();
+    // The action already happened; a failed re-fetch only leaves the view stale until
+    // the next sync.
     if let Err(e) = refetch_item(
         pool,
         gh,
@@ -1464,8 +1454,9 @@ pub enum EngineCommand {
         event: ReviewEvent,
         body: Option<String>,
     },
-    /// Asks GitHub for the PR's `mergeStateStatus` first; if it is `BEHIND`, replies
-    /// with `AppMessage::MergeBlockedBehind` instead of merging.
+    /// Asks GitHub for the PR's merge state first; if it is `BEHIND` and the viewer can
+    /// update the branch, replies with `AppMessage::MergeBlockedBehind` instead of
+    /// merging. Otherwise (including when the check fails) it merges.
     Merge {
         target: PrTarget,
         strategy: MergeStrategy,
@@ -1894,8 +1885,8 @@ async fn command_loop(
                     )
                     .await
                     {
-                        Ok(Some(_)) => format!("Refreshed #{number}"),
-                        Ok(None) => format!("#{number} no longer exists"),
+                        Ok(true) => format!("Refreshed #{number}"),
+                        Ok(false) => format!("#{number} no longer exists"),
                         Err(e) => format!("Refresh failed: {e}"),
                     };
                     let _ = tx2.send(AppMessage::Status(status)).await;
@@ -2122,13 +2113,16 @@ async fn command_loop(
                 ));
             }
             EngineCommand::UpdateBranch { target } => {
-                tokio::spawn(update_branch_and_refetch(
+                let (pool, gh, sem, tx) = (
                     pool.clone(),
                     gh.clone(),
                     item_refresh_sem.clone(),
-                    target,
                     msg_tx.clone(),
-                ));
+                );
+                tokio::spawn(async move {
+                    let result = execute_update_branch(&target.url).await;
+                    finish_pr_action(result, &pool, &gh, &sem, &target, &tx).await;
+                });
             }
             EngineCommand::MarkItemRead {
                 query_id,

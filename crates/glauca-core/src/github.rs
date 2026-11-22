@@ -231,7 +231,7 @@ query FetchItem($owner: String!, $name: String!, $number: Int!) {{
 const MERGE_STATE_QUERY: &str = "
 query MergeState($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) { mergeStateStatus baseRefName }
+    pullRequest(number: $number) { mergeStateStatus baseRefName viewerCanUpdateBranch }
   }
 }";
 
@@ -241,14 +241,27 @@ pub struct MergeState {
     /// `BEHIND`, `CLEAN`, `BLOCKED`, …
     pub status: Option<String>,
     pub base_ref: Option<String>,
+    /// GitHub's `viewerCanUpdateBranch`.
+    pub can_update_branch: bool,
 }
 
-fn parse_merge_state(resp: &serde_json::Value) -> MergeState {
+fn parse_merge_state(resp: &serde_json::Value) -> Result<MergeState> {
+    let errors: Vec<GqlError> = serde_json::from_value(resp["errors"].clone()).unwrap_or_default();
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "GraphQL merge state fetch failed: {}",
+            error_detail(&errors)
+        );
+    }
     let pr = &resp["data"]["repository"]["pullRequest"];
-    MergeState {
+    if pr.is_null() {
+        anyhow::bail!("pull request not found");
+    }
+    Ok(MergeState {
         status: pr["mergeStateStatus"].as_str().map(str::to_string),
         base_ref: pr["baseRefName"].as_str().map(str::to_string),
-    }
+        can_update_branch: pr["viewerCanUpdateBranch"].as_bool() == Some(true),
+    })
 }
 
 pub async fn fetch_merge_state(
@@ -267,7 +280,7 @@ pub async fn fetch_merge_state(
             describe_octocrab_error(&e)
         )
     })?;
-    Ok(parse_merge_state(&resp))
+    parse_merge_state(&resp)
 }
 
 /// How far a PR's head is behind its base. A separate query because `compare` takes
@@ -1138,23 +1151,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_merge_state_reads_status_and_base() {
+    fn parse_merge_state_reads_status_base_and_permission() {
         let resp = serde_json::json!({ "data": { "repository": { "pullRequest": {
-            "mergeStateStatus": "BEHIND", "baseRefName": "master"
+            "mergeStateStatus": "BEHIND", "baseRefName": "master", "viewerCanUpdateBranch": true
         } } } });
         assert_eq!(
-            parse_merge_state(&resp),
+            parse_merge_state(&resp).unwrap(),
             MergeState {
                 status: Some("BEHIND".into()),
                 base_ref: Some("master".into()),
+                can_update_branch: true,
             }
         );
     }
 
+    // An HTTP 200 can still carry `errors` (SSO, rate limit) with no data; reporting it
+    // keeps a precheck that never runs from passing silently.
     #[test]
-    fn parse_merge_state_tolerates_a_missing_pr() {
+    fn parse_merge_state_reports_graphql_errors() {
+        let resp = serde_json::json!({
+            "data": null,
+            "errors": [{ "message": "Resource protected by organization SAML enforcement" }]
+        });
+        let err = parse_merge_state(&resp).unwrap_err().to_string();
+        assert!(err.contains("SAML"), "{err}");
+    }
+
+    #[test]
+    fn parse_merge_state_reports_a_missing_pr() {
         let resp = serde_json::json!({ "data": { "repository": { "pullRequest": null } } });
-        assert_eq!(parse_merge_state(&resp), MergeState::default());
+        assert!(parse_merge_state(&resp).is_err());
     }
 
     #[rstest]
@@ -1182,8 +1208,6 @@ mod tests {
         assert!(item_query().contains("viewerCanUpdateBranch"));
     }
 
-    // The count only decorates the Update branch badge, so it is fetched only when GitHub
-    // would offer the button, and never for a fork (its head ref isn't in this repo).
     #[rstest]
     #[case::offered("PullRequest", true, false, Some("feature"), Some("feature"))]
     #[case::not_offered("PullRequest", false, false, Some("feature"), None)]
@@ -1213,10 +1237,14 @@ mod tests {
             } } }
         });
         assert_eq!(parse_behind_by(&resp), Some(2));
-        let no_base = serde_json::json!({
+    }
+
+    #[test]
+    fn parse_behind_by_is_none_without_a_base_ref() {
+        let resp = serde_json::json!({
             "data": { "repository": { "pullRequest": { "baseRef": null } } }
         });
-        assert_eq!(parse_behind_by(&no_base), None);
+        assert_eq!(parse_behind_by(&resp), None);
     }
 
     #[test]

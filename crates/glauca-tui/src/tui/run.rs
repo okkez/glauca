@@ -303,7 +303,7 @@ where
                             }
                         }
                         Action::Confirm => {
-                            if let Some(item) = app.selected_item().cloned() {
+                            if let Some(item) = app.action_item.clone() {
                                 let actions = item_actions(&item.kind);
                                 if let Some(action) = actions.get(app.action_cursor).cloned() {
                                     match action {
@@ -400,7 +400,7 @@ where
                                         }
                                         ItemAction::UpdateBranch => {
                                             app.input_mode = InputMode::Normal;
-                                            if let Some(target) = app.selected_pr_target() {
+                                            if let Some(target) = app.action_pr_target() {
                                                 app.status = Some(format!(
                                                     "Updating branch of #{}…",
                                                     target.number
@@ -422,7 +422,7 @@ where
                         Action::ConfirmMergeStrategy => {
                             let strategy = MergeStrategy::all().get(app.merge_strategy_cursor).cloned();
                             app.input_mode = InputMode::Normal;
-                            if let (Some(target), Some(strategy)) = (app.take_merge_target(), strategy) {
+                            if let (Some(target), Some(strategy)) = (app.action_pr_target(), strategy) {
                                 engine.send(EngineCommand::Merge { target, strategy }).await;
                             }
                         }

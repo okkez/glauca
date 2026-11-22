@@ -1876,7 +1876,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_upsert_preserves_behind_by() {
+    async fn behind_by_is_kept_by_searches_and_replaced_by_refetches() {
         let (pool, _file) = test_pool().await;
         let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
             .await

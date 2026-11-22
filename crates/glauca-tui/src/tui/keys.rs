@@ -26,10 +26,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     }
 }
 
-/// `y` confirms (the run loop sends the update); `n` / Esc drop the prompt.
+/// `U` confirms (the run loop sends the update); `n` / Esc drop the prompt.
 fn handle_key_confirm_update_branch(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
-        KeyCode::Char('y') => Action::ConfirmUpdateBranch,
+        // Not `y`: the prompt opens unbidden after a merge, and `y` copies the URL in Normal.
+        KeyCode::Char('U') => Action::ConfirmUpdateBranch,
         KeyCode::Char('n') | KeyCode::Esc => {
             app.pending_update_branch = None;
             app.input_mode = InputMode::Normal;
@@ -158,8 +159,7 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
             if matches!(app.focus, Focus::ItemList | Focus::ItemDetail)
                 && app.selected_item().is_some() =>
         {
-            app.input_mode = InputMode::ActionMenu;
-            app.action_cursor = 0;
+            app.open_action_menu();
         }
 
         KeyCode::Char('o')
@@ -259,12 +259,15 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Action {
 
 fn handle_key_action_menu(app: &mut App, key: KeyEvent) -> Action {
     let available_len = app
-        .selected_item()
+        .action_item
+        .as_ref()
         .map(|item| item_actions(&item.kind).len())
         .unwrap_or(0);
 
     match key.code {
         KeyCode::Esc => {
+            app.action_item = None;
+            app.action_query_id = None;
             app.input_mode = InputMode::Normal;
         }
         KeyCode::Char('j') | KeyCode::Down => {
@@ -563,35 +566,41 @@ fn handle_key_filter_stream_modal(app: &mut App, key: KeyEvent, save: Action) ->
 mod tests {
     use super::*;
     use crate::tui::test_support::*;
+    use glauca_core::types::PrTarget;
 
-    #[rstest::rstest]
-    #[case(KeyCode::Char('y'), true)]
-    #[case(KeyCode::Char('n'), false)]
-    #[case(KeyCode::Esc, false)]
-    fn confirm_update_branch_keys(#[case] code: KeyCode, #[case] confirms: bool) {
+    fn app_with_update_branch_prompt() -> App {
         let mut app = make_app_with_items(&["First"]);
-        app.on_merge_blocked_behind(
-            glauca_core::types::PrTarget::for_item(1, &app.items[0].clone()),
-            None,
-        );
-        let action = handle_key(&mut app, make_key(code));
-        if confirms {
-            assert!(matches!(action, Action::ConfirmUpdateBranch));
-        } else {
-            assert!(matches!(action, Action::None));
-            assert_eq!(app.input_mode, InputMode::Normal);
-            assert!(app.pending_update_branch.is_none());
-        }
+        app.on_merge_blocked_behind(PrTarget::for_item(1, &app.items[0]), None);
+        app
     }
 
     #[test]
-    fn confirm_update_branch_ignores_other_keys() {
-        let mut app = make_app_with_items(&["First"]);
-        app.on_merge_blocked_behind(
-            glauca_core::types::PrTarget::for_item(1, &app.items[0].clone()),
-            None,
-        );
-        let action = handle_key(&mut app, make_key(KeyCode::Char('x')));
+    fn confirm_update_branch_on_capital_u() {
+        let mut app = app_with_update_branch_prompt();
+        let action = handle_key(&mut app, make_key(KeyCode::Char('U')));
+        assert!(matches!(action, Action::ConfirmUpdateBranch));
+    }
+
+    #[rstest::rstest]
+    #[case(KeyCode::Char('n'))]
+    #[case(KeyCode::Esc)]
+    fn cancel_update_branch(#[case] code: KeyCode) {
+        let mut app = app_with_update_branch_prompt();
+        let action = handle_key(&mut app, make_key(code));
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.pending_update_branch.is_none());
+    }
+
+    // The prompt opens on its own about a second after a merge is confirmed, so a key
+    // meant for Normal mode can land on it: `y` (copy URL) must not push to the PR.
+    #[rstest::rstest]
+    #[case(KeyCode::Char('y'))]
+    #[case(KeyCode::Char('x'))]
+    #[case(KeyCode::Enter)]
+    fn update_branch_prompt_ignores_other_keys(#[case] code: KeyCode) {
+        let mut app = app_with_update_branch_prompt();
+        let action = handle_key(&mut app, make_key(code));
         assert!(matches!(action, Action::None));
         assert_eq!(app.input_mode, InputMode::ConfirmUpdateBranch);
         assert!(app.pending_update_branch.is_some());
@@ -1109,7 +1118,7 @@ mod tests {
     #[test]
     fn action_menu_navigation_and_confirm_work() {
         let mut app = make_app_with_items(&["First"]);
-        app.input_mode = InputMode::ActionMenu;
+        app.open_action_menu();
 
         handle_key_action_menu(&mut app, make_key(KeyCode::Down));
         assert_eq!(app.action_cursor, 1);
@@ -1180,7 +1189,8 @@ mod tests {
     #[test]
     fn merge_menu_escape_returns_to_action_menu() {
         let mut app = make_app_with_items(&["First"]);
-        app.input_mode = InputMode::MergeMenu;
+        app.open_action_menu();
+        app.begin_merge();
         app.merge_strategy_cursor = 1;
 
         let action = handle_key_merge_menu(&mut app, make_key(KeyCode::Esc));

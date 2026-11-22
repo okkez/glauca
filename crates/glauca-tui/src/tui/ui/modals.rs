@@ -155,7 +155,7 @@ fn draw_filter_stream_modal(f: &mut Frame, app: &App, area: Rect, title: &str, c
 }
 
 pub(super) fn draw_action_popup(f: &mut Frame, app: &App, area: Rect) {
-    let item = match app.selected_item() {
+    let item = match app.action_item.as_ref() {
         Some(item) => item,
         None => return,
     };
@@ -369,7 +369,7 @@ pub(super) fn draw_merge_menu_popup(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// The y/n prompt shown when a merge was held back because the PR is behind its base.
+/// The U/n prompt shown when a merge was held back because the PR is behind its base.
 pub(super) fn draw_update_branch_confirm_popup(f: &mut Frame, app: &App, area: Rect) {
     let Some((target, base_ref)) = &app.pending_update_branch else {
         return;
@@ -396,7 +396,7 @@ pub(super) fn draw_update_branch_confirm_popup(f: &mut Frame, app: &App, area: R
         chunks[0],
     );
     f.render_widget(
-        Paragraph::new("y: update  n/Esc: cancel")
+        Paragraph::new("U: update  n/Esc: cancel")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center),
         chunks[1],
