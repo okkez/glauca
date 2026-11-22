@@ -218,6 +218,31 @@ mod tests {
             .collect::<String>()
     }
 
+    fn frame_text(app: &App, width: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // The list marker is lowercase "behind"; the detail badge reads "Behind base".
+    #[rstest]
+    #[case::needs_update(true, true)]
+    #[case::up_to_date(false, false)]
+    fn item_list_marks_prs_that_need_update_branch(#[case] can_update: bool, #[case] shown: bool) {
+        let mut app = make_app_with_items(&["a PR"]);
+        app.items[0].state = "open".into();
+        app.items[0].can_update_branch = can_update;
+        assert_eq!(frame_text(&app, 200).contains("behind"), shown);
+    }
+
     /// An `@me` filter with no login shows the wrong list and explains nothing, so the
     /// warning has to reach the screen, disappear once the login lands, and give its row
     /// back when it does.

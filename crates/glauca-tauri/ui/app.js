@@ -991,6 +991,7 @@ function renderItemList() {
       el("div", { class: "it-meta" }, [
         it.repo_private ? octicon("lock", "muted", 12) : null,
         el("span", { class: "meta-text", text: metaText }),
+        isBehind(it) ? el("span", { class: "meta-behind", text: "behind" }) : null,
         el("span", { class: "meta-time", text: relativeTime(it.updated_at, now) }),
       ])
     );

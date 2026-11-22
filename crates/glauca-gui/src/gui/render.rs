@@ -484,6 +484,15 @@ impl GlaucaApp {
                             .text_color(cx.theme().muted_foreground)
                             .child(SharedString::from(meta)),
                     )
+                    .when(item.needs_branch_update(), |e| {
+                        e.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(cx.theme().yellow)
+                                .child("behind"),
+                        )
+                    })
                     // Relative update time, right-aligned at the row's end.
                     .child(
                         div()
