@@ -246,13 +246,7 @@ pub struct MergeState {
 }
 
 fn parse_merge_state(resp: &serde_json::Value) -> Result<MergeState> {
-    let errors: Vec<GqlError> = serde_json::from_value(resp["errors"].clone()).unwrap_or_default();
-    if !errors.is_empty() {
-        anyhow::bail!(
-            "GraphQL merge state fetch failed: {}",
-            error_detail(&errors)
-        );
-    }
+    bail_on_graphql_errors(resp, "GraphQL merge state fetch")?;
     let pr = &resp["data"]["repository"]["pullRequest"];
     if pr.is_null() {
         anyhow::bail!("pull request not found");
@@ -274,13 +268,7 @@ pub async fn fetch_merge_state(
         "query": MERGE_STATE_QUERY,
         "variables": { "owner": owner, "name": name, "number": number }
     });
-    let resp: serde_json::Value = client.graphql(&payload).await.map_err(|e| {
-        anyhow::anyhow!(
-            "GraphQL merge state fetch failed: {}",
-            describe_octocrab_error(&e)
-        )
-    })?;
-    parse_merge_state(&resp)
+    parse_merge_state(&graphql_value(client, &payload, "GraphQL merge state fetch").await?)
 }
 
 /// How far a PR's head is behind its base. A separate query because `compare` takes
@@ -310,6 +298,112 @@ fn compare_head(node: &serde_json::Value) -> Option<&str> {
 fn parse_behind_by(resp: &serde_json::Value) -> Option<i64> {
     resp.pointer("/data/repository/pullRequest/baseRef/compare/behindBy")
         .and_then(|v| v.as_i64())
+}
+
+/// Bail with `what` and GitHub's messages when an HTTP 200 response carries `errors`.
+fn bail_on_graphql_errors(resp: &serde_json::Value, what: &str) -> Result<()> {
+    let errors: Vec<GqlError> = serde_json::from_value(resp["errors"].clone()).unwrap_or_default();
+    if !errors.is_empty() {
+        anyhow::bail!("{what} failed: {}", error_detail(&errors));
+    }
+    Ok(())
+}
+
+const UPDATE_TARGET_QUERY: &str = "
+query UpdateTarget($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { id headRefOid headRefName isCrossRepository }
+  }
+}";
+
+/// What updating a PR's branch needs to know about it.
+#[derive(Debug, PartialEq)]
+struct UpdateTarget {
+    id: String,
+    head_oid: String,
+    /// `None` for a fork, whose head ref can't be compared from the base repository.
+    compare_head: Option<String>,
+}
+
+fn parse_update_target(resp: &serde_json::Value) -> Result<UpdateTarget> {
+    bail_on_graphql_errors(resp, "GraphQL pull request fetch")?;
+    let pr = &resp["data"]["repository"]["pullRequest"];
+    let (Some(id), Some(head_oid)) = (pr["id"].as_str(), pr["headRefOid"].as_str()) else {
+        anyhow::bail!("pull request not found");
+    };
+    let compare_head = (pr["isCrossRepository"].as_bool() == Some(false))
+        .then(|| pr["headRefName"].as_str().map(str::to_string))
+        .flatten();
+    Ok(UpdateTarget {
+        id: id.to_string(),
+        head_oid: head_oid.to_string(),
+        compare_head,
+    })
+}
+
+/// `expectedHeadOid` makes GitHub refuse if someone pushed after we looked.
+const UPDATE_BRANCH_MUTATION: &str = "
+mutation UpdateBranch($id: ID!, $headOid: GitObjectID!) {
+  updatePullRequestBranch(input: { pullRequestId: $id, expectedHeadOid: $headOid }) {
+    pullRequest { id }
+  }
+}";
+
+fn check_update_branch_response(resp: &serde_json::Value) -> Result<()> {
+    bail_on_graphql_errors(resp, "Update branch")
+}
+
+/// What [`update_branch`] did.
+#[derive(Debug, PartialEq)]
+pub enum BranchUpdate {
+    Updated,
+    AlreadyUpToDate,
+}
+
+async fn graphql_value(
+    client: &Octocrab,
+    payload: &serde_json::Value,
+    what: &str,
+) -> Result<serde_json::Value> {
+    client
+        .graphql(payload)
+        .await
+        .map_err(|e| anyhow::anyhow!("{what} failed: {}", describe_octocrab_error(&e)))
+}
+
+/// Merge a PR's base branch into its head, as the web UI's Update branch button does.
+pub async fn update_branch(
+    client: &Octocrab,
+    owner: &str,
+    name: &str,
+    number: i64,
+) -> Result<BranchUpdate> {
+    let vars = serde_json::json!({ "owner": owner, "name": name, "number": number });
+    let payload = serde_json::json!({ "query": UPDATE_TARGET_QUERY, "variables": vars });
+    let target =
+        parse_update_target(&graphql_value(client, &payload, "GraphQL pull request fetch").await?)?;
+
+    if let Some(head) = &target.compare_head {
+        let payload = serde_json::json!({
+            "query": COMPARE_QUERY,
+            "variables": { "owner": owner, "name": name, "number": number, "head": head }
+        });
+        // Unknown is not up to date: let the mutation decide.
+        match graphql_value(client, &payload, "compare query").await {
+            Ok(resp) if parse_behind_by(&resp) == Some(0) => {
+                return Ok(BranchUpdate::AlreadyUpToDate);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!(error = %e, "compare before update branch failed"),
+        }
+    }
+
+    let payload = serde_json::json!({
+        "query": UPDATE_BRANCH_MUTATION,
+        "variables": { "id": target.id, "headOid": target.head_oid }
+    });
+    check_update_branch_response(&graphql_value(client, &payload, "Update branch").await?)?;
+    Ok(BranchUpdate::Updated)
 }
 
 #[derive(Deserialize)]
@@ -1237,6 +1331,67 @@ mod tests {
             } } }
         });
         assert_eq!(parse_behind_by(&resp), Some(2));
+    }
+
+    #[test]
+    fn parse_update_target_reads_id_head_oid_and_head_ref() {
+        let resp = serde_json::json!({ "data": { "repository": { "pullRequest": {
+            "id": "PR_1", "headRefOid": "abc", "headRefName": "feature",
+            "isCrossRepository": false
+        } } } });
+        assert_eq!(
+            parse_update_target(&resp).unwrap(),
+            UpdateTarget {
+                id: "PR_1".into(),
+                head_oid: "abc".into(),
+                compare_head: Some("feature".into()),
+            }
+        );
+    }
+
+    // A fork's head ref doesn't exist in the base repository, so it can't be compared.
+    #[test]
+    fn parse_update_target_has_no_compare_head_for_a_fork() {
+        let resp = serde_json::json!({ "data": { "repository": { "pullRequest": {
+            "id": "PR_1", "headRefOid": "abc", "headRefName": "feature",
+            "isCrossRepository": true
+        } } } });
+        assert_eq!(parse_update_target(&resp).unwrap().compare_head, None);
+    }
+
+    #[test]
+    fn parse_update_target_reports_graphql_errors_and_a_missing_pr() {
+        let errored = serde_json::json!({
+            "data": null,
+            "errors": [{ "message": "Resource protected by organization SAML enforcement" }]
+        });
+        let err = parse_update_target(&errored).unwrap_err().to_string();
+        assert!(err.contains("SAML"), "{err}");
+        let missing = serde_json::json!({ "data": { "repository": { "pullRequest": null } } });
+        assert!(parse_update_target(&missing).is_err());
+    }
+
+    // The mutation answers HTTP 200 with `errors` when GitHub refuses (conflicts, no
+    // permission, head moved); that must not read as "Branch updated".
+    #[test]
+    fn check_update_branch_response_reports_graphql_errors() {
+        let refused = serde_json::json!({
+            "data": { "updatePullRequestBranch": null },
+            "errors": [{ "message": "merge conflict between base and head" }]
+        });
+        let err = check_update_branch_response(&refused)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("merge conflict"), "{err}");
+        let ok = serde_json::json!({ "data": { "updatePullRequestBranch": {
+            "pullRequest": { "id": "PR_1" }
+        } } });
+        assert!(check_update_branch_response(&ok).is_ok());
+    }
+
+    #[test]
+    fn update_branch_mutation_pins_the_head_it_was_asked_about() {
+        assert!(UPDATE_BRANCH_MUTATION.contains("expectedHeadOid"));
     }
 
     #[test]

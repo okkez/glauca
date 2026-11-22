@@ -213,7 +213,7 @@ pub enum ItemAction {
     Comment,
     ViewComments,
     ApprovePR,
-    /// Merge the base branch into the PR's head (`gh pr update-branch`).
+    /// Merge the base branch into the PR's head, as the web UI's Update branch button does.
     UpdateBranch,
     MergePR,
     CopyUrl,

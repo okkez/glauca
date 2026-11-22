@@ -414,11 +414,27 @@ pub async fn execute_merge(url: &str, strategy: &MergeStrategy) -> anyhow::Resul
     Ok(format!("PR merged ({})", strategy.label()))
 }
 
-pub async fn execute_update_branch(url: &str) -> anyhow::Result<String> {
-    let mut cmd = tokio::process::Command::new("gh");
-    cmd.args(["pr", "update-branch", url]);
-    run_background_command(cmd, "gh pr update-branch failed").await?;
-    Ok("Branch updated".into())
+fn branch_update_message(outcome: github::BranchUpdate) -> &'static str {
+    match outcome {
+        github::BranchUpdate::Updated => "Branch updated",
+        github::BranchUpdate::AlreadyUpToDate => "Branch already up to date",
+    }
+}
+
+/// Append a skipped merge precheck to the merge outcome, which is reported right after
+/// and would otherwise hide that the `BEHIND` check never ran.
+fn note_skipped_precheck(
+    result: anyhow::Result<String>,
+    precheck_error: Option<&str>,
+) -> anyhow::Result<String> {
+    let Some(precheck_error) = precheck_error else {
+        return result;
+    };
+    let note = format!(" — precheck skipped: {precheck_error}");
+    match result {
+        Ok(done) => Ok(done + &note),
+        Err(e) => Err(anyhow::anyhow!("{e}{note}")),
+    }
 }
 
 /// Re-fetch one item by number, store it, and reload its query's list. Returns
@@ -451,29 +467,28 @@ async fn merge_with_precheck(
     strategy: MergeStrategy,
     tx: mpsc::Sender<AppMessage>,
 ) {
-    match github::fetch_merge_state(&gh, &target.repo_owner, &target.repo_name, target.number).await
-    {
-        Ok(state)
-            if merge_precheck(state.status.as_deref(), state.can_update_branch)
-                == MergePrecheck::OfferUpdate =>
+    let precheck_error =
+        match github::fetch_merge_state(&gh, &target.repo_owner, &target.repo_name, target.number)
+            .await
         {
-            let _ = tx
-                .send(AppMessage::MergeBlockedBehind {
-                    target,
-                    base_ref: state.base_ref,
-                })
-                .await;
-            return;
-        }
-        Ok(_) => {}
-        // Not knowing is no reason to block: gh pr merge has the final say.
-        Err(e) => {
-            let _ = tx
-                .send(AppMessage::Status(format!("Merge precheck failed: {e}")))
-                .await;
-        }
-    }
+            Ok(state)
+                if merge_precheck(state.status.as_deref(), state.can_update_branch)
+                    == MergePrecheck::OfferUpdate =>
+            {
+                let _ = tx
+                    .send(AppMessage::MergeBlockedBehind {
+                        target,
+                        base_ref: state.base_ref,
+                    })
+                    .await;
+                return;
+            }
+            Ok(_) => None,
+            // Not knowing is no reason to block: gh pr merge has the final say.
+            Err(e) => Some(e.to_string()),
+        };
     let result = execute_merge(&target.url, &strategy).await;
+    let result = note_skipped_precheck(result, precheck_error.as_deref());
     finish_pr_action(result, &pool, &gh, &sem, &target, &tx).await;
 }
 
@@ -2120,7 +2135,14 @@ async fn command_loop(
                     msg_tx.clone(),
                 );
                 tokio::spawn(async move {
-                    let result = execute_update_branch(&target.url).await;
+                    let result = github::update_branch(
+                        &gh,
+                        &target.repo_owner,
+                        &target.repo_name,
+                        target.number,
+                    )
+                    .await
+                    .map(|outcome| branch_update_message(outcome).to_string());
                     finish_pr_action(result, &pool, &gh, &sem, &target, &tx).await;
                 });
             }
@@ -2226,6 +2248,34 @@ mod tests {
     use super::*;
     use crate::test_support::{seed_three_queries, test_pool};
     use rstest::rstest;
+
+    #[rstest]
+    #[case::updated(github::BranchUpdate::Updated, "Branch updated")]
+    #[case::already(github::BranchUpdate::AlreadyUpToDate, "Branch already up to date")]
+    fn branch_update_message_cases(#[case] outcome: github::BranchUpdate, #[case] expected: &str) {
+        assert_eq!(branch_update_message(outcome), expected);
+    }
+
+    // The precheck's failure is otherwise lost under the merge outcome reported right
+    // after it, and the user would not know the BEHIND check never ran.
+    #[test]
+    fn skipped_precheck_is_noted_on_the_merge_outcome() {
+        let done = note_skipped_precheck(Ok("PR merged (Merge)".into()), Some("rate limited"));
+        assert_eq!(
+            done.unwrap(),
+            "PR merged (Merge) — precheck skipped: rate limited"
+        );
+
+        let failed =
+            note_skipped_precheck(Err(anyhow::anyhow!("not mergeable")), Some("rate limited"));
+        assert_eq!(
+            failed.unwrap_err().to_string(),
+            "not mergeable — precheck skipped: rate limited"
+        );
+
+        let clean = note_skipped_precheck(Ok("PR merged (Merge)".into()), None);
+        assert_eq!(clean.unwrap(), "PR merged (Merge)");
+    }
 
     /// Cache one unread PR by `alice` under `query_id`.
     async fn seed_unread_item(pool: &SqlitePool, query_id: i64) {

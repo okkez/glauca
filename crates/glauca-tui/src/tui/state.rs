@@ -217,24 +217,33 @@ impl App {
         self.selected_entry().map(|e| e.root_query_id())
     }
 
-    /// A merge was held back because the PR is behind its base. Prompt for Update branch,
-    /// unless the user is mid-input somewhere else: hijacking that mode would throw away
-    /// what they were typing, so just point them at the action instead.
+    /// A merge was held back because the PR is behind its base. Prompt for Update branch;
+    /// if the user is mid-input somewhere else, hijacking that mode would throw away what
+    /// they were typing, so say so now and prompt once they are back in Normal mode.
     pub(crate) fn on_merge_blocked_behind(
         &mut self,
         target: glauca_core::types::PrTarget,
         base_ref: Option<String>,
     ) {
-        if self.input_mode == InputMode::Normal {
-            self.pending_update_branch = Some((target, base_ref));
-            self.input_mode = InputMode::ConfirmUpdateBranch;
-        } else {
+        if self.input_mode != InputMode::Normal {
             self.status = Some(format!(
-                "#{} is behind {} — use Update branch",
+                "#{} is behind {} — not merged",
                 target.number,
                 base_ref.as_deref().unwrap_or("base")
             ));
         }
+        self.pending_update_branch = Some((target, base_ref));
+        self.open_deferred_update_branch_prompt();
+    }
+
+    /// Open the update-branch prompt held back by `on_merge_blocked_behind`, once the
+    /// user is in Normal mode. Returns whether it opened. Called before every redraw.
+    pub(crate) fn open_deferred_update_branch_prompt(&mut self) -> bool {
+        if self.input_mode != InputMode::Normal || self.pending_update_branch.is_none() {
+            return false;
+        }
+        self.input_mode = InputMode::ConfirmUpdateBranch;
+        true
     }
 
     /// The PR the update-branch prompt was about, consuming it.
@@ -398,17 +407,34 @@ mod tests {
         assert_eq!(app.pending_update_branch.as_ref().unwrap().0.number, 42);
     }
 
+    // Taking over the filter input would throw away what is being typed, but a status line
+    // alone gets overwritten by the next sync and the user never learns the merge didn't
+    // happen. So the prompt waits until the user is back in Normal mode.
     #[test]
-    fn blocked_behind_while_in_other_mode_only_sets_status() {
+    fn blocked_behind_while_in_other_mode_prompts_once_back_in_normal() {
         let mut app = make_app_with_items(&["First"]);
         app.input_mode = InputMode::Filter;
         app.on_merge_blocked_behind(target(42), Some("master".into()));
         assert_eq!(app.input_mode, InputMode::Filter);
-        assert!(app.pending_update_branch.is_none());
         assert_eq!(
             app.status.as_deref(),
-            Some("#42 is behind master — use Update branch")
+            Some("#42 is behind master — not merged")
         );
+
+        assert!(!app.open_deferred_update_branch_prompt());
+        assert_eq!(app.input_mode, InputMode::Filter);
+
+        app.input_mode = InputMode::Normal;
+        assert!(app.open_deferred_update_branch_prompt());
+        assert_eq!(app.input_mode, InputMode::ConfirmUpdateBranch);
+        assert_eq!(app.pending_update_branch.as_ref().unwrap().0.number, 42);
+    }
+
+    #[test]
+    fn no_deferred_prompt_without_a_pending_update_branch() {
+        let mut app = make_app_with_items(&["First"]);
+        assert!(!app.open_deferred_update_branch_prompt());
+        assert_eq!(app.input_mode, InputMode::Normal);
     }
 
     #[test]
