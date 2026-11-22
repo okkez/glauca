@@ -156,6 +156,8 @@ pub struct ItemEntry {
     pub merge_state_status: Option<String>,
     /// Commits the head is behind its base, as of the last by-number re-fetch.
     pub behind_by: Option<i64>,
+    /// GitHub's `viewerCanUpdateBranch`: the web UI would offer "Update branch".
+    pub can_update_branch: bool,
     /// The `updated_at` the user had seen when they last read this item. `None` means
     /// never read; the item is unread iff `updated_at` is newer — `logic::is_item_unread`.
     pub last_read_updated_at: Option<String>,
@@ -176,6 +178,18 @@ impl ItemEntry {
             return None;
         }
         self.behind_by.filter(|n| *n > 0)
+    }
+
+    /// Whether to flag the PR as needing Update branch: GitHub's own answer, which
+    /// already accounts for strict branch protection and `allow_update_branch`.
+    pub fn needs_branch_update(&self) -> bool {
+        self.state == "open" && self.can_update_branch
+    }
+
+    /// Detail-pane badge for a PR that needs Update branch.
+    pub fn behind_base_badge(&self) -> Option<String> {
+        self.needs_branch_update()
+            .then(|| behind_base_label(self.behind_by_commits()))
     }
 }
 
@@ -221,13 +235,11 @@ impl ItemAction {
         }
     }
 
-    /// The menu label for this action on `item`: flags Update branch when the PR is
-    /// known to be behind its base.
+    /// The menu label for this action on `item`: flags Update branch when the PR
+    /// needs it.
     pub fn label_for(&self, item: &ItemEntry) -> String {
         match self {
-            Self::UpdateBranch if item.behind_by_commits().is_some() => {
-                "Update branch (behind)".into()
-            }
+            Self::UpdateBranch if item.needs_branch_update() => "Update branch (behind)".into(),
             _ => self.label().into(),
         }
     }
@@ -278,10 +290,13 @@ impl PrTarget {
     }
 }
 
-/// Detail-pane badge text for a PR `n` (≥ 1) commits behind its base.
-pub fn behind_base_label(n: i64) -> String {
-    let unit = if n == 1 { "commit" } else { "commits" };
-    format!("Behind base ({n} {unit})")
+/// Badge text for a PR behind its base, with the commit count when it is known.
+pub fn behind_base_label(n: Option<i64>) -> String {
+    match n {
+        Some(1) => "Behind base (1 commit)".into(),
+        Some(n) => format!("Behind base ({n} commits)"),
+        None => "Behind base".into(),
+    }
 }
 
 /// Confirmation shown when a merge was held back because the PR is behind `base`.
@@ -374,10 +389,35 @@ mod tests {
     }
 
     #[rstest]
-    #[case(1, "Behind base (1 commit)")]
-    #[case(2, "Behind base (2 commits)")]
-    fn behind_base_label_cases(#[case] n: i64, #[case] expected: &str) {
+    #[case(Some(1), "Behind base (1 commit)")]
+    #[case(Some(2), "Behind base (2 commits)")]
+    #[case(None, "Behind base")]
+    fn behind_base_label_cases(#[case] n: Option<i64>, #[case] expected: &str) {
         assert_eq!(behind_base_label(n), expected);
+    }
+
+    // GitHub says whether the web UI would offer the button; only an open PR counts,
+    // and the count only decorates the badge.
+    #[rstest]
+    #[case::offered_with_count("open", true, Some(3), Some("Behind base (3 commits)"))]
+    #[case::offered_no_count("open", true, None, Some("Behind base"))]
+    #[case::offered_stale_zero("open", true, Some(0), Some("Behind base"))]
+    #[case::not_offered("open", false, Some(5), None)]
+    #[case::merged("merged", true, Some(2), None)]
+    fn behind_base_badge_cases(
+        #[case] state: &str,
+        #[case] can_update: bool,
+        #[case] behind_by: Option<i64>,
+        #[case] expected: Option<&str>,
+    ) {
+        let item = ItemEntry {
+            state: state.into(),
+            can_update_branch: can_update,
+            behind_by,
+            ..Default::default()
+        };
+        assert_eq!(item.needs_branch_update(), expected.is_some());
+        assert_eq!(item.behind_base_badge().as_deref(), expected);
     }
 
     #[rstest]
@@ -402,12 +442,12 @@ mod tests {
     fn label_for_marks_behind() {
         let behind = ItemEntry {
             state: "open".into(),
-            behind_by: Some(2),
+            can_update_branch: true,
             ..Default::default()
         };
-        let up_to_date = ItemEntry {
+        let not_offered = ItemEntry {
             state: "open".into(),
-            behind_by: Some(0),
+            behind_by: Some(4),
             ..Default::default()
         };
         assert_eq!(
@@ -415,7 +455,7 @@ mod tests {
             "Update branch (behind)"
         );
         assert_eq!(
-            ItemAction::UpdateBranch.label_for(&up_to_date),
+            ItemAction::UpdateBranch.label_for(&not_offered),
             "Update branch"
         );
         assert_eq!(ItemAction::MergePR.label_for(&behind), "Merge PR");

@@ -498,6 +498,7 @@ mod tests {
             milestone: None,
             merge_state_status: None,
             behind_by: None,
+            can_update_branch: false,
             last_read_updated_at: None,
             is_new: false,
         }

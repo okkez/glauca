@@ -872,6 +872,8 @@ pub struct CachedItem {
     pub merge_state_status: Option<String>,
     /// Commits the head is behind its base. Same provenance as `merge_state_status`.
     pub behind_by: Option<i64>,
+    /// GitHub's `viewerCanUpdateBranch`. Every fetch carries it, so searches overwrite it.
+    pub can_update_branch: bool,
     /// The `updated_at` the user had seen when they last read this item. `None`
     /// means never read. Preserved across re-syncs so a later update (advancing
     /// `updated_at`) makes the item unread again. See `logic::is_item_unread`.
@@ -915,14 +917,16 @@ where
 {
     let is_draft_int = item.is_draft as i64;
     let repo_private_int = item.repo_private as i64;
+    let can_update_branch_int = item.can_update_branch as i64;
     sqlx::query!(
         r#"
         INSERT INTO items
             (query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
              author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
              reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
-             review_decision, milestone, last_read_updated_at, merge_state_status, behind_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             review_decision, milestone, last_read_updated_at, merge_state_status, behind_by,
+             can_update_branch)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
             title               = excluded.title,
@@ -949,6 +953,7 @@ where
             merge_state_status  = CASE WHEN ? THEN items.merge_state_status
                                        ELSE excluded.merge_state_status END,
             behind_by           = CASE WHEN ? THEN items.behind_by ELSE excluded.behind_by END,
+            can_update_branch   = excluded.can_update_branch,
             -- A search that returned this item proves it still matches, so clear its
             -- prune strikes; a by-number re-fetch proves nothing, so it leaves them.
             missing_count       = CASE WHEN ? THEN 0 ELSE missing_count END
@@ -982,6 +987,7 @@ where
         item.last_read_updated_at,
         item.merge_state_status,
         item.behind_by,
+        can_update_branch_int,
         matched_query,
         matched_query,
         matched_query,
@@ -998,7 +1004,8 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
         SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
                author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
                reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
-               review_decision, milestone, last_read_updated_at, merge_state_status, behind_by
+               review_decision, milestone, last_read_updated_at, merge_state_status, behind_by,
+               can_update_branch
         FROM items
         WHERE query_id = ?
         ORDER BY updated_at DESC
@@ -1037,6 +1044,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
             milestone: r.milestone,
             merge_state_status: r.merge_state_status,
             behind_by: r.behind_by,
+            can_update_branch: r.can_update_branch != 0,
             last_read_updated_at: r.last_read_updated_at,
         })
         .collect())
@@ -1910,6 +1918,27 @@ mod tests {
         let items = fetch_items(&pool, qid).await.expect("fetch items");
         assert_eq!(items[0].merge_state_status.as_deref(), Some("CLEAN"));
         assert_eq!(items[0].behind_by, Some(0));
+    }
+
+    #[tokio::test]
+    async fn search_upsert_overwrites_can_update_branch() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        let mut behind = make_item(qid, 1, "PR");
+        behind.can_update_branch = true;
+        upsert_items(&pool, &[behind]).await.expect("search upsert");
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        assert!(items[0].can_update_branch);
+
+        // Unlike merge info, every search carries it, so a later search clears it.
+        upsert_items(&pool, &[make_item(qid, 1, "PR")])
+            .await
+            .expect("search upsert");
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        assert!(!items[0].can_update_branch);
     }
 
     #[tokio::test]

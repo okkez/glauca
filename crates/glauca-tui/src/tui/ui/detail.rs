@@ -177,9 +177,9 @@ pub(super) fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
                         Span::styled("Branch:   ", Style::default().fg(Color::Gray)),
                         Span::raw(format!("{head} → {base}")),
                     ];
-                    if let Some(n) = item.behind_by_commits() {
+                    if let Some(badge) = item.behind_base_badge() {
                         spans.push(Span::styled(
-                            format!("  {}", glauca_core::types::behind_base_label(n)),
+                            format!("  {badge}"),
                             Style::default().fg(Color::Yellow),
                         ));
                     }

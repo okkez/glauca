@@ -218,6 +218,7 @@ pub fn cached_item_to_item_entry(c: CachedItem) -> ItemEntry {
         milestone: c.milestone,
         merge_state_status: c.merge_state_status,
         behind_by: c.behind_by,
+        can_update_branch: c.can_update_branch,
         last_read_updated_at: c.last_read_updated_at,
         is_new,
     }

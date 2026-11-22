@@ -180,6 +180,7 @@ const ITEM_FIELDS: &str = "
         isDraft
         baseRefName
         headRefName
+        viewerCanUpdateBranch
         reviewDecision
         reviews(last: 30) {
           nodes {
@@ -710,6 +711,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
     } else {
         None
     };
+    let can_update_branch = is_pr && node["viewerCanUpdateBranch"].as_bool() == Some(true);
 
     Some(CachedItem {
         query_id,
@@ -739,6 +741,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         milestone,
         merge_state_status,
         behind_by: None,
+        can_update_branch,
         // A freshly fetched item carries no read marker; upsert preserves the
         // existing row's `last_read_updated_at` via its DO UPDATE clause.
         last_read_updated_at: None,
@@ -1105,6 +1108,31 @@ mod tests {
         assert_eq!(item.merge_state_status.as_deref(), Some("BEHIND"));
         // The behind count comes from a separate compare query in `fetch_item`.
         assert_eq!(item.behind_by, None);
+    }
+
+    #[rstest]
+    #[case::pr_true("PullRequest", Some(true), true)]
+    #[case::pr_false("PullRequest", Some(false), false)]
+    #[case::pr_missing("PullRequest", None, false)]
+    #[case::issue("Issue", Some(true), false)]
+    fn node_to_cached_item_can_update_branch(
+        #[case] typename: &str,
+        #[case] value: Option<bool>,
+        #[case] expected: bool,
+    ) {
+        let mut node = minimal_pr_node();
+        node["__typename"] = typename.into();
+        if let Some(v) = value {
+            node["viewerCanUpdateBranch"] = v.into();
+        }
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert_eq!(item.can_update_branch, expected);
+    }
+
+    #[test]
+    fn search_and_item_queries_ask_for_viewer_can_update_branch() {
+        assert!(search_query().contains("viewerCanUpdateBranch"));
+        assert!(item_query().contains("viewerCanUpdateBranch"));
     }
 
     #[test]

@@ -1077,7 +1077,7 @@ function renderDetail(it) {
 
   if ((it.labels || []).length) header.appendChild(textField("labels", it.labels.join(", ")));
   if (it.base_ref && it.head_ref) {
-    const behind = isBehind(it) ? `  ·  ${behindBaseLabel(it.behind_by)}` : "";
+    const behind = isBehind(it) ? `  ·  ${behindBaseLabel(it)}` : "";
     header.appendChild(textField("branch", `${it.head_ref} → ${it.base_ref}${behind}`));
   }
   const assignees = it.assignees || [];
@@ -1120,14 +1120,15 @@ function renderDetail(it) {
   );
 }
 
-// Mirrors ItemEntry::behind_by_commits: behind_by outlives a merge (search syncs
-// keep it), so only an open PR counts as behind.
+// Mirrors ItemEntry::needs_branch_update.
 function isBehind(it) {
-  return it.state === "open" && it.behind_by > 0;
+  return it.state === "open" && it.can_update_branch;
 }
 
 // Same wording as glauca_core::types::behind_base_label / update_branch_prompt.
-function behindBaseLabel(n) {
+function behindBaseLabel(it) {
+  const n = it.behind_by;
+  if (!(n > 0)) return "Behind base";
   return `Behind base (${n} ${n === 1 ? "commit" : "commits"})`;
 }
 function updateBranchPrompt(number, base) {
