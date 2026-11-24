@@ -122,7 +122,7 @@ where
     let mut needs_redraw = true;
 
     loop {
-        needs_redraw |= app.open_deferred_update_branch_prompt();
+        needs_redraw |= app.open_pending_update_branch_prompt();
         if needs_redraw {
             terminal.draw(|f| ui::draw(f, &app))?;
         }

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT query_id FROM items WHERE repo_owner = ? AND repo_name = ? AND number = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "query_id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "items",
+            "name": "query_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0c0430939ce6f06b3b539c03cc1b99cb2273f6c5c03681fdd8c757abf7b688dc"
+}

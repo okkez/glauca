@@ -217,28 +217,33 @@ impl App {
         self.selected_entry().map(|e| e.root_query_id())
     }
 
-    /// A merge was held back because the PR is behind its base. Prompt for Update branch;
-    /// if the user is mid-input somewhere else, hijacking that mode would throw away what
-    /// they were typing, so say so now and prompt once they are back in Normal mode.
+    /// A merge was held back because the PR is behind its base: prompt for Update branch.
+    /// Mid-input elsewhere, taking over the mode would throw away what was typed, so the
+    /// prompt waits for Normal mode. One prompt at a time: while one is pending, a later
+    /// blocked merge is only reported.
     pub(crate) fn on_merge_blocked_behind(
         &mut self,
         target: glauca_core::types::PrTarget,
         base_ref: Option<String>,
     ) {
-        if self.input_mode != InputMode::Normal {
-            self.status = Some(format!(
-                "#{} is behind {} — not merged",
-                target.number,
-                base_ref.as_deref().unwrap_or("base")
-            ));
+        let not_merged = format!(
+            "{} is behind {} — not merged",
+            target.reference(),
+            base_ref.as_deref().unwrap_or("base")
+        );
+        if self.pending_update_branch.is_some() {
+            self.status = Some(not_merged);
+            return;
         }
         self.pending_update_branch = Some((target, base_ref));
-        self.open_deferred_update_branch_prompt();
+        if !self.open_pending_update_branch_prompt() {
+            self.status = Some(not_merged);
+        }
     }
 
-    /// Open the update-branch prompt held back by `on_merge_blocked_behind`, once the
-    /// user is in Normal mode. Returns whether it opened. Called before every redraw.
-    pub(crate) fn open_deferred_update_branch_prompt(&mut self) -> bool {
+    /// Open the pending update-branch prompt if the user is in Normal mode. Returns
+    /// whether it opened. Called before every redraw.
+    pub(crate) fn open_pending_update_branch_prompt(&mut self) -> bool {
         if self.input_mode != InputMode::Normal || self.pending_update_branch.is_none() {
             return false;
         }
@@ -407,9 +412,6 @@ mod tests {
         assert_eq!(app.pending_update_branch.as_ref().unwrap().0.number, 42);
     }
 
-    // Taking over the filter input would throw away what is being typed, but a status line
-    // alone gets overwritten by the next sync and the user never learns the merge didn't
-    // happen. So the prompt waits until the user is back in Normal mode.
     #[test]
     fn blocked_behind_while_in_other_mode_prompts_once_back_in_normal() {
         let mut app = make_app_with_items(&["First"]);
@@ -418,22 +420,37 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::Filter);
         assert_eq!(
             app.status.as_deref(),
-            Some("#42 is behind master — not merged")
+            Some("owner/repo#42 is behind master — not merged")
         );
 
-        assert!(!app.open_deferred_update_branch_prompt());
+        assert!(!app.open_pending_update_branch_prompt());
         assert_eq!(app.input_mode, InputMode::Filter);
 
         app.input_mode = InputMode::Normal;
-        assert!(app.open_deferred_update_branch_prompt());
+        assert!(app.open_pending_update_branch_prompt());
         assert_eq!(app.input_mode, InputMode::ConfirmUpdateBranch);
         assert_eq!(app.pending_update_branch.as_ref().unwrap().0.number, 42);
     }
 
+    // Only one prompt can be pending; a second blocked merge must not silently replace
+    // the first, so it is reported on the status line instead.
     #[test]
-    fn no_deferred_prompt_without_a_pending_update_branch() {
+    fn a_second_blocked_merge_keeps_the_first_prompt() {
         let mut app = make_app_with_items(&["First"]);
-        assert!(!app.open_deferred_update_branch_prompt());
+        app.on_merge_blocked_behind(target(42), Some("master".into()));
+        app.on_merge_blocked_behind(target(43), Some("master".into()));
+        assert_eq!(app.input_mode, InputMode::ConfirmUpdateBranch);
+        assert_eq!(app.pending_update_branch.as_ref().unwrap().0.number, 42);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("owner/repo#43 is behind master — not merged")
+        );
+    }
+
+    #[test]
+    fn no_prompt_without_a_pending_update_branch() {
+        let mut app = make_app_with_items(&["First"]);
+        assert!(!app.open_pending_update_branch_prompt());
         assert_eq!(app.input_mode, InputMode::Normal);
     }
 

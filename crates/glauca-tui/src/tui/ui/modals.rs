@@ -374,7 +374,7 @@ pub(super) fn draw_update_branch_confirm_popup(f: &mut Frame, app: &App, area: R
     let Some((target, base_ref)) = &app.pending_update_branch else {
         return;
     };
-    let prompt = glauca_core::types::update_branch_prompt(target.number, base_ref.as_deref());
+    let prompt = glauca_core::types::update_branch_prompt(target, base_ref.as_deref());
     let width = (prompt.chars().count() as u16 + 4).max(40);
     let popup_area = centered_rect_fixed(width, 4, area);
 

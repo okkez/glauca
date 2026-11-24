@@ -1132,8 +1132,8 @@ function behindBaseLabel(it) {
   if (!(n > 0)) return "Behind base";
   return `Behind base (${n} ${n === 1 ? "commit" : "commits"})`;
 }
-function updateBranchPrompt(number, base) {
-  return `#${number} is behind ${base || "base"}. Update branch now?`;
+function updateBranchPrompt(target, base) {
+  return `${target.repo_owner}/${target.repo_name}#${target.number} is behind ${base || "base"}. Update branch now?`;
 }
 
 // A PR as the engine's PrTarget: enough to act on it and re-fetch it into
@@ -1816,7 +1816,7 @@ function handleMessage(msg) {
       break;
     case "MergeBlockedBehind":
       // Act on the PR named in the message; the selection may have moved since.
-      confirmModal(updateBranchPrompt(d.target.number, d.base_ref), { okText: "Update branch", okClass: "" }).then(
+      confirmModal(updateBranchPrompt(d.target, d.base_ref), { okText: "Update branch", okClass: "" }).then(
         (ok) => {
           if (ok) call("update_branch", { target: d.target });
         }

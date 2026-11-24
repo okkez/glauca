@@ -205,7 +205,7 @@ impl GlaucaApp {
         cx: &mut Context<Self>,
     ) {
         let this = cx.weak_entity();
-        let prompt = update_branch_prompt(target.number, base_ref.as_deref());
+        let prompt = update_branch_prompt(&target, base_ref.as_deref());
         window.open_dialog(cx, move |dlg, _w, _cx| {
             let this = this.clone();
             let target = target.clone();

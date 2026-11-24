@@ -292,6 +292,11 @@ impl PrTarget {
             url: item.url.clone(),
         }
     }
+
+    /// `owner/repo#N`.
+    pub fn reference(&self) -> String {
+        format!("{}/{}#{}", self.repo_owner, self.repo_name, self.number)
+    }
 }
 
 /// Badge text for a PR behind its base, with the commit count when it is known.
@@ -304,9 +309,10 @@ pub fn behind_base_label(n: Option<i64>) -> String {
 }
 
 /// Confirmation shown when a merge was held back because the PR is behind `base`.
-pub fn update_branch_prompt(number: i64, base: Option<&str>) -> String {
+pub fn update_branch_prompt(target: &PrTarget, base: Option<&str>) -> String {
     format!(
-        "#{number} is behind {}. Update branch now?",
+        "{} is behind {}. Update branch now?",
+        target.reference(),
         base.unwrap_or("base")
     )
 }
@@ -412,11 +418,19 @@ mod tests {
         assert_eq!(item.branch_update_badge().as_deref(), expected);
     }
 
+    // The prompt can open long after the merge, while another repo is on screen.
     #[rstest]
-    #[case(Some("master"), "#42 is behind master. Update branch now?")]
-    #[case(None, "#42 is behind base. Update branch now?")]
+    #[case(Some("master"), "owner/repo#42 is behind master. Update branch now?")]
+    #[case(None, "owner/repo#42 is behind base. Update branch now?")]
     fn update_branch_prompt_cases(#[case] base: Option<&str>, #[case] expected: &str) {
-        assert_eq!(update_branch_prompt(42, base), expected);
+        let target = PrTarget {
+            query_id: 1,
+            repo_owner: "owner".into(),
+            repo_name: "repo".into(),
+            number: 42,
+            url: String::new(),
+        };
+        assert_eq!(update_branch_prompt(&target, base), expected);
     }
 
     #[test]

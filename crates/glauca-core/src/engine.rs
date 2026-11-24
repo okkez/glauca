@@ -200,7 +200,8 @@ pub async fn fetch_comments_task(
             "number": number as i64,
         }
     });
-    let resp: serde_json::Value = gh.graphql(&payload).await?;
+    let resp = github::graphql_json(gh, &payload, "GraphQL comments fetch").await?;
+    github::bail_on_graphql_errors(&resp, "GraphQL comments fetch")?;
     let nodes = resp
         .pointer("/data/repository/issueOrPullRequest/comments/nodes")
         .and_then(|v| v.as_array())
@@ -414,13 +415,6 @@ pub async fn execute_merge(url: &str, strategy: &MergeStrategy) -> anyhow::Resul
     Ok(format!("PR merged ({})", strategy.label()))
 }
 
-fn branch_update_message(outcome: github::BranchUpdate) -> &'static str {
-    match outcome {
-        github::BranchUpdate::Updated => "Branch updated",
-        github::BranchUpdate::AlreadyUpToDate => "Branch already up to date",
-    }
-}
-
 /// Append a skipped merge precheck to the merge outcome, which is reported right after
 /// and would otherwise hide that the `BEHIND` check never ran.
 fn note_skipped_precheck(
@@ -437,9 +431,9 @@ fn note_skipped_precheck(
     }
 }
 
-/// Re-fetch one item by number, store it, and reload its query's list. Returns
-/// `false` when it no longer exists on GitHub. Callers hold an `item_refresh_sem`
-/// permit around it.
+/// Re-fetch one item by number, store it in every query that caches it, and reload
+/// those queries' lists. Returns `false` when it no longer exists on GitHub. Callers
+/// hold an `item_refresh_sem` permit around it.
 async fn refetch_item(
     pool: &SqlitePool,
     gh: &Octocrab,
@@ -449,11 +443,19 @@ async fn refetch_item(
     number: i64,
     tx: &mpsc::Sender<AppMessage>,
 ) -> anyhow::Result<bool> {
-    let Some(item) = github::fetch_item(gh, query_id, repo_owner, repo_name, number).await? else {
+    let Some(mut item) = github::fetch_item(gh, query_id, repo_owner, repo_name, number).await?
+    else {
         return Ok(false);
     };
-    db::upsert_item(pool, &item).await?;
-    load_items_task(pool.clone(), query_id, false, tx.clone()).await;
+    let mut query_ids = db::query_ids_with_item(pool, repo_owner, repo_name, number).await?;
+    if !query_ids.contains(&query_id) {
+        query_ids.push(query_id);
+    }
+    for id in query_ids {
+        item.query_id = id;
+        db::upsert_item(pool, &item).await?;
+        load_items_task(pool.clone(), id, false, tx.clone()).await;
+    }
     Ok(true)
 }
 
@@ -467,32 +469,31 @@ async fn merge_with_precheck(
     strategy: MergeStrategy,
     tx: mpsc::Sender<AppMessage>,
 ) {
-    let precheck_error =
-        match github::fetch_merge_state(&gh, &target.repo_owner, &target.repo_name, target.number)
-            .await
-        {
-            Ok(state)
-                if merge_precheck(state.status.as_deref(), state.can_update_branch)
-                    == MergePrecheck::OfferUpdate =>
-            {
-                let _ = tx
-                    .send(AppMessage::MergeBlockedBehind {
-                        target,
-                        base_ref: state.base_ref,
-                    })
-                    .await;
-                return;
-            }
-            Ok(_) => None,
-            // Not knowing is no reason to block: gh pr merge has the final say.
-            Err(e) => Some(e.to_string()),
-        };
+    let state =
+        github::fetch_merge_state(&gh, &target.repo_owner, &target.repo_name, target.number).await;
+    if let Ok(state) = &state
+        && merge_precheck(state.status.as_deref(), state.can_update_branch)
+            == MergePrecheck::OfferUpdate
+    {
+        let _ = tx
+            .send(AppMessage::MergeBlockedBehind {
+                target: target.clone(),
+                base_ref: state.base_ref.clone(),
+            })
+            .await;
+        // The cached flag may predate the base moving on; bring the marker in line with
+        // what the prompt says.
+        refresh_after_action(&pool, &gh, &sem, &target, &tx).await;
+        return;
+    }
+    // Not knowing is no reason to block: gh pr merge has the final say.
+    let precheck_error = state.err().map(|e| e.to_string());
     let result = execute_merge(&target.url, &strategy).await;
     let result = note_skipped_precheck(result, precheck_error.as_deref());
     finish_pr_action(result, &pool, &gh, &sem, &target, &tx).await;
 }
 
-/// Report a gh action on `target` to the UI, then re-fetch the PR so the cached state,
+/// Report a PR action on `target` to the UI, then re-fetch the PR so the cached state,
 /// list marker and badge follow. The report goes first: it is the outcome the user
 /// waits for, and the re-fetch may queue behind other refreshes on `sem`.
 async fn finish_pr_action(
@@ -512,9 +513,19 @@ async fn finish_pr_action(
             return;
         }
     }
+    refresh_after_action(pool, gh, sem, target, tx).await;
+}
+
+/// Re-fetch `target` after acting on it. A failure only leaves the view stale until the
+/// next sync, so it is reported as a status rather than as the action's outcome.
+async fn refresh_after_action(
+    pool: &SqlitePool,
+    gh: &Octocrab,
+    sem: &Semaphore,
+    target: &PrTarget,
+    tx: &mpsc::Sender<AppMessage>,
+) {
     let _permit = sem.acquire().await.ok();
-    // The action already happened; a failed re-fetch only leaves the view stale until
-    // the next sync.
     if let Err(e) = refetch_item(
         pool,
         gh,
@@ -2142,7 +2153,7 @@ async fn command_loop(
                         target.number,
                     )
                     .await
-                    .map(|outcome| branch_update_message(outcome).to_string());
+                    .map(|outcome| outcome.message().to_string());
                     finish_pr_action(result, &pool, &gh, &sem, &target, &tx).await;
                 });
             }
@@ -2249,30 +2260,27 @@ mod tests {
     use crate::test_support::{seed_three_queries, test_pool};
     use rstest::rstest;
 
-    #[rstest]
-    #[case::updated(github::BranchUpdate::Updated, "Branch updated")]
-    #[case::already(github::BranchUpdate::AlreadyUpToDate, "Branch already up to date")]
-    fn branch_update_message_cases(#[case] outcome: github::BranchUpdate, #[case] expected: &str) {
-        assert_eq!(branch_update_message(outcome), expected);
-    }
-
-    // The precheck's failure is otherwise lost under the merge outcome reported right
-    // after it, and the user would not know the BEHIND check never ran.
     #[test]
-    fn skipped_precheck_is_noted_on_the_merge_outcome() {
+    fn skipped_precheck_is_noted_on_a_merged_outcome() {
         let done = note_skipped_precheck(Ok("PR merged (Merge)".into()), Some("rate limited"));
         assert_eq!(
             done.unwrap(),
             "PR merged (Merge) — precheck skipped: rate limited"
         );
+    }
 
+    #[test]
+    fn skipped_precheck_is_noted_on_a_failed_merge() {
         let failed =
             note_skipped_precheck(Err(anyhow::anyhow!("not mergeable")), Some("rate limited"));
         assert_eq!(
             failed.unwrap_err().to_string(),
             "not mergeable — precheck skipped: rate limited"
         );
+    }
 
+    #[test]
+    fn a_precheck_that_ran_leaves_the_merge_outcome_alone() {
         let clean = note_skipped_precheck(Ok("PR merged (Merge)".into()), None);
         assert_eq!(clean.unwrap(), "PR merged (Merge)");
     }
