@@ -25,3 +25,5 @@ tracing-appender.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 rstest.workspace = true
+# A local stub server in github.rs tests checks what octocrab returns for a GraphQL call.
+tokio = { workspace = true, features = ["net", "io-util"] }
