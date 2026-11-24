@@ -1,3 +1,27 @@
+## 0.3.1 (2026-11-24)
+
+### Features
+
+- fetch PR merge state and behind count on single-item refresh ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- add update-branch action and merge precheck types ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- precheck merge state and run gh pr update-branch ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- show behind-base badge and offer update branch ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- show behind-base badge and offer update branch ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- show behind-base badge and offer update branch ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- flag PRs that need Update branch from the list sync ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- mark PRs that need Update branch in the item list ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+
+### Fixes
+
+- stop mounting overlay layers that gpui-component 0.9 now owns ([#85](https://github.com/okkez/glauca/pull/85) by @renovate[bot])
+- apply the GitHub dark palette through Theme::update ([#96](https://github.com/okkez/glauca/pull/96) by @okkez)
+- only show the behind-base badge for open PRs ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- keep merge targets stable and surface Update branch flag changes ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- pin merge targets and refresh PRs after merging ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- harden Update branch prompts and pin menu targets ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- update PR branches via GraphQL and stop losing merge outcomes ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+- keep Update branch prompts and cached PR rows consistent ([#97](https://github.com/okkez/glauca/pull/97) by @okkez)
+
 ## 0.3.0 (2026-09-06)
 
 ### Breaking Changes
