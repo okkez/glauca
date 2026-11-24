@@ -1,3 +1,9 @@
+## 0.3.2 (2026-11-24)
+
+### Fixes
+
+- read whole GraphQL responses after the octocrab 0.54 upgrade ([#98](https://github.com/okkez/glauca/pull/98) by @okkez)
+
 ## 0.3.1 (2026-11-24)
 
 ### Features
