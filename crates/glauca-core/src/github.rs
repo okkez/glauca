@@ -447,6 +447,17 @@ fn error_detail(errors: &[GqlError]) -> String {
         .join("; ")
 }
 
+/// POST a GraphQL request and deserialize the whole response body.
+///
+/// Not `Octocrab::graphql`: in octocrab 0.54 it returns only `data` and turns
+/// `errors` into `Err`, which loses partial results and the rate-limit marker.
+async fn post_graphql<R: serde::de::DeserializeOwned>(
+    client: &Octocrab,
+    payload: &serde_json::Value,
+) -> octocrab::Result<R> {
+    client.post("/graphql", Some(payload)).await
+}
+
 /// Run a GraphQL request and return the raw JSON, labelling a transport failure with
 /// `what`. An HTTP 200 can still carry `errors`: check with [`bail_on_graphql_errors`].
 pub(crate) async fn graphql_json(
@@ -454,8 +465,7 @@ pub(crate) async fn graphql_json(
     payload: &serde_json::Value,
     what: &str,
 ) -> Result<serde_json::Value> {
-    client
-        .graphql(payload)
+    post_graphql(client, payload)
         .await
         .map_err(|e| anyhow::anyhow!("{what} failed: {}", describe_octocrab_error(&e)))
 }
@@ -647,7 +657,7 @@ pub async fn search_page(
             "after": after,
         }
     });
-    let resp: GqlResponse = match client.graphql(&payload).await {
+    let resp: GqlResponse = match post_graphql(client, &payload).await {
         Ok(resp) => resp,
         Err(e) => return Err(classify_octocrab_error(e)),
     };
@@ -932,6 +942,95 @@ mod tests {
     use super::*;
     use crate::types::ActorKind;
     use rstest::rstest;
+
+    /// A client pointed at a one-shot local server that answers the next request with
+    /// HTTP 200 and `body`, so a test sees exactly what octocrab hands back.
+    async fn client_answering(body: serde_json::Value) -> Octocrab {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            // Read until the headers end and the declared body has arrived.
+            loop {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).to_lowercase();
+                let Some(head_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let len = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .map_or(0, |v| v.trim().parse::<usize>().unwrap());
+                if req.len() >= head_end + 4 + len {
+                    break;
+                }
+            }
+            let body = body.to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+        });
+        Octocrab::builder()
+            .base_uri(format!("http://{addr}"))
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn search_page_reads_a_successful_response() {
+        let client = client_answering(serde_json::json!({
+            "data": { "search": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": []
+            } }
+        }))
+        .await;
+        let page = search_page(&client, 1, "is:pr", None, None).await;
+        assert!(
+            page.is_ok(),
+            "search failed: {:?}",
+            page.err().map(|e| match e {
+                SearchError::RateLimited => "rate limited".to_string(),
+                SearchError::Other(e) => e.to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_page_spots_a_rate_limit_in_a_200_response() {
+        let client = client_answering(serde_json::json!({
+            "data": null,
+            "errors": [{ "type": "RATE_LIMITED", "message": "API rate limit exceeded" }]
+        }))
+        .await;
+        let page = search_page(&client, 1, "is:pr", None, None).await;
+        assert!(matches!(page, Err(SearchError::RateLimited)));
+    }
+
+    #[tokio::test]
+    async fn graphql_json_returns_the_whole_response() {
+        let client = client_answering(serde_json::json!({
+            "data": { "viewer": { "login": "someone" } },
+            "errors": [{ "message": "partial failure" }]
+        }))
+        .await;
+        let resp = graphql_json(&client, &serde_json::json!({ "query": "{}" }), "test")
+            .await
+            .unwrap();
+        assert_eq!(resp["data"]["viewer"]["login"], "someone");
+        assert!(bail_on_graphql_errors(&resp, "test").is_err());
+    }
 
     // Which `/user` failures the caller may retry. Getting this wrong is silent either
     // way: retry a hopeless 401 forever, or give up on a recoverable outage.
