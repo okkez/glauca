@@ -122,6 +122,7 @@ where
     let mut needs_redraw = true;
 
     loop {
+        needs_redraw |= app.open_pending_update_branch_prompt();
         if needs_redraw {
             terminal.draw(|f| ui::draw(f, &app))?;
         }
@@ -303,7 +304,7 @@ where
                             }
                         }
                         Action::Confirm => {
-                            if let Some(item) = app.selected_item().cloned() {
+                            if let Some(item) = app.action_item.clone() {
                                 let actions = item_actions(&item.kind);
                                 if let Some(action) = actions.get(app.action_cursor).cloned() {
                                     match action {
@@ -382,10 +383,7 @@ where
                                                 }
                                             }
                                         }
-                                        ItemAction::MergePR => {
-                                            app.input_mode = InputMode::MergeMenu;
-                                            app.merge_strategy_cursor = 0;
-                                        }
+                                        ItemAction::MergePR => app.begin_merge(),
                                         ItemAction::CopyUrl => {
                                             app.input_mode = InputMode::Normal;
                                             app.status = Some(match copy_to_clipboard_osc52(&item.url) {
@@ -401,22 +399,32 @@ where
                                             app.input_mode = InputMode::Normal;
                                             refresh_selected_item(&mut app, &engine).await;
                                         }
+                                        ItemAction::UpdateBranch => {
+                                            app.input_mode = InputMode::Normal;
+                                            if let Some(target) = app.action_pr_target() {
+                                                app.status = Some(format!(
+                                                    "Updating branch of #{}…",
+                                                    target.number
+                                                ));
+                                                engine.send(EngineCommand::UpdateBranch { target }).await;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+                        Action::ConfirmUpdateBranch => {
+                            app.input_mode = InputMode::Normal;
+                            if let Some(target) = app.take_update_branch_target() {
+                                app.status = Some(format!("Updating branch of #{}…", target.number));
+                                engine.send(EngineCommand::UpdateBranch { target }).await;
+                            }
+                        }
                         Action::ConfirmMergeStrategy => {
-                            if let Some(item) = app.selected_item().cloned() {
-                                let strategies = MergeStrategy::all();
-                                if let Some(strategy) = strategies.get(app.merge_strategy_cursor).cloned() {
-                                    app.input_mode = InputMode::Normal;
-                                    engine
-                                        .send(EngineCommand::Merge {
-                                            url: item.url.clone(),
-                                            strategy,
-                                        })
-                                        .await;
-                                }
+                            let strategy = MergeStrategy::all().get(app.merge_strategy_cursor).cloned();
+                            app.input_mode = InputMode::Normal;
+                            if let (Some(target), Some(strategy)) = (app.action_pr_target(), strategy) {
+                                engine.send(EngineCommand::Merge { target, strategy }).await;
                             }
                         }
                         Action::ConfirmReviewEvent => {

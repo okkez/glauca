@@ -180,6 +180,7 @@ const ITEM_FIELDS: &str = "
         isDraft
         baseRefName
         headRefName
+        viewerCanUpdateBranch
         reviewDecision
         reviews(last: 30) {
           nodes {
@@ -217,10 +218,207 @@ fn item_query() -> String {
         "
 query FetchItem($owner: String!, $name: String!, $number: Int!) {{
   repository(owner: $owner, name: $name) {{
-    issueOrPullRequest(number: $number) {{{ITEM_FIELDS}}}
+    issueOrPullRequest(number: $number) {{{ITEM_FIELDS}
+      ... on PullRequest {{ isCrossRepository }}
+    }}
   }}
 }}"
     )
+}
+
+/// `mergeStateStatus` for the merge precheck. Kept out of `ITEM_FIELDS`: in a 100-node
+/// search it makes GitHub time out.
+const MERGE_STATE_QUERY: &str = "
+query MergeState($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { mergeStateStatus baseRefName viewerCanUpdateBranch }
+  }
+}";
+
+/// A PR's merge state as GitHub reports it right now.
+#[derive(Debug, Default, PartialEq)]
+pub struct MergeState {
+    /// `BEHIND`, `CLEAN`, `BLOCKED`, …
+    pub status: Option<String>,
+    pub base_ref: Option<String>,
+    /// GitHub's `viewerCanUpdateBranch`.
+    pub can_update_branch: bool,
+}
+
+const MERGE_STATE_FETCH: &str = "GraphQL merge state fetch";
+
+fn parse_merge_state(resp: &serde_json::Value) -> Result<MergeState> {
+    bail_on_graphql_errors(resp, MERGE_STATE_FETCH)?;
+    let pr = &resp["data"]["repository"]["pullRequest"];
+    if pr.is_null() {
+        anyhow::bail!("pull request not found");
+    }
+    Ok(MergeState {
+        status: pr["mergeStateStatus"].as_str().map(str::to_string),
+        base_ref: pr["baseRefName"].as_str().map(str::to_string),
+        can_update_branch: pr["viewerCanUpdateBranch"].as_bool() == Some(true),
+    })
+}
+
+pub async fn fetch_merge_state(
+    client: &Octocrab,
+    owner: &str,
+    name: &str,
+    number: i64,
+) -> Result<MergeState> {
+    let payload = serde_json::json!({
+        "query": MERGE_STATE_QUERY,
+        "variables": { "owner": owner, "name": name, "number": number }
+    });
+    parse_merge_state(&graphql_json(client, &payload, MERGE_STATE_FETCH).await?)
+}
+
+/// How far a PR's head is behind its base. A separate query because `compare` takes
+/// the head ref name as an argument, which the item query has to return first.
+const COMPARE_QUERY: &str = "
+query CompareBase($owner: String!, $name: String!, $number: Int!, $head: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      baseRef { compare(headRef: $head) { behindBy } }
+    }
+  }
+}";
+
+/// The PR's head branch as named in its base repository; `None` for a fork, whose head
+/// ref doesn't exist there.
+fn same_repo_head(pr: &serde_json::Value) -> Option<&str> {
+    if pr["isCrossRepository"].as_bool() != Some(false) {
+        return None;
+    }
+    pr["headRefName"].as_str()
+}
+
+/// The head ref to compare against the base, when the count would be shown: GitHub
+/// offers Update branch and the head can be compared.
+fn compare_head(node: &serde_json::Value) -> Option<&str> {
+    let offered = node["__typename"].as_str() == Some("PullRequest")
+        && node["viewerCanUpdateBranch"].as_bool() == Some(true);
+    if !offered {
+        return None;
+    }
+    same_repo_head(node)
+}
+
+fn parse_behind_by(resp: &serde_json::Value) -> Option<i64> {
+    resp.pointer("/data/repository/pullRequest/baseRef/compare/behindBy")
+        .and_then(|v| v.as_i64())
+}
+
+/// Commits `head` is behind the PR's base; `Ok(None)` when the base ref is gone.
+async fn fetch_behind_by(
+    client: &Octocrab,
+    owner: &str,
+    name: &str,
+    number: i64,
+    head: &str,
+    what: &str,
+) -> Result<Option<i64>> {
+    let payload = serde_json::json!({
+        "query": COMPARE_QUERY,
+        "variables": { "owner": owner, "name": name, "number": number, "head": head }
+    });
+    let resp = graphql_json(client, &payload, what).await?;
+    bail_on_graphql_errors(&resp, what)?;
+    Ok(parse_behind_by(&resp))
+}
+
+const UPDATE_BRANCH: &str = "Update branch";
+
+const BRANCH_UPDATE_INPUTS_QUERY: &str = "
+query BranchUpdateInputs($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { id headRefOid headRefName isCrossRepository }
+  }
+}";
+
+/// What updating a PR's branch needs to know about it.
+#[derive(Debug, PartialEq)]
+struct BranchUpdateInputs {
+    id: String,
+    head_oid: String,
+    same_repo_head: Option<String>,
+}
+
+fn parse_branch_update_inputs(resp: &serde_json::Value) -> Result<BranchUpdateInputs> {
+    bail_on_graphql_errors(resp, UPDATE_BRANCH)?;
+    let pr = &resp["data"]["repository"]["pullRequest"];
+    let (Some(id), Some(head_oid)) = (pr["id"].as_str(), pr["headRefOid"].as_str()) else {
+        anyhow::bail!("{UPDATE_BRANCH} failed: pull request not found");
+    };
+    Ok(BranchUpdateInputs {
+        id: id.to_string(),
+        head_oid: head_oid.to_string(),
+        same_repo_head: same_repo_head(pr).map(str::to_string),
+    })
+}
+
+/// `expectedHeadOid` makes GitHub refuse if someone pushed after we looked.
+const UPDATE_BRANCH_MUTATION: &str = "
+mutation UpdateBranch($id: ID!, $headOid: GitObjectID!) {
+  updatePullRequestBranch(input: { pullRequestId: $id, expectedHeadOid: $headOid }) {
+    pullRequest { id }
+  }
+}";
+
+/// What [`update_branch`] did.
+#[derive(Debug, PartialEq)]
+pub enum BranchUpdate {
+    Updated,
+    AlreadyUpToDate,
+}
+
+impl BranchUpdate {
+    pub fn message(&self) -> &'static str {
+        match self {
+            BranchUpdate::Updated => "Branch updated",
+            BranchUpdate::AlreadyUpToDate => "Branch already up to date",
+        }
+    }
+}
+
+fn is_up_to_date(behind_by: &Result<Option<i64>>) -> bool {
+    matches!(behind_by, Ok(Some(0)))
+}
+
+/// Merge a PR's base branch into its head, as the web UI's Update branch button does.
+/// Returns `AlreadyUpToDate` without updating when a same-repository head is 0 commits
+/// behind; a fork, or a count that couldn't be read, goes straight to the update.
+pub async fn update_branch(
+    client: &Octocrab,
+    owner: &str,
+    name: &str,
+    number: i64,
+) -> Result<BranchUpdate> {
+    let payload = serde_json::json!({
+        "query": BRANCH_UPDATE_INPUTS_QUERY,
+        "variables": { "owner": owner, "name": name, "number": number }
+    });
+    let inputs = parse_branch_update_inputs(&graphql_json(client, &payload, UPDATE_BRANCH).await?)?;
+
+    if let Some(head) = &inputs.same_repo_head {
+        let behind_by = fetch_behind_by(client, owner, name, number, head, UPDATE_BRANCH).await;
+        if is_up_to_date(&behind_by) {
+            return Ok(BranchUpdate::AlreadyUpToDate);
+        }
+        if let Err(e) = &behind_by {
+            tracing::debug!(error = %e, "compare before update branch failed");
+        }
+    }
+
+    let payload = serde_json::json!({
+        "query": UPDATE_BRANCH_MUTATION,
+        "variables": { "id": inputs.id, "headOid": inputs.head_oid }
+    });
+    bail_on_graphql_errors(
+        &graphql_json(client, &payload, UPDATE_BRANCH).await?,
+        UPDATE_BRANCH,
+    )?;
+    Ok(BranchUpdate::Updated)
 }
 
 #[derive(Deserialize)]
@@ -247,6 +445,28 @@ fn error_detail(errors: &[GqlError]) -> String {
         .map(|e| e.message.as_str())
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Run a GraphQL request and return the raw JSON, labelling a transport failure with
+/// `what`. An HTTP 200 can still carry `errors`: check with [`bail_on_graphql_errors`].
+pub(crate) async fn graphql_json(
+    client: &Octocrab,
+    payload: &serde_json::Value,
+    what: &str,
+) -> Result<serde_json::Value> {
+    client
+        .graphql(payload)
+        .await
+        .map_err(|e| anyhow::anyhow!("{what} failed: {}", describe_octocrab_error(&e)))
+}
+
+/// Bail with `what` and GitHub's messages when an HTTP 200 response carries `errors`.
+pub(crate) fn bail_on_graphql_errors(resp: &serde_json::Value, what: &str) -> Result<()> {
+    let errors: Vec<GqlError> = serde_json::from_value(resp["errors"].clone()).unwrap_or_default();
+    if !errors.is_empty() {
+        anyhow::bail!("{what} failed: {}", error_detail(&errors));
+    }
+    Ok(())
 }
 
 /// True when a GraphQL response carries a primary rate-limit error
@@ -486,6 +706,15 @@ fn parse_nodes(
     (items, faithful)
 }
 
+const ITEM_FETCH: &str = "GraphQL item fetch";
+
+/// The fetched issue or PR; `Ok(None)` when GitHub says it doesn't exist.
+fn item_node(resp: &serde_json::Value) -> Result<Option<&serde_json::Value>> {
+    bail_on_graphql_errors(resp, ITEM_FETCH)?;
+    let node = &resp["data"]["repository"]["issueOrPullRequest"];
+    Ok((!node.is_null()).then_some(node))
+}
+
 /// Re-fetch a single PR/Issue by repo + number, returning it tagged with
 /// `query_id` so it can be upserted into that query's cache. `Ok(None)` means
 /// the item no longer exists (e.g. transferred/deleted).
@@ -504,15 +733,21 @@ pub async fn fetch_item(
             "number": number,
         }
     });
-    let resp: serde_json::Value = client.graphql(&payload).await.map_err(|e| {
-        anyhow::anyhow!("GraphQL item fetch failed: {}", describe_octocrab_error(&e))
-    })?;
-
-    let node = &resp["data"]["repository"]["issueOrPullRequest"];
-    if node.is_null() {
+    let resp = graphql_json(client, &payload, ITEM_FETCH).await?;
+    let Some(node) = item_node(&resp)? else {
         return Ok(None);
+    };
+    let Some(mut item) = node_to_cached_item(node, query_id) else {
+        return Ok(None);
+    };
+    if let Some(head) = compare_head(node) {
+        // The item itself is good; a failed comparison only costs the behind badge.
+        match fetch_behind_by(client, owner, name, number, head, "compare query").await {
+            Ok(behind_by) => item.behind_by = behind_by,
+            Err(e) => tracing::debug!(error = %e, "leaving behind_by unset"),
+        }
     }
-    Ok(node_to_cached_item(node, query_id))
+    Ok(Some(item))
 }
 
 /// Convert a single GraphQL search node (Issue or PullRequest) to a `CachedItem`.
@@ -656,6 +891,7 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
     } else {
         None
     };
+    let can_update_branch = is_pr && node["viewerCanUpdateBranch"].as_bool() == Some(true);
 
     Some(CachedItem {
         query_id,
@@ -683,6 +919,8 @@ fn node_to_cached_item(node: &serde_json::Value, query_id: i64) -> Option<Cached
         head_ref,
         review_decision,
         milestone,
+        behind_by: None,
+        can_update_branch,
         // A freshly fetched item carries no read marker; upsert preserves the
         // existing row's `last_read_updated_at` via its DO UPDATE clause.
         last_read_updated_at: None,
@@ -1021,6 +1259,229 @@ mod tests {
         });
         let item = node_to_cached_item(&node, 1).unwrap();
         assert_eq!(item.state, "merged");
+    }
+
+    fn minimal_pr_node() -> serde_json::Value {
+        serde_json::json!({
+            "__typename": "PullRequest",
+            "number": 7,
+            "title": "PR",
+            "state": "OPEN",
+            "url": "https://github.com/owner/repo/pull/7",
+            "updatedAt": "2026-05-23T10:00:00Z",
+            "author": { "__typename": "User", "login": "dave" },
+            "labels": { "nodes": [] },
+            "repository": { "owner": { "login": "owner" }, "name": "repo" },
+            "comments": { "totalCount": 0 },
+            "reviewRequests": { "nodes": [] },
+            "headRefName": "feature",
+            "isCrossRepository": false
+        })
+    }
+
+    #[test]
+    fn parse_merge_state_reads_status_base_and_permission() {
+        let resp = serde_json::json!({ "data": { "repository": { "pullRequest": {
+            "mergeStateStatus": "BEHIND", "baseRefName": "master", "viewerCanUpdateBranch": true
+        } } } });
+        assert_eq!(
+            parse_merge_state(&resp).unwrap(),
+            MergeState {
+                status: Some("BEHIND".into()),
+                base_ref: Some("master".into()),
+                can_update_branch: true,
+            }
+        );
+    }
+
+    // An HTTP 200 can still carry `errors` (SSO, rate limit) with no data; reporting it
+    // keeps a precheck that never runs from passing silently.
+    #[test]
+    fn parse_merge_state_reports_graphql_errors() {
+        let resp = serde_json::json!({
+            "data": null,
+            "errors": [{ "message": "Resource protected by organization SAML enforcement" }]
+        });
+        let err = parse_merge_state(&resp).unwrap_err().to_string();
+        assert!(err.contains("SAML"), "{err}");
+    }
+
+    #[test]
+    fn parse_merge_state_reports_a_missing_pr() {
+        let resp = serde_json::json!({ "data": { "repository": { "pullRequest": null } } });
+        assert!(parse_merge_state(&resp).is_err());
+    }
+
+    #[rstest]
+    #[case::pr_true("PullRequest", Some(true), true)]
+    #[case::pr_false("PullRequest", Some(false), false)]
+    #[case::pr_missing("PullRequest", None, false)]
+    #[case::issue("Issue", Some(true), false)]
+    fn node_to_cached_item_can_update_branch(
+        #[case] typename: &str,
+        #[case] value: Option<bool>,
+        #[case] expected: bool,
+    ) {
+        let mut node = minimal_pr_node();
+        node["__typename"] = typename.into();
+        if let Some(v) = value {
+            node["viewerCanUpdateBranch"] = v.into();
+        }
+        let item = node_to_cached_item(&node, 1).unwrap();
+        assert_eq!(item.can_update_branch, expected);
+    }
+
+    #[test]
+    fn search_and_item_queries_ask_for_viewer_can_update_branch() {
+        assert!(search_query().contains("viewerCanUpdateBranch"));
+        assert!(item_query().contains("viewerCanUpdateBranch"));
+    }
+
+    #[rstest]
+    #[case::offered("PullRequest", true, false, Some("feature"), Some("feature"))]
+    #[case::not_offered("PullRequest", false, false, Some("feature"), None)]
+    #[case::fork("PullRequest", true, true, Some("feature"), None)]
+    #[case::no_head("PullRequest", true, false, None, None)]
+    #[case::issue("Issue", true, false, None, None)]
+    fn compare_head_cases(
+        #[case] typename: &str,
+        #[case] can_update: bool,
+        #[case] cross: bool,
+        #[case] head: Option<&str>,
+        #[case] expected: Option<&str>,
+    ) {
+        let mut node = minimal_pr_node();
+        node["__typename"] = typename.into();
+        node["viewerCanUpdateBranch"] = can_update.into();
+        node["isCrossRepository"] = cross.into();
+        node["headRefName"] = head.into();
+        assert_eq!(compare_head(&node), expected);
+    }
+
+    #[test]
+    fn parse_behind_by_reads_compare() {
+        let resp = serde_json::json!({
+            "data": { "repository": { "pullRequest": {
+                "baseRef": { "compare": { "behindBy": 2 } }
+            } } }
+        });
+        assert_eq!(parse_behind_by(&resp), Some(2));
+    }
+
+    #[test]
+    fn parse_branch_update_inputs_reads_id_head_oid_and_head_ref() {
+        let resp = serde_json::json!({ "data": { "repository": { "pullRequest": {
+            "id": "PR_1", "headRefOid": "abc", "headRefName": "feature",
+            "isCrossRepository": false
+        } } } });
+        assert_eq!(
+            parse_branch_update_inputs(&resp).unwrap(),
+            BranchUpdateInputs {
+                id: "PR_1".into(),
+                head_oid: "abc".into(),
+                same_repo_head: Some("feature".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_branch_update_inputs_has_no_same_repo_head_for_a_fork() {
+        let resp = serde_json::json!({ "data": { "repository": { "pullRequest": {
+            "id": "PR_1", "headRefOid": "abc", "headRefName": "feature",
+            "isCrossRepository": true
+        } } } });
+        assert_eq!(
+            parse_branch_update_inputs(&resp).unwrap().same_repo_head,
+            None
+        );
+    }
+
+    #[test]
+    fn parse_branch_update_inputs_reports_graphql_errors() {
+        let errored = serde_json::json!({
+            "data": null,
+            "errors": [{ "message": "Resource protected by organization SAML enforcement" }]
+        });
+        let err = parse_branch_update_inputs(&errored)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SAML"), "{err}");
+    }
+
+    #[test]
+    fn parse_branch_update_inputs_reports_a_missing_pr() {
+        let missing = serde_json::json!({ "data": { "repository": { "pullRequest": null } } });
+        assert!(parse_branch_update_inputs(&missing).is_err());
+    }
+
+    // The mutation answers HTTP 200 with `errors` when GitHub refuses (conflicts, no
+    // permission, head moved); that must not read as "Branch updated".
+    #[test]
+    fn bail_on_graphql_errors_rejects_a_refused_mutation() {
+        let refused = serde_json::json!({
+            "data": { "updatePullRequestBranch": null },
+            "errors": [{ "message": "merge conflict between base and head" }]
+        });
+        let err = bail_on_graphql_errors(&refused, UPDATE_BRANCH)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("merge conflict"), "{err}");
+    }
+
+    #[test]
+    fn bail_on_graphql_errors_accepts_a_clean_response() {
+        let ok = serde_json::json!({ "data": { "updatePullRequestBranch": {
+            "pullRequest": { "id": "PR_1" }
+        } } });
+        assert!(bail_on_graphql_errors(&ok, UPDATE_BRANCH).is_ok());
+    }
+
+    // Only a comparison that ran and found nothing missing may skip the mutation; an
+    // unknown count must not be mistaken for "already up to date".
+    #[rstest]
+    #[case::zero(Ok(Some(0)), true)]
+    #[case::behind(Ok(Some(3)), false)]
+    #[case::no_base_ref(Ok(None), false)]
+    #[case::compare_failed(Err(anyhow::anyhow!("rate limited")), false)]
+    fn is_up_to_date_cases(#[case] behind_by: Result<Option<i64>>, #[case] expected: bool) {
+        assert_eq!(is_up_to_date(&behind_by), expected);
+    }
+
+    #[rstest]
+    #[case::updated(BranchUpdate::Updated, "Branch updated")]
+    #[case::already(BranchUpdate::AlreadyUpToDate, "Branch already up to date")]
+    fn branch_update_message_cases(#[case] outcome: BranchUpdate, #[case] expected: &str) {
+        assert_eq!(outcome.message(), expected);
+    }
+
+    // HTTP 200 with `errors` (SAML, rate limit) and no data is not "the item is gone".
+    #[test]
+    fn item_node_reports_graphql_errors() {
+        let resp = serde_json::json!({
+            "data": null,
+            "errors": [{ "message": "Resource protected by organization SAML enforcement" }]
+        });
+        let err = item_node(&resp).unwrap_err().to_string();
+        assert!(err.contains("SAML"), "{err}");
+    }
+
+    #[test]
+    fn item_node_is_none_for_a_missing_item() {
+        let resp = serde_json::json!({ "data": { "repository": { "issueOrPullRequest": null } } });
+        assert!(item_node(&resp).unwrap().is_none());
+    }
+
+    #[test]
+    fn update_branch_mutation_pins_the_head_it_was_asked_about() {
+        assert!(UPDATE_BRANCH_MUTATION.contains("expectedHeadOid"));
+    }
+
+    #[test]
+    fn parse_behind_by_is_none_without_a_base_ref() {
+        let resp = serde_json::json!({
+            "data": { "repository": { "pullRequest": { "baseRef": null } } }
+        });
+        assert_eq!(parse_behind_by(&resp), None);
     }
 
     #[test]

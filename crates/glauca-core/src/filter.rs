@@ -497,6 +497,8 @@ mod tests {
             head_ref: None,
             review_decision: None,
             milestone: None,
+            behind_by: None,
+            can_update_branch: false,
             last_read_updated_at: None,
             is_new: false,
         }

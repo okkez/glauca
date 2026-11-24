@@ -32,9 +32,10 @@ impl ItemTracker {
         Self::default()
     }
 
-    /// Record the latest `items` for `query_id` and return how many are new or updated
-    /// versus the previous snapshot — the same rule as
-    /// [`crate::logic::ChangeCounts::updated`].
+    /// Record the latest `items` for `query_id` and return how many are new or have a
+    /// newer `updated_at` versus the previous snapshot. Narrower than
+    /// [`crate::logic::ChangeCounts::updated`], which also counts `can_update_branch`
+    /// flips: a base branch moving on is worth a banner, not a desktop notification.
     ///
     /// Only the fresh side is walked, so *removals are never counted* and a sync that
     /// merely pruned cannot fire a notification. The divergence from

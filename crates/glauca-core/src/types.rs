@@ -152,6 +152,10 @@ pub struct ItemEntry {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
+    /// Commits the head is behind its base, as of the last by-number re-fetch.
+    pub behind_by: Option<i64>,
+    /// GitHub's `viewerCanUpdateBranch`: the web UI would offer "Update branch".
+    pub can_update_branch: bool,
     /// The `updated_at` the user had seen when they last read this item. `None` means
     /// never read; the item is unread iff `updated_at` is newer — `logic::is_item_unread`.
     pub last_read_updated_at: Option<String>,
@@ -162,6 +166,34 @@ impl ItemEntry {
     /// The canonical `"owner/name"` repository string used across the UI and filters.
     pub fn repo_display(&self) -> String {
         format!("{}/{}", self.repo_owner, self.repo_name)
+    }
+
+    /// Whether `other` is the same issue/PR, whatever else about it has changed.
+    pub fn is_same_item(&self, other: &ItemEntry) -> bool {
+        self.number == other.number
+            && self.repo_owner == other.repo_owner
+            && self.repo_name == other.repo_name
+    }
+
+    /// What a sync compares to tell whether this item changed: `updated_at`, plus
+    /// `can_update_branch`, which flips when the base branch moves and so leaves
+    /// `updated_at` alone.
+    pub fn sync_fingerprint(&self) -> (&str, bool) {
+        (self.updated_at.as_str(), self.can_update_branch)
+    }
+
+    /// Whether to flag the PR as needing Update branch: GitHub's own answer, which
+    /// already accounts for strict branch protection and `allow_update_branch`.
+    pub fn needs_branch_update(&self) -> bool {
+        self.state == "open" && self.can_update_branch
+    }
+
+    /// Detail-pane badge for a PR that needs Update branch. `behind_by` is only as fresh
+    /// as the last by-number fetch while `can_update_branch` follows every search, so a
+    /// stored 0 can outlive the base moving on: it means "count unknown", not "0 commits".
+    pub fn branch_update_badge(&self) -> Option<String> {
+        self.needs_branch_update()
+            .then(|| behind_base_label(self.behind_by.filter(|n| *n > 0)))
     }
 }
 
@@ -181,6 +213,8 @@ pub enum ItemAction {
     Comment,
     ViewComments,
     ApprovePR,
+    /// Merge the base branch into the PR's head, as the web UI's Update branch button does.
+    UpdateBranch,
     MergePR,
     CopyUrl,
     /// Re-fetch just this item from GitHub. Offered by both front-ends.
@@ -197,10 +231,20 @@ impl ItemAction {
             Self::Comment => "Comment",
             Self::ViewComments => "View comments",
             Self::ApprovePR => "Approve PR",
+            Self::UpdateBranch => "Update branch",
             Self::MergePR => "Merge PR",
             Self::CopyUrl => "Copy URL",
             Self::RefreshItem => "Refresh item",
             Self::ReviewOctorus => "Review with octorus",
+        }
+    }
+
+    /// The menu label for this action on `item`: flags Update branch when the PR
+    /// needs it.
+    pub fn label_for(&self, item: &ItemEntry) -> String {
+        match self {
+            Self::UpdateBranch if item.needs_branch_update() => "Update branch (behind)".into(),
+            _ => self.label().into(),
         }
     }
 
@@ -213,6 +257,7 @@ impl ItemAction {
                 Self::ViewComments,
                 Self::Comment,
                 Self::ApprovePR,
+                Self::UpdateBranch,
                 Self::MergePR,
             ],
             "issue" => vec![
@@ -224,6 +269,69 @@ impl ItemAction {
             ],
             _ => vec![],
         }
+    }
+}
+
+/// Everything needed to act on one PR and then re-fetch it into its query's cache.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PrTarget {
+    pub query_id: i64,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub number: i64,
+    pub url: String,
+}
+
+impl PrTarget {
+    pub fn for_item(query_id: i64, item: &ItemEntry) -> Self {
+        Self {
+            query_id,
+            repo_owner: item.repo_owner.clone(),
+            repo_name: item.repo_name.clone(),
+            number: item.number,
+            url: item.url.clone(),
+        }
+    }
+
+    /// `owner/repo#N`.
+    pub fn reference(&self) -> String {
+        format!("{}/{}#{}", self.repo_owner, self.repo_name, self.number)
+    }
+}
+
+/// Badge text for a PR behind its base, with the commit count when it is known.
+pub fn behind_base_label(n: Option<i64>) -> String {
+    match n {
+        Some(1) => "Behind base (1 commit)".into(),
+        Some(n) => format!("Behind base ({n} commits)"),
+        None => "Behind base".into(),
+    }
+}
+
+/// Confirmation shown when a merge was held back because the PR is behind `base`.
+pub fn update_branch_prompt(target: &PrTarget, base: Option<&str>) -> String {
+    format!(
+        "{} is behind {}. Update branch now?",
+        target.reference(),
+        base.unwrap_or("base")
+    )
+}
+
+/// What to do when the user asks to merge, given the PR's freshly fetched
+/// `mergeStateStatus`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MergePrecheck {
+    Proceed,
+    OfferUpdate,
+}
+
+/// Only `BEHIND`, on a branch the viewer can update, stops the merge: it is GitHub
+/// saying the branch must be updated first. Anything else, unknown included, is left
+/// for `gh pr merge` to judge.
+pub fn merge_precheck(status: Option<&str>, can_update_branch: bool) -> MergePrecheck {
+    match status {
+        Some("BEHIND") if can_update_branch => MergePrecheck::OfferUpdate,
+        _ => MergePrecheck::Proceed,
     }
 }
 
@@ -254,5 +362,146 @@ impl MergeStrategy {
             Self::Merge => "--merge",
             Self::Rebase => "--rebase",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[test]
+    fn is_same_item_compares_repo_and_number_only() {
+        let item = |owner: &str, name: &str, number: i64, title: &str| ItemEntry {
+            repo_owner: owner.into(),
+            repo_name: name.into(),
+            number,
+            title: title.into(),
+            ..Default::default()
+        };
+        let a = item("o", "r", 1, "old title");
+        assert!(a.is_same_item(&item("o", "r", 1, "new title")));
+        assert!(!a.is_same_item(&item("o", "r", 2, "old title")));
+        assert!(!a.is_same_item(&item("o", "other", 1, "old title")));
+        assert!(!a.is_same_item(&item("x", "r", 1, "old title")));
+    }
+
+    #[rstest]
+    #[case(Some(1), "Behind base (1 commit)")]
+    #[case(Some(2), "Behind base (2 commits)")]
+    #[case(None, "Behind base")]
+    fn behind_base_label_cases(#[case] n: Option<i64>, #[case] expected: &str) {
+        assert_eq!(behind_base_label(n), expected);
+    }
+
+    // GitHub says whether the web UI would offer the button; only an open PR counts,
+    // and the count only decorates the badge.
+    #[rstest]
+    #[case::offered_with_count("open", true, Some(3), Some("Behind base (3 commits)"))]
+    #[case::offered_no_count("open", true, None, Some("Behind base"))]
+    #[case::offered_stale_zero("open", true, Some(0), Some("Behind base"))]
+    #[case::not_offered("open", false, Some(5), None)]
+    #[case::merged("merged", true, Some(2), None)]
+    fn branch_update_badge_cases(
+        #[case] state: &str,
+        #[case] can_update: bool,
+        #[case] behind_by: Option<i64>,
+        #[case] expected: Option<&str>,
+    ) {
+        let item = ItemEntry {
+            state: state.into(),
+            can_update_branch: can_update,
+            behind_by,
+            ..Default::default()
+        };
+        assert_eq!(item.needs_branch_update(), expected.is_some());
+        assert_eq!(item.branch_update_badge().as_deref(), expected);
+    }
+
+    // The prompt can open long after the merge, while another repo is on screen.
+    #[rstest]
+    #[case(Some("master"), "owner/repo#42 is behind master. Update branch now?")]
+    #[case(None, "owner/repo#42 is behind base. Update branch now?")]
+    fn update_branch_prompt_cases(#[case] base: Option<&str>, #[case] expected: &str) {
+        let target = PrTarget {
+            query_id: 1,
+            repo_owner: "owner".into(),
+            repo_name: "repo".into(),
+            number: 42,
+            url: String::new(),
+        };
+        assert_eq!(update_branch_prompt(&target, base), expected);
+    }
+
+    #[test]
+    fn update_branch_only_for_pull_requests() {
+        let pr = ItemAction::available_for("pull_request");
+        let ub = pr
+            .iter()
+            .position(|a| *a == ItemAction::UpdateBranch)
+            .expect("PRs offer Update branch");
+        assert_eq!(pr[ub + 1], ItemAction::MergePR);
+        assert!(!ItemAction::available_for("issue").contains(&ItemAction::UpdateBranch));
+    }
+
+    #[test]
+    fn label_for_marks_behind() {
+        let behind = ItemEntry {
+            state: "open".into(),
+            can_update_branch: true,
+            ..Default::default()
+        };
+        let not_offered = ItemEntry {
+            state: "open".into(),
+            behind_by: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(
+            ItemAction::UpdateBranch.label_for(&behind),
+            "Update branch (behind)"
+        );
+        assert_eq!(
+            ItemAction::UpdateBranch.label_for(&not_offered),
+            "Update branch"
+        );
+        assert_eq!(ItemAction::MergePR.label_for(&behind), "Merge PR");
+    }
+
+    // Offering Update branch to someone who can't run it only leads to a gh error, so
+    // a BEHIND PR the viewer can't update goes on to `gh pr merge` and its own message.
+    #[rstest]
+    #[case(Some("BEHIND"), true, MergePrecheck::OfferUpdate)]
+    #[case(Some("BEHIND"), false, MergePrecheck::Proceed)]
+    #[case(Some("BLOCKED"), true, MergePrecheck::Proceed)]
+    #[case(Some("CLEAN"), true, MergePrecheck::Proceed)]
+    #[case(Some("UNKNOWN"), true, MergePrecheck::Proceed)]
+    #[case(None, true, MergePrecheck::Proceed)]
+    fn merge_precheck_cases(
+        #[case] s: Option<&str>,
+        #[case] can_update: bool,
+        #[case] expected: MergePrecheck,
+    ) {
+        assert_eq!(merge_precheck(s, can_update), expected);
+    }
+
+    #[test]
+    fn pr_target_for_item_copies_identity() {
+        let item = ItemEntry {
+            number: 42,
+            repo_owner: "o".into(),
+            repo_name: "r".into(),
+            url: "https://github.com/o/r/pull/42".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            PrTarget::for_item(7, &item),
+            PrTarget {
+                query_id: 7,
+                repo_owner: "o".into(),
+                repo_name: "r".into(),
+                number: 42,
+                url: "https://github.com/o/r/pull/42".into(),
+            }
+        );
     }
 }

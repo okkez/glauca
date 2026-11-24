@@ -231,6 +231,9 @@ pub(super) fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
                 ));
             }
             line2_spans.push(Span::styled(repo, Style::default().fg(Color::Gray)));
+            if item.needs_branch_update() {
+                line2_spans.push(Span::styled("  behind", Style::default().fg(Color::Yellow)));
+            }
             // Right-align the relative update time to the row's content edge.
             let upd_span = Span::styled(updated, Style::default().fg(Color::Gray));
             let used: usize = line2_spans.iter().map(Span::width).sum();

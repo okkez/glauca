@@ -233,5 +233,8 @@ pub(crate) async fn handle_app_message(app: &mut App, engine: &Engine, msg: AppM
             }
         }
         AppMessage::CurrentUserResolved { login, .. } => app.adopt_current_user(login),
+        AppMessage::MergeBlockedBehind { target, base_ref } => {
+            app.on_merge_blocked_behind(target, base_ref)
+        }
     }
 }

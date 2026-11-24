@@ -157,32 +157,32 @@ impl GlaucaApp {
 
     pub(crate) fn open_merge_dialog(
         &mut self,
-        item: ItemEntry,
+        target: PrTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let this = cx.weak_entity();
         window.open_dialog(cx, move |dlg, _w, _cx| {
             let this = this.clone();
-            let item = item.clone();
+            let target = target.clone();
             dlg.title("Merge strategy")
                 .w(px(320.))
                 .content(move |content, _w, _cx| {
                     let mut col = content.gap_2();
                     for (ix, strat) in MergeStrategy::all().into_iter().enumerate() {
                         let label = strat.label().to_string();
-                        let item = item.clone();
+                        let target = target.clone();
                         let this = this.clone();
                         col = col.child(Button::new(("merge", ix)).label(label).on_click(
                             move |_, window, cx| {
-                                let item = item.clone();
+                                let target = target.clone();
                                 let strat = strat.clone();
                                 let this = this.clone();
                                 window.close_dialog(cx);
                                 if let Some(app) = this.upgrade() {
                                     app.update(cx, |app, _| {
                                         app.send(EngineCommand::Merge {
-                                            url: item.url.clone(),
+                                            target,
                                             strategy: strat,
                                         })
                                     });
@@ -191,6 +191,63 @@ impl GlaucaApp {
                         ));
                     }
                     col
+                })
+        });
+    }
+
+    /// Offered when a merge was held back because the PR is behind its base. Acts on
+    /// `target` from the engine's message, not the selection, which may have moved.
+    pub(crate) fn open_update_branch_dialog(
+        &mut self,
+        target: PrTarget,
+        base_ref: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.weak_entity();
+        let prompt = update_branch_prompt(&target, base_ref.as_deref());
+        window.open_dialog(cx, move |dlg, _w, _cx| {
+            let this = this.clone();
+            let target = target.clone();
+            let prompt = prompt.clone();
+            dlg.title("Update branch")
+                .w(px(420.))
+                .content(move |content, _w, _cx| {
+                    let buttons = h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("update-branch-cancel")
+                                .ghost()
+                                .label("Cancel")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(
+                            Button::new("update-branch-ok")
+                                .primary()
+                                .label("Update branch")
+                                .on_click({
+                                    let this = this.clone();
+                                    let target = target.clone();
+                                    move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        if let Some(app) = this.upgrade() {
+                                            app.update(cx, |app, _| {
+                                                app.send(EngineCommand::UpdateBranch {
+                                                    target: target.clone(),
+                                                })
+                                            });
+                                        }
+                                    }
+                                }),
+                        );
+                    content
+                        .gap_3()
+                        .child(SharedString::from(prompt.clone()))
+                        .child(buttons)
                 })
         });
     }

@@ -458,15 +458,16 @@ function filterStreamModal(title, initName, initFilters) {
   });
 }
 
-// Yes/No confirmation modal. Resolves true if confirmed, false otherwise.
-function confirmModal(message) {
+// Yes/No confirmation modal. Resolves true if confirmed, false otherwise. The
+// confirm button defaults to a red "Delete" for the delete prompts.
+function confirmModal(message, { okText = "Delete", okClass = "danger" } = {}) {
   return new Promise((resolve) => {
     const overlay = el("div", { class: "modal-overlay" });
     const finish = (val) => {
       overlay.remove();
       resolve(val);
     };
-    const ok = el("button", { text: "Delete", class: "danger", onclick: () => finish(true) });
+    const ok = el("button", { text: okText, class: okClass, onclick: () => finish(true) });
     const cancel = el("button", { text: "Cancel", onclick: () => finish(false) });
     overlay.appendChild(
       el("div", { class: "modal-box" }, [
@@ -990,6 +991,7 @@ function renderItemList() {
       el("div", { class: "it-meta" }, [
         it.repo_private ? octicon("lock", "muted", 12) : null,
         el("span", { class: "meta-text", text: metaText }),
+        needsBranchUpdate(it) ? el("span", { class: "meta-behind", text: "behind" }) : null,
         el("span", { class: "meta-time", text: relativeTime(it.updated_at, now) }),
       ])
     );
@@ -1075,7 +1077,10 @@ function renderDetail(it) {
   const reviewerChip = (o) => el("span", { class: "chip" }, [reviewerAvatar(o.user, o.state), el("span", { text: o.user.login })]);
 
   if ((it.labels || []).length) header.appendChild(textField("labels", it.labels.join(", ")));
-  if (it.base_ref && it.head_ref) header.appendChild(textField("branch", `${it.head_ref} → ${it.base_ref}`));
+  if (it.base_ref && it.head_ref) {
+    const behind = needsBranchUpdate(it) ? `  ·  ${behindBaseLabel(it)}` : "";
+    header.appendChild(textField("branch", `${it.head_ref} → ${it.base_ref}${behind}`));
+  }
   const assignees = it.assignees || [];
   if (assignees.length)
     header.appendChild(field("assignees", el("span", { class: "field-chips" }, assignees.map(userChip))));
@@ -1116,6 +1121,27 @@ function renderDetail(it) {
   );
 }
 
+// Mirrors ItemEntry::needs_branch_update.
+function needsBranchUpdate(it) {
+  return it.state === "open" && it.can_update_branch;
+}
+
+// Same wording as glauca_core::types::behind_base_label / update_branch_prompt.
+function behindBaseLabel(it) {
+  const n = it.behind_by;
+  if (!(n > 0)) return "Behind base";
+  return `Behind base (${n} ${n === 1 ? "commit" : "commits"})`;
+}
+function updateBranchPrompt(target, base) {
+  return `${target.repo_owner}/${target.repo_name}#${target.number} is behind ${base || "base"}. Update branch now?`;
+}
+
+// A PR as the engine's PrTarget: enough to act on it and re-fetch it into
+// `entry`'s query. Field names are the Rust struct's (snake_case).
+function prTarget(entry, it) {
+  return { query_id: entry.rootQueryId, repo_owner: it.repo_owner, repo_name: it.repo_name, number: it.number, url: it.url };
+}
+
 // The actions applicable to `it`, shared by the detail-pane buttons and the
 // item action menu (Enter / right-click). Mirrors ItemAction::available_for.
 function itemActions(it) {
@@ -1154,10 +1180,14 @@ function itemActions(it) {
       },
     });
     acts.push({
+      label: needsBranchUpdate(it) ? "Update branch (behind)" : "Update branch",
+      run: () => call("update_branch", { target: prTarget(entry, it) }),
+    });
+    acts.push({
       label: "Merge",
       run: async () => {
         const s = ((await promptModal("Merge strategy (squash / merge / rebase):", "squash")) || "").trim();
-        if (["squash", "merge", "rebase"].includes(s)) call("merge", { url: it.url, strategy: s });
+        if (["squash", "merge", "rebase"].includes(s)) call("merge", { target: prTarget(entry, it), strategy: s });
       },
     });
   }
@@ -1783,6 +1813,14 @@ function handleMessage(msg) {
       break;
     case "ActionDone":
       setStatus(d);
+      break;
+    case "MergeBlockedBehind":
+      // Act on the PR named in the message; the selection may have moved since.
+      confirmModal(updateBranchPrompt(d.target, d.base_ref), { okText: "Update branch", okClass: "" }).then(
+        (ok) => {
+          if (ok) call("update_branch", { target: d.target });
+        }
+      );
       break;
     case "ActionError":
       // Also the failure path for a reorder round trip (both the reorder and the

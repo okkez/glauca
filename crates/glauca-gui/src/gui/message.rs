@@ -7,10 +7,25 @@ use glauca_core::logic::*;
 use super::*;
 
 impl GlaucaApp {
-    /// Install `items` as the visible list. Caller refilters / notifies. `is_new` is
-    /// already set per item by `cached_item_to_item_entry`, so nothing is recomputed here.
+    /// Install `items` as the visible list and refilter, keeping the cursor on the same
+    /// item when it is still listed: a reload re-sorts by `updated_at`, and an index
+    /// cursor would silently move the detail pane and actions to another PR. Caller
+    /// notifies. `is_new` is already set per item by `cached_item_to_item_entry`.
     pub(crate) fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
-        self.items = items;
+        let selected_idx = self.filtered.get(self.item_cursor).copied();
+        let old_items = std::mem::replace(&mut self.items, items);
+        self.recompute_filtered();
+        let selected_pos = selected_idx
+            .and_then(|old| old_items.get(old))
+            .and_then(|sel| {
+                self.filtered
+                    .iter()
+                    .position(|&i| self.items[i].is_same_item(sel))
+            });
+        if let Some(pos) = selected_pos {
+            self.item_cursor = pos;
+            self.items_list.scroll_to_reveal_item(pos);
+        }
     }
 
     /// Drop any held-back background-sync results / banner.
@@ -30,7 +45,6 @@ impl GlaucaApp {
             self.recompute_unread(qid, &items);
         }
         self.apply_items_to_view(items);
-        self.recompute_filtered();
         cx.notify();
     }
 
@@ -169,7 +183,6 @@ impl GlaucaApp {
                         // any banner (this load supersedes it).
                         self.apply_items_to_view(items);
                         self.clear_pending();
-                        needs_refilter = true;
                     }
                 }
             }
@@ -340,6 +353,9 @@ impl GlaucaApp {
                     self.recompute_unread_live(query_id);
                 }
                 needs_refilter = true;
+            }
+            AppMessage::MergeBlockedBehind { target, base_ref } => {
+                self.open_update_branch_dialog(target, base_ref, window, cx);
             }
         }
         if needs_refilter {

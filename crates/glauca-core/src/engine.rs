@@ -7,7 +7,8 @@ use crate::logic::{
     ME_UNEXPANDED_WARNING, cached_item_to_item_entry, has_me_token, is_item_unread,
 };
 use crate::types::{
-    CommentEntry, EntryKey, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergeStrategy, QueryEntry,
+    CommentEntry, EntryKey, FilterStreamEntry, ItemEntry, LeftPaneEntry, MergePrecheck,
+    MergeStrategy, PrTarget, QueryEntry, merge_precheck,
 };
 use crate::{db, github};
 use chrono::Utc;
@@ -99,6 +100,12 @@ pub enum AppMessage {
         login: String,
         name: Option<String>,
         avatar_url: Option<String>,
+    },
+    /// A merge was not attempted because GitHub reports the PR's head as behind its
+    /// base. Front-ends offer `EngineCommand::UpdateBranch` for `target`.
+    MergeBlockedBehind {
+        target: PrTarget,
+        base_ref: Option<String>,
     },
 }
 
@@ -193,7 +200,8 @@ pub async fn fetch_comments_task(
             "number": number as i64,
         }
     });
-    let resp: serde_json::Value = gh.graphql(&payload).await?;
+    let resp = github::graphql_json(gh, &payload, "GraphQL comments fetch").await?;
+    github::bail_on_graphql_errors(&resp, "GraphQL comments fetch")?;
     let nodes = resp
         .pointer("/data/repository/issueOrPullRequest/comments/nodes")
         .and_then(|v| v.as_array())
@@ -273,7 +281,8 @@ fn gh_subcommand(kind: &str) -> &'static str {
 }
 
 /// Spawn a gh action future and report its outcome to the UI as `ActionDone` /
-/// `ActionError`. Shared by the `OpenBrowser`/`Comment`/`Approve`/`Merge` arms.
+/// `ActionError`. Shared by the `OpenBrowser`/`Comment`/`Approve` arms; PR actions that
+/// change the PR go through `finish_pr_action` to re-fetch it as well.
 fn spawn_action(
     tx: mpsc::Sender<AppMessage>,
     fut: impl std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
@@ -404,6 +413,134 @@ pub async fn execute_merge(url: &str, strategy: &MergeStrategy) -> anyhow::Resul
     cmd.args(["pr", "merge", strategy.flag(), url]);
     run_background_command(cmd, "gh pr merge failed").await?;
     Ok(format!("PR merged ({})", strategy.label()))
+}
+
+/// Append a skipped merge precheck to the merge outcome, which is reported right after
+/// and would otherwise hide that the `BEHIND` check never ran.
+fn note_skipped_precheck(
+    result: anyhow::Result<String>,
+    precheck_error: Option<&str>,
+) -> anyhow::Result<String> {
+    let Some(precheck_error) = precheck_error else {
+        return result;
+    };
+    let note = format!(" — precheck skipped: {precheck_error}");
+    match result {
+        Ok(done) => Ok(done + &note),
+        Err(e) => Err(anyhow::anyhow!("{e}{note}")),
+    }
+}
+
+/// Re-fetch one item by number, store it in every query that caches it, and reload
+/// those queries' lists. Returns `false` when it no longer exists on GitHub. Callers
+/// hold an `item_refresh_sem` permit around it.
+async fn refetch_item(
+    pool: &SqlitePool,
+    gh: &Octocrab,
+    query_id: i64,
+    repo_owner: &str,
+    repo_name: &str,
+    number: i64,
+    tx: &mpsc::Sender<AppMessage>,
+) -> anyhow::Result<bool> {
+    let Some(mut item) = github::fetch_item(gh, query_id, repo_owner, repo_name, number).await?
+    else {
+        return Ok(false);
+    };
+    let mut query_ids = db::query_ids_with_item(pool, repo_owner, repo_name, number).await?;
+    if !query_ids.contains(&query_id) {
+        query_ids.push(query_id);
+    }
+    for id in query_ids {
+        item.query_id = id;
+        db::upsert_item(pool, &item).await?;
+        load_items_task(pool.clone(), id, false, tx.clone()).await;
+    }
+    Ok(true)
+}
+
+/// Merge `target`, unless GitHub says it is behind a base that must be merged in first:
+/// then ask the front-end to offer Update branch instead.
+async fn merge_with_precheck(
+    pool: SqlitePool,
+    gh: Octocrab,
+    sem: Arc<Semaphore>,
+    target: PrTarget,
+    strategy: MergeStrategy,
+    tx: mpsc::Sender<AppMessage>,
+) {
+    let state =
+        github::fetch_merge_state(&gh, &target.repo_owner, &target.repo_name, target.number).await;
+    if let Ok(state) = &state
+        && merge_precheck(state.status.as_deref(), state.can_update_branch)
+            == MergePrecheck::OfferUpdate
+    {
+        let _ = tx
+            .send(AppMessage::MergeBlockedBehind {
+                target: target.clone(),
+                base_ref: state.base_ref.clone(),
+            })
+            .await;
+        // The cached flag may predate the base moving on; bring the marker in line with
+        // what the prompt says.
+        refresh_after_action(&pool, &gh, &sem, &target, &tx).await;
+        return;
+    }
+    // Not knowing is no reason to block: gh pr merge has the final say.
+    let precheck_error = state.err().map(|e| e.to_string());
+    let result = execute_merge(&target.url, &strategy).await;
+    let result = note_skipped_precheck(result, precheck_error.as_deref());
+    finish_pr_action(result, &pool, &gh, &sem, &target, &tx).await;
+}
+
+/// Report a PR action on `target` to the UI, then re-fetch the PR so the cached state,
+/// list marker and badge follow. The report goes first: it is the outcome the user
+/// waits for, and the re-fetch may queue behind other refreshes on `sem`.
+async fn finish_pr_action(
+    result: anyhow::Result<String>,
+    pool: &SqlitePool,
+    gh: &Octocrab,
+    sem: &Semaphore,
+    target: &PrTarget,
+    tx: &mpsc::Sender<AppMessage>,
+) {
+    match result {
+        Ok(done) => {
+            let _ = tx.send(AppMessage::ActionDone(done)).await;
+        }
+        Err(e) => {
+            let _ = tx.send(AppMessage::ActionError(e.to_string())).await;
+            return;
+        }
+    }
+    refresh_after_action(pool, gh, sem, target, tx).await;
+}
+
+/// Re-fetch `target` after acting on it. A failure only leaves the view stale until the
+/// next sync, so it is reported as a status rather than as the action's outcome.
+async fn refresh_after_action(
+    pool: &SqlitePool,
+    gh: &Octocrab,
+    sem: &Semaphore,
+    target: &PrTarget,
+    tx: &mpsc::Sender<AppMessage>,
+) {
+    let _permit = sem.acquire().await.ok();
+    if let Err(e) = refetch_item(
+        pool,
+        gh,
+        target.query_id,
+        &target.repo_owner,
+        &target.repo_name,
+        target.number,
+        tx,
+    )
+    .await
+    {
+        let _ = tx
+            .send(AppMessage::Status(format!("Refresh failed: {e}")))
+            .await;
+    }
 }
 
 pub async fn load_items_task(
@@ -1343,9 +1480,16 @@ pub enum EngineCommand {
         event: ReviewEvent,
         body: Option<String>,
     },
+    /// Asks GitHub for the PR's merge state first; if it is `BEHIND` and the viewer can
+    /// update the branch, replies with `AppMessage::MergeBlockedBehind` instead of
+    /// merging. Otherwise (including when the check fails) it merges.
     Merge {
-        url: String,
+        target: PrTarget,
         strategy: MergeStrategy,
+    },
+    /// Merge the base branch into the PR's head, then re-fetch the PR.
+    UpdateBranch {
+        target: PrTarget,
     },
     /// Persist that a single cached item has been read (viewed). Identified by the
     /// same unique key as the items table. Fire-and-forget; the front-end updates
@@ -1756,31 +1900,22 @@ async fn command_loop(
                 let sem = item_refresh_sem.clone();
                 tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
-                    match github::fetch_item(&gh2, query_id, &repo_owner, &repo_name, number).await
+                    let status = match refetch_item(
+                        &pool2,
+                        &gh2,
+                        query_id,
+                        &repo_owner,
+                        &repo_name,
+                        number,
+                        &tx2,
+                    )
+                    .await
                     {
-                        Ok(Some(item)) => {
-                            if let Err(e) = db::upsert_item(&pool2, &item).await {
-                                let _ = tx2
-                                    .send(AppMessage::Status(format!("Refresh failed: {e}")))
-                                    .await;
-                                return;
-                            }
-                            load_items_task(pool2, query_id, false, tx2.clone()).await;
-                            let _ = tx2
-                                .send(AppMessage::Status(format!("Refreshed #{number}")))
-                                .await;
-                        }
-                        Ok(None) => {
-                            let _ = tx2
-                                .send(AppMessage::Status(format!("#{number} no longer exists")))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx2
-                                .send(AppMessage::Status(format!("Refresh failed: {e}")))
-                                .await;
-                        }
-                    }
+                        Ok(true) => format!("Refreshed #{number}"),
+                        Ok(false) => format!("#{number} no longer exists"),
+                        Err(e) => format!("Refresh failed: {e}"),
+                    };
+                    let _ = tx2.send(AppMessage::Status(status)).await;
                 });
             }
             EngineCommand::EnqueueStale { skip_query_id } => {
@@ -1993,9 +2128,33 @@ async fn command_loop(
                     execute_review(&url, event, body.as_deref()).await
                 });
             }
-            EngineCommand::Merge { url, strategy } => {
-                spawn_action(msg_tx.clone(), async move {
-                    execute_merge(&url, &strategy).await
+            EngineCommand::Merge { target, strategy } => {
+                tokio::spawn(merge_with_precheck(
+                    pool.clone(),
+                    gh.clone(),
+                    item_refresh_sem.clone(),
+                    target,
+                    strategy,
+                    msg_tx.clone(),
+                ));
+            }
+            EngineCommand::UpdateBranch { target } => {
+                let (pool, gh, sem, tx) = (
+                    pool.clone(),
+                    gh.clone(),
+                    item_refresh_sem.clone(),
+                    msg_tx.clone(),
+                );
+                tokio::spawn(async move {
+                    let result = github::update_branch(
+                        &gh,
+                        &target.repo_owner,
+                        &target.repo_name,
+                        target.number,
+                    )
+                    .await
+                    .map(|outcome| outcome.message().to_string());
+                    finish_pr_action(result, &pool, &gh, &sem, &target, &tx).await;
                 });
             }
             EngineCommand::MarkItemRead {
@@ -2101,6 +2260,31 @@ mod tests {
     use crate::test_support::{seed_three_queries, test_pool};
     use rstest::rstest;
 
+    #[test]
+    fn skipped_precheck_is_noted_on_a_merged_outcome() {
+        let done = note_skipped_precheck(Ok("PR merged (Merge)".into()), Some("rate limited"));
+        assert_eq!(
+            done.unwrap(),
+            "PR merged (Merge) — precheck skipped: rate limited"
+        );
+    }
+
+    #[test]
+    fn skipped_precheck_is_noted_on_a_failed_merge() {
+        let failed =
+            note_skipped_precheck(Err(anyhow::anyhow!("not mergeable")), Some("rate limited"));
+        assert_eq!(
+            failed.unwrap_err().to_string(),
+            "not mergeable — precheck skipped: rate limited"
+        );
+    }
+
+    #[test]
+    fn a_precheck_that_ran_leaves_the_merge_outcome_alone() {
+        let clean = note_skipped_precheck(Ok("PR merged (Merge)".into()), None);
+        assert_eq!(clean.unwrap(), "PR merged (Merge)");
+    }
+
     /// Cache one unread PR by `alice` under `query_id`.
     async fn seed_unread_item(pool: &SqlitePool, query_id: i64) {
         let item = db::CachedItem {
@@ -2128,6 +2312,8 @@ mod tests {
             head_ref: None,
             review_decision: None,
             milestone: None,
+            behind_by: None,
+            can_update_branch: false,
             last_read_updated_at: None,
         };
         db::upsert_item(pool, &item).await.expect("seed item");

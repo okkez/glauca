@@ -113,6 +113,9 @@ impl App {
             merge_strategy_cursor: 0,
             review_event_cursor: 0,
             review_body: None,
+            action_item: None,
+            action_query_id: None,
+            pending_update_branch: None,
             comments: Vec::new(),
             comments_loading: false,
             comments_scroll: 0,
@@ -214,6 +217,68 @@ impl App {
         self.selected_entry().map(|e| e.root_query_id())
     }
 
+    /// A merge was held back because the PR is behind its base: prompt for Update branch.
+    /// Mid-input elsewhere, taking over the mode would throw away what was typed, so the
+    /// prompt waits for Normal mode. One prompt at a time: while one is pending, a later
+    /// blocked merge is only reported.
+    pub(crate) fn on_merge_blocked_behind(
+        &mut self,
+        target: glauca_core::types::PrTarget,
+        base_ref: Option<String>,
+    ) {
+        let not_merged = format!(
+            "{} is behind {} — not merged",
+            target.reference(),
+            base_ref.as_deref().unwrap_or("base")
+        );
+        if self.pending_update_branch.is_some() {
+            self.status = Some(not_merged);
+            return;
+        }
+        self.pending_update_branch = Some((target, base_ref));
+        if !self.open_pending_update_branch_prompt() {
+            self.status = Some(not_merged);
+        }
+    }
+
+    /// Open the pending update-branch prompt if the user is in Normal mode. Returns
+    /// whether it opened. Called before every redraw.
+    pub(crate) fn open_pending_update_branch_prompt(&mut self) -> bool {
+        if self.input_mode != InputMode::Normal || self.pending_update_branch.is_none() {
+            return false;
+        }
+        self.input_mode = InputMode::ConfirmUpdateBranch;
+        true
+    }
+
+    /// The PR the update-branch prompt was about, consuming it.
+    pub(crate) fn take_update_branch_target(&mut self) -> Option<glauca_core::types::PrTarget> {
+        self.pending_update_branch.take().map(|(target, _)| target)
+    }
+
+    /// Open the action menu for the selected item.
+    pub(crate) fn open_action_menu(&mut self) {
+        self.action_item = self.selected_item().cloned();
+        self.action_query_id = self.selected_root_query_id();
+        self.action_cursor = 0;
+        self.input_mode = InputMode::ActionMenu;
+    }
+
+    /// The item the action menu was opened on, as a PR action target in the query it
+    /// was opened from.
+    pub(crate) fn action_pr_target(&self) -> Option<glauca_core::types::PrTarget> {
+        let item = self.action_item.as_ref()?;
+        let query_id = self.action_query_id?;
+        Some(glauca_core::types::PrTarget::for_item(query_id, item))
+    }
+
+    /// Open the merge-strategy menu for the action menu's PR. It is only reachable from
+    /// the action menu, so `action_pr_target` still names the PR when a strategy is picked.
+    pub(crate) fn begin_merge(&mut self) {
+        self.merge_strategy_cursor = 0;
+        self.input_mode = InputMode::MergeMenu;
+    }
+
     pub(crate) fn clamp_item_cursor(&mut self) {
         let max = self.filtered_items().len().saturating_sub(1);
         if self.item_cursor > max {
@@ -221,12 +286,24 @@ impl App {
         }
     }
 
-    /// Install `items` as the visible list, clamping the cursor. `is_new` is already set
-    /// per item by `cached_item_to_item_entry`, so nothing is recomputed here.
+    /// Install `items` as the visible list, keeping the cursor on the same item when it is
+    /// still listed and clamping it otherwise. `is_new` is already set per item by
+    /// `cached_item_to_item_entry`, so nothing is recomputed here.
     pub(crate) fn apply_items_to_view(&mut self, items: Vec<ItemEntry>) {
-        self.items = items;
+        let selected_idx = self
+            .selected_item()
+            .and_then(|sel| self.items.iter().position(|it| std::ptr::eq(it, sel)));
+        let old_items = std::mem::replace(&mut self.items, items);
         self.items_version = self.items_version.wrapping_add(1);
-        self.clamp_item_cursor();
+        let selected_pos = selected_idx.and_then(|i| {
+            self.filtered_items()
+                .iter()
+                .position(|it| it.is_same_item(&old_items[i]))
+        });
+        match selected_pos {
+            Some(pos) => self.item_cursor = pos,
+            None => self.clamp_item_cursor(),
+        }
     }
 
     /// Empty the visible list, invalidating the memoized filter cache. Use this
@@ -317,6 +394,75 @@ mod tests {
     use glauca_core::types::FilterStreamEntry;
     use rstest::rstest;
 
+    fn target(number: i64) -> glauca_core::types::PrTarget {
+        glauca_core::types::PrTarget {
+            query_id: 1,
+            repo_owner: "owner".into(),
+            repo_name: "repo".into(),
+            number,
+            url: format!("https://github.com/owner/repo/pull/{number}"),
+        }
+    }
+
+    #[test]
+    fn blocked_behind_in_normal_mode_opens_confirm() {
+        let mut app = make_app_with_items(&["First"]);
+        app.on_merge_blocked_behind(target(42), Some("master".into()));
+        assert_eq!(app.input_mode, InputMode::ConfirmUpdateBranch);
+        assert_eq!(app.pending_update_branch.as_ref().unwrap().0.number, 42);
+    }
+
+    #[test]
+    fn blocked_behind_while_in_other_mode_prompts_once_back_in_normal() {
+        let mut app = make_app_with_items(&["First"]);
+        app.input_mode = InputMode::Filter;
+        app.on_merge_blocked_behind(target(42), Some("master".into()));
+        assert_eq!(app.input_mode, InputMode::Filter);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("owner/repo#42 is behind master — not merged")
+        );
+
+        assert!(!app.open_pending_update_branch_prompt());
+        assert_eq!(app.input_mode, InputMode::Filter);
+
+        app.input_mode = InputMode::Normal;
+        assert!(app.open_pending_update_branch_prompt());
+        assert_eq!(app.input_mode, InputMode::ConfirmUpdateBranch);
+        assert_eq!(app.pending_update_branch.as_ref().unwrap().0.number, 42);
+    }
+
+    // Only one prompt can be pending; a second blocked merge must not silently replace
+    // the first, so it is reported on the status line instead.
+    #[test]
+    fn a_second_blocked_merge_keeps_the_first_prompt() {
+        let mut app = make_app_with_items(&["First"]);
+        app.on_merge_blocked_behind(target(42), Some("master".into()));
+        app.on_merge_blocked_behind(target(43), Some("master".into()));
+        assert_eq!(app.input_mode, InputMode::ConfirmUpdateBranch);
+        assert_eq!(app.pending_update_branch.as_ref().unwrap().0.number, 42);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("owner/repo#43 is behind master — not merged")
+        );
+    }
+
+    #[test]
+    fn no_prompt_without_a_pending_update_branch() {
+        let mut app = make_app_with_items(&["First"]);
+        assert!(!app.open_pending_update_branch_prompt());
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn confirm_uses_target_from_message() {
+        // The selection moved to #1 while the prompt for #42 was up.
+        let mut app = make_app_with_items(&["First"]);
+        app.on_merge_blocked_behind(target(42), None);
+        assert_eq!(app.take_update_branch_target().map(|t| t.number), Some(42));
+        assert!(app.pending_update_branch.is_none());
+    }
+
     #[test]
     fn clamp_item_cursor_when_filter_reduces_list() {
         let mut app = make_app_with_items(&["Fix alpha", "Fix beta", "Add gamma"]);
@@ -350,6 +496,55 @@ mod tests {
         assert!(app.pending_changes.is_empty());
         assert!(app.pending_items.is_none());
         assert_eq!(app.filtered_items().len(), 2);
+    }
+
+    // A re-fetch re-sorts the list by updated_at. A cursor left at the old index would
+    // point a pending Merge confirmation at a different PR.
+    #[test]
+    fn apply_items_keeps_the_selected_item_when_the_list_reorders() {
+        let mut app = make_app_with_items(&["a", "b", "c"]);
+        app.item_cursor = 1;
+        assert_eq!(app.selected_item().unwrap().number, 2);
+
+        let mut reordered = app.items.clone();
+        reordered.rotate_right(1); // #3, #1, #2
+        app.apply_items_to_view(reordered);
+
+        assert_eq!(app.selected_item().unwrap().number, 2);
+    }
+
+    // A reload while the action or merge menu is open can drop the chosen PR from the
+    // filtered list (merged elsewhere, say) and move the cursor to a neighbour; the left
+    // pane can move too. The choice must still go to the PR, and query, the menu opened on.
+    #[test]
+    fn action_target_is_fixed_when_the_menu_opens() {
+        let mut app = make_app_with_items(&["a", "b", "c"]);
+        app.item_cursor = 1;
+        app.open_action_menu();
+        app.begin_merge();
+        assert_eq!(app.input_mode, InputMode::MergeMenu);
+
+        let without_b = vec![app.items[0].clone(), app.items[2].clone()];
+        app.apply_items_to_view(without_b);
+        app.entries.push(LeftPaneEntry::Query(QueryEntry {
+            id: 2,
+            label: "other".into(),
+            query_str: "other".into(),
+            kind: "pull_request".into(),
+        }));
+        app.entry_cursor = 1;
+
+        let target = app.action_pr_target().expect("pinned target");
+        assert_eq!((target.query_id, target.number), (1, 2));
+    }
+
+    #[test]
+    fn apply_items_clamps_when_the_selected_item_is_gone() {
+        let mut app = make_app_with_items(&["a", "b", "c"]);
+        app.item_cursor = 2;
+        let remaining = app.items[..1].to_vec();
+        app.apply_items_to_view(remaining);
+        assert_eq!(app.item_cursor, 0);
     }
 
     #[test]

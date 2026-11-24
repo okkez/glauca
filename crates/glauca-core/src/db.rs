@@ -867,6 +867,11 @@ pub struct CachedItem {
     pub head_ref: Option<String>,
     pub review_decision: Option<String>,
     pub milestone: Option<String>,
+    /// Commits the head is behind its base. Only a by-number re-fetch fills it; a search
+    /// upsert keeps the stored value (see `upsert_item_with`).
+    pub behind_by: Option<i64>,
+    /// GitHub's `viewerCanUpdateBranch`. Every fetch carries it, so searches overwrite it.
+    pub can_update_branch: bool,
     /// The `updated_at` the user had seen when they last read this item. `None`
     /// means never read. Preserved across re-syncs so a later update (advancing
     /// `updated_at`) makes the item unread again. See `logic::is_item_unread`.
@@ -910,14 +915,15 @@ where
 {
     let is_draft_int = item.is_draft as i64;
     let repo_private_int = item.repo_private as i64;
+    let can_update_branch_int = item.can_update_branch as i64;
     sqlx::query!(
         r#"
         INSERT INTO items
             (query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
              author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
              reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
-             review_decision, milestone, last_read_updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             review_decision, milestone, last_read_updated_at, behind_by, can_update_branch)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (query_id, repo_owner, repo_name, number)
         DO UPDATE SET
             title               = excluded.title,
@@ -939,6 +945,14 @@ where
             head_ref            = excluded.head_ref,
             review_decision     = excluded.review_decision,
             milestone           = excluded.milestone,
+            -- Searches don't fetch the behind count, so only a by-number re-fetch may
+            -- overwrite it. A search that flips can_update_branch makes it stale.
+            behind_by           = CASE
+                WHEN NOT ? THEN excluded.behind_by
+                WHEN items.can_update_branch = excluded.can_update_branch THEN items.behind_by
+                ELSE NULL
+            END,
+            can_update_branch   = excluded.can_update_branch,
             -- A search that returned this item proves it still matches, so clear its
             -- prune strikes; a by-number re-fetch proves nothing, so it leaves them.
             missing_count       = CASE WHEN ? THEN 0 ELSE missing_count END
@@ -970,11 +984,32 @@ where
         item.review_decision,
         item.milestone,
         item.last_read_updated_at,
+        item.behind_by,
+        can_update_branch_int,
+        matched_query,
         matched_query,
     )
     .execute(exec)
     .await?;
     Ok(())
+}
+
+/// Every query whose cache holds this item.
+pub async fn query_ids_with_item(
+    pool: &SqlitePool,
+    repo_owner: &str,
+    repo_name: &str,
+    number: i64,
+) -> Result<Vec<i64>> {
+    let ids = sqlx::query_scalar!(
+        "SELECT query_id FROM items WHERE repo_owner = ? AND repo_name = ? AND number = ?",
+        repo_owner,
+        repo_name,
+        number,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(ids)
 }
 
 /// Fetch all cached items for a query.
@@ -984,7 +1019,7 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
         SELECT query_id, kind, repo_owner, repo_name, repo_private, number, title, url, author,
                author_avatar_url, state, updated_at, labels, comment_count, requested_reviewers,
                reviews, body, assignees, is_draft, created_at_item, base_ref, head_ref,
-               review_decision, milestone, last_read_updated_at
+               review_decision, milestone, last_read_updated_at, behind_by, can_update_branch
         FROM items
         WHERE query_id = ?
         ORDER BY updated_at DESC
@@ -1021,6 +1056,8 @@ pub async fn fetch_items(pool: &SqlitePool, query_id: i64) -> Result<Vec<CachedI
             head_ref: r.head_ref,
             review_decision: r.review_decision,
             milestone: r.milestone,
+            behind_by: r.behind_by,
+            can_update_branch: r.can_update_branch != 0,
             last_read_updated_at: r.last_read_updated_at,
         })
         .collect())
@@ -1838,6 +1875,124 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "Fix bug");
         assert_eq!(items[0].author.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn behind_by_round_trips() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        let mut behind = make_item(qid, 1, "Behind");
+        behind.behind_by = Some(2);
+        upsert_item(&pool, &behind).await.expect("upsert behind");
+        upsert_item(&pool, &make_item(qid, 2, "Unknown"))
+            .await
+            .expect("upsert unknown");
+
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        let get = |n: i64| items.iter().find(|i| i.number == n).unwrap();
+        assert_eq!(get(1).behind_by, Some(2));
+        assert_eq!(get(2).behind_by, None);
+    }
+
+    #[tokio::test]
+    async fn behind_by_is_kept_by_searches_and_replaced_by_refetches() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        let mut fetched = make_item(qid, 1, "PR");
+        fetched.behind_by = Some(2);
+        upsert_item(&pool, &fetched)
+            .await
+            .expect("single-item upsert");
+
+        // A search never carries the behind count, so it must not wipe what a by-number fetch stored.
+        upsert_items(&pool, &[make_item(qid, 1, "PR")])
+            .await
+            .expect("search upsert");
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        assert_eq!(items[0].behind_by, Some(2));
+
+        let mut refreshed = make_item(qid, 1, "PR");
+        refreshed.behind_by = Some(0);
+        upsert_item(&pool, &refreshed)
+            .await
+            .expect("re-fetch upsert");
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        assert_eq!(items[0].behind_by, Some(0));
+    }
+
+    // The count was measured while the old flag held; once the flag flips it says nothing
+    // about the new state, and showing it would present a stale number as fact.
+    #[tokio::test]
+    async fn search_flipping_can_update_branch_forgets_behind_by() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        let mut fetched = make_item(qid, 1, "PR");
+        fetched.behind_by = Some(2);
+        fetched.can_update_branch = true;
+        upsert_item(&pool, &fetched)
+            .await
+            .expect("single-item upsert");
+
+        upsert_items(&pool, &[make_item(qid, 1, "PR")])
+            .await
+            .expect("search upsert");
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        assert_eq!(items[0].behind_by, None);
+    }
+
+    #[tokio::test]
+    async fn query_ids_with_item_lists_every_query_caching_it() {
+        let (pool, _file) = test_pool().await;
+        let q1 = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+        let q2 = upsert_query(&pool, "is:pr review-requested:@me", "pull_request", None)
+            .await
+            .expect("upsert query");
+        let q3 = upsert_query(&pool, "is:pr author:@me", "pull_request", None)
+            .await
+            .expect("upsert query");
+        upsert_item(&pool, &make_item(q1, 1, "PR")).await.unwrap();
+        upsert_item(&pool, &make_item(q2, 1, "PR")).await.unwrap();
+        upsert_item(&pool, &make_item(q3, 2, "Other"))
+            .await
+            .unwrap();
+
+        let mut ids = query_ids_with_item(&pool, "owner", "repo", 1)
+            .await
+            .unwrap();
+        ids.sort();
+        assert_eq!(ids, vec![q1, q2]);
+    }
+
+    #[tokio::test]
+    async fn search_upsert_overwrites_can_update_branch() {
+        let (pool, _file) = test_pool().await;
+        let qid = upsert_query(&pool, "repo:owner/r is:pr", "pull_request", None)
+            .await
+            .expect("upsert query");
+
+        let mut behind = make_item(qid, 1, "PR");
+        behind.can_update_branch = true;
+        upsert_items(&pool, &[behind]).await.expect("search upsert");
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        assert!(items[0].can_update_branch);
+
+        // Unlike behind_by, every search carries it, so a later search clears it.
+        upsert_items(&pool, &[make_item(qid, 1, "PR")])
+            .await
+            .expect("search upsert");
+        let items = fetch_items(&pool, qid).await.expect("fetch items");
+        assert!(!items[0].can_update_branch);
     }
 
     #[tokio::test]

@@ -86,6 +86,9 @@ pub enum InputMode {
     CommentsPopup,
     /// Keybinding cheat-sheet overlay (opened with `?`).
     Help,
+    /// U/n prompt to update a PR's branch after a merge was held back because it is
+    /// behind its base. The PR is in `App::pending_update_branch`.
+    ConfirmUpdateBranch,
 }
 
 /// Memoized result of `filter_items` for the current list. `filtered_items()` is called
@@ -147,6 +150,14 @@ pub struct App {
     pub review_event_cursor: usize,
     /// Review comment captured from the editor, pending the review-event choice.
     pub review_body: Option<String>,
+    /// The item the `ActionMenu` was opened on. Fixed at open: a reload while the menu
+    /// (or the `MergeMenu` it leads to) is up can move the selection.
+    pub action_item: Option<ItemEntry>,
+    /// The root query selected when the `ActionMenu` opened, fixed for the same reason.
+    pub action_query_id: Option<i64>,
+    /// The PR (and its base ref) the `ConfirmUpdateBranch` prompt is about. Taken from
+    /// the engine's message, not the selection, which may have moved since.
+    pub pending_update_branch: Option<(glauca_core::types::PrTarget, Option<String>)>,
     /// Comments fetched for the comments popup.
     pub comments: Vec<CommentEntry>,
     /// True while comments are being fetched from the API.
@@ -213,6 +224,8 @@ enum Action {
     Confirm,
     ConfirmMergeStrategy,
     ConfirmReviewEvent,
+    /// `U` in the `ConfirmUpdateBranch` prompt.
+    ConfirmUpdateBranch,
     OpenBrowser,
     CopyUrl,
     /// Confirm the highlighted entry in the custom-action picker.

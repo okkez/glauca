@@ -33,7 +33,7 @@ use detail::draw_item_detail;
 use markdown::render_markdown;
 use modals::{
     draw_action_popup, draw_custom_action_popup, draw_help_popup, draw_merge_menu_popup,
-    draw_modal, draw_review_menu_popup,
+    draw_modal, draw_review_menu_popup, draw_update_branch_confirm_popup,
 };
 use panes::{draw_item_list, draw_query_list};
 use text::{highlight_spans, wrap_spans};
@@ -81,6 +81,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_comments_popup(f, app, area);
     } else if app.input_mode == InputMode::Help {
         draw_help_popup(f, area);
+    } else if app.input_mode == InputMode::ConfirmUpdateBranch {
+        draw_update_branch_confirm_popup(f, app, area);
     }
 }
 
@@ -164,6 +166,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::ReviewMenu => "REVIEW   j/k:move  Enter:submit  Esc:cancel".to_string(),
         InputMode::CommentsPopup => "COMMENTS  j/k:scroll  g/G:top/bottom  Esc/q:close".to_string(),
         InputMode::Help => "HELP     Esc/?/q:close".to_string(),
+        InputMode::ConfirmUpdateBranch => "CONFIRM  U:update  n/Esc:cancel".to_string(),
     };
 
     // Assemble only the segments that apply, in fixed order, then join, rather than
@@ -213,6 +216,31 @@ mod tests {
         (0..buf.area.width)
             .map(|x| buf[(x, y)].symbol())
             .collect::<String>()
+    }
+
+    fn frame_text(app: &App, width: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // The list marker is lowercase "behind"; the detail badge reads "Behind base".
+    #[rstest]
+    #[case::needs_update(true, true)]
+    #[case::up_to_date(false, false)]
+    fn item_list_marks_prs_that_need_update_branch(#[case] can_update: bool, #[case] shown: bool) {
+        let mut app = make_app_with_items(&["a PR"]);
+        app.items[0].state = "open".into();
+        app.items[0].can_update_branch = can_update;
+        assert_eq!(frame_text(&app, 200).contains("behind"), shown);
     }
 
     /// An `@me` filter with no login shows the wrong list and explains nothing, so the

@@ -4,7 +4,7 @@
 use gpui_component::menu::PopupMenu;
 
 use glauca_core::actions::CustomAction;
-use glauca_core::types::ItemEntry;
+use glauca_core::types::{ItemEntry, PrTarget};
 
 use super::*;
 
@@ -24,9 +24,11 @@ impl GlaucaApp {
             MenuKind::Item(item) => self.actions_for_item(item),
             _ => Vec::new(),
         };
+        // Read now, not when an action is picked: the selection can move meanwhile.
+        let query_id = self.selected_root_query_id();
         let app = cx.entity();
         let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
-            populate_menu(menu, &app, kind, custom_actions, window, cx)
+            populate_menu(menu, &app, kind, query_id, custom_actions, window, cx)
         });
         cx.subscribe(&menu, |this, _menu, _e: &DismissEvent, cx| {
             this.menu = None;
@@ -39,10 +41,13 @@ impl GlaucaApp {
         cx.notify();
     }
 
+    /// Run `action` on `item`, which belongs to query `query_id` (the root query
+    /// selected when the menu opened).
     pub(crate) fn dispatch_action(
         &mut self,
         action: ItemAction,
         item: ItemEntry,
+        query_id: Option<i64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -52,12 +57,16 @@ impl GlaucaApp {
             }),
             ItemAction::Comment => self.open_comment_dialog(item, window, cx),
             ItemAction::ApprovePR => self.open_review_dialog(item, window, cx),
-            ItemAction::MergePR => self.open_merge_dialog(item, window, cx),
+            ItemAction::MergePR => {
+                if let Some(query_id) = query_id {
+                    self.open_merge_dialog(PrTarget::for_item(query_id, &item), window, cx);
+                }
+            }
             ItemAction::ViewComments => self.open_comments(item, window, cx),
             ItemAction::CopyUrl => cx.write_to_clipboard(ClipboardItem::new_string(item.url)),
             ItemAction::RefreshItem => {
                 let number = item.number;
-                if let Some(query_id) = self.selected_root_query_id() {
+                if let Some(query_id) = query_id {
                     self.send(EngineCommand::RefreshItem {
                         query_id,
                         repo_owner: item.repo_owner,
@@ -70,6 +79,14 @@ impl GlaucaApp {
             // octorus is a terminal TUI launched only from the CLI front-end; it
             // is never offered in the GUI menu, so this arm is unreachable.
             ItemAction::ReviewOctorus => {}
+            ItemAction::UpdateBranch => {
+                if let Some(query_id) = query_id {
+                    self.send(EngineCommand::UpdateBranch {
+                        target: PrTarget::for_item(query_id, &item),
+                    });
+                    self.status = Some(format!("Updating branch of #{}…", item.number));
+                }
+            }
         }
     }
 }
@@ -98,6 +115,7 @@ pub(crate) fn populate_menu(
     mut menu: PopupMenu,
     app: &Entity<GlaucaApp>,
     kind: MenuKind,
+    query_id: Option<i64>,
     custom_actions: Vec<CustomAction>,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
@@ -107,9 +125,9 @@ pub(crate) fn populate_menu(
             let item = *item;
             for action in ItemAction::available_for(&item.kind) {
                 let item = item.clone();
-                let label = action.label().to_string();
+                let label = action.label_for(&item);
                 menu = app_menu_item(menu, app, label, move |this, window, cx| {
-                    this.dispatch_action(action.clone(), item.clone(), window, cx);
+                    this.dispatch_action(action.clone(), item.clone(), query_id, window, cx);
                 });
             }
             // Cascading submenu of user-defined custom actions applicable to this

@@ -127,7 +127,13 @@ impl GlaucaApp {
             })
             .when_some(
                 item.base_ref.as_ref().zip(item.head_ref.as_ref()),
-                |e, (base, head)| e.child(detail_field("branch", &format!("{head} → {base}"), cx)),
+                |e, (base, head)| {
+                    let mut branch = format!("{head} → {base}");
+                    if let Some(badge) = item.branch_update_badge() {
+                        branch.push_str(&format!("  ·  {badge}"));
+                    }
+                    e.child(detail_field("branch", &branch, cx))
+                },
             )
             .when(!item.assignees.is_empty(), |e| {
                 e.child(detail_people_field(

@@ -173,10 +173,17 @@ pub(super) fn draw_item_detail(f: &mut Frame, app: &App, area: Rect) {
             // PR-only fields
             if is_pr {
                 if let (Some(base), Some(head)) = (&item.base_ref, &item.head_ref) {
-                    lines.push(Line::from(vec![
+                    let mut spans = vec![
                         Span::styled("Branch:   ", Style::default().fg(Color::Gray)),
                         Span::raw(format!("{head} → {base}")),
-                    ]));
+                    ];
+                    if let Some(badge) = item.branch_update_badge() {
+                        spans.push(Span::styled(
+                            format!("  {badge}"),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
                 }
                 if let Some(rd) = &item.review_decision {
                     let (icon, style) = app.icons.review_decision_badge(rd);

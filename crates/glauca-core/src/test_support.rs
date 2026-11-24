@@ -85,6 +85,8 @@ pub fn make_item(query_id: i64, number: i64, title: &str) -> CachedItem {
         head_ref: None,
         review_decision: None,
         milestone: None,
+        behind_by: None,
+        can_update_branch: false,
         last_read_updated_at: None,
     }
 }

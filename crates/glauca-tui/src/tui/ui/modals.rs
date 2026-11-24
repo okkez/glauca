@@ -155,7 +155,7 @@ fn draw_filter_stream_modal(f: &mut Frame, app: &App, area: Rect, title: &str, c
 }
 
 pub(super) fn draw_action_popup(f: &mut Frame, app: &App, area: Rect) {
-    let item = match app.selected_item() {
+    let item = match app.action_item.as_ref() {
         Some(item) => item,
         None => return,
     };
@@ -177,14 +177,15 @@ pub(super) fn draw_action_popup(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, action)| {
+            let label = action.label_for(item);
             if i == app.action_cursor {
-                ListItem::new(format!(" ▶ {} ", action.label())).style(
+                ListItem::new(format!(" ▶ {label} ")).style(
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                ListItem::new(format!("   {} ", action.label()))
+                ListItem::new(format!("   {label} "))
             }
         })
         .collect();
@@ -362,6 +363,40 @@ pub(super) fn draw_merge_menu_popup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(List::new(items), chunks[0]);
     f.render_widget(
         Paragraph::new("j/k: move  Enter: confirm  Esc: back")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+}
+
+/// The U/n prompt shown when a merge was held back because the PR is behind its base.
+pub(super) fn draw_update_branch_confirm_popup(f: &mut Frame, app: &App, area: Rect) {
+    let Some((target, base_ref)) = &app.pending_update_branch else {
+        return;
+    };
+    let prompt = glauca_core::types::update_branch_prompt(target, base_ref.as_deref());
+    let width = (prompt.chars().count() as u16 + 4).max(40);
+    let popup_area = centered_rect_fixed(width, 4, area);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Update branch ");
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(prompt).alignment(Alignment::Center),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new("U: update  n/Esc: cancel")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center),
         chunks[1],
